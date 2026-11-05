@@ -1,0 +1,73 @@
+---
+// 篇页和文章页左侧的目录树：只显示当前章（篇 › 讲），顶部 1–5 切章；不用线条。
+import { CH, PN, partLs, chLs, chName, pad, fastCount } from '../data/course';
+
+interface Props { ch: number; part: number; lec?: number }
+const { ch, part, lec = 0 } = Astro.props;
+---
+<aside class="ai-side" id="side" aria-label="课程目录" data-here={ch}>
+  <a class="ai-side-home" href="/">← 学习路线</a>
+  <div class="ai-chsw" role="group" aria-label="切换章">
+    {CH.map((x) => (
+      <button data-tch={x.n} aria-pressed={String(x.n === ch)} class={x.n === ch ? 'is-here' : undefined} title={chName(x)}>{x.n}</button>
+    ))}
+  </div>
+  {CH.map((c) => (
+    <div class="ai-tree" data-ch={c.n} hidden={c.n !== ch}>
+      <div class="ai-chname">{chName(c)}</div>
+      <div class="ai-chmeta">
+        {c.parts.length} 篇 · {chLs(c.n).length} 讲
+        {c.n !== ch && <a href="#" data-back>· 回到当前章</a>}
+      </div>
+      {c.parts.map((p) => {
+        const ls = partLs(p);
+        return (
+          <div>
+            <div class={'ai-tree-prow' + (p === part && !lec ? ' is-cur' : '')}>
+              <button class="ai-chev" data-exp aria-expanded="true" aria-label={`展开或收起第 ${p} 篇`}>▾</button>
+              <a href={`/p/${p}`}>第 {p} 篇 {PN[p]}</a>
+              <span class="ai-num"><span class="r-fast">{fastCount(ls)}/</span>{ls.length}</span>
+            </div>
+            <div class="ai-tree-ls">
+              {ls.map((l) => (
+                <a class={'ai-lk' + (l.opt ? ' is-opt' : '')} href={`/l/${l.id}`} data-skip={l.fast ? undefined : '1'} aria-current={l.id === lec ? 'true' : undefined}>
+                  <span class="ai-num">{pad(l.id)}</span><span>{l.title}</span>
+                  {l.key && <i class="ai-dot" title="重点"></i>}
+                </a>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  ))}
+</aside>
+
+<script>
+  const side = document.getElementById('side');
+  if (side) {
+    const here = side.dataset.here!;
+    const show = (n: string) => {
+      side.querySelectorAll<HTMLElement>('.ai-tree').forEach((t) => (t.hidden = t.dataset.ch !== n));
+      side.querySelectorAll('[data-tch]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.tch === n)));
+    };
+    side.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      const sw = t.closest<HTMLElement>('[data-tch]');
+      if (sw) { show(sw.dataset.tch!); side.scrollTop = 0; return; }
+      if (t.closest('[data-back]')) { e.preventDefault(); show(here); return; }
+      const ex = t.closest<HTMLElement>('[data-exp]');
+      if (ex) {
+        const open = ex.getAttribute('aria-expanded') !== 'true';
+        ex.setAttribute('aria-expanded', String(open));
+        ex.textContent = open ? '▾' : '▸';
+        (ex.parentElement!.nextElementSibling as HTMLElement).hidden = !open;
+      }
+    });
+    const cur = side.querySelector('[aria-current="true"]') as HTMLElement | null;
+    if (cur) {
+      const r = cur.getBoundingClientRect(), R = side.getBoundingClientRect();
+      if (r.bottom > R.bottom) side.scrollTop += r.top - R.top - R.height / 3;
+    }
+  }
+</script>

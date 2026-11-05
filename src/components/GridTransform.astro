@@ -1,0 +1,202 @@
+---
+// 2×2 线性变换演示（行向量约定：y = x · W）。
+// W 的第 1 行是 (1, 0) 的去向，第 2 行是 (0, 1) 的去向。
+// 读者可以：改矩阵数字、点预设、拖动两个基向量的末端；用滑块 t 或「播放」看网格从原样（t = 0）一点点变到 W（t = 1）。
+// 图中的「F」用来看朝向：镜像变换后它会左右翻过来。
+import Mat from './Mat.astro';
+import MatBox from './MatBox.astro';
+
+interface Props {
+  m?: [[number, number], [number, number]];
+  title?: string;
+  caption?: string;
+  presets?: boolean;
+}
+const { m = [[2, 1], [0, 1]], title = '改矩阵、拖箭头，看整个平面怎么变', caption, presets = true } = Astro.props;
+const PRESETS: [string, number[][]][] = [
+  ['恒等', [[1, 0], [0, 1]]],
+  ['横向拉伸', [[2, 0], [0, 1]]],
+  ['旋转 30°', [[0.866, 0.5], [-0.5, 0.866]]],
+  ['剪切', [[1, 0], [1, 1]]],
+  ['镜像', [[-1, 0], [0, 1]]],
+  ['压扁', [[1, 0.5], [2, 1]]],
+];
+---
+<figure class="ai-gt" data-gridt data-m={JSON.stringify(m)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-vp-body">
+    <svg class="ai-vp-svg" viewBox="0 0 360 360" role="img" aria-label={title}></svg>
+    <div class="ai-vp-side">
+      <MatBox sym="W" color="ink" sub="2×2 · 可以直接改"><Mat name="G" v={m} labels={['第 1 行', '第 2 行']} edit /></MatBox>
+      {presets && (
+        <div class="ai-gt-pre">
+          {PRESETS.map(([n, v]) => <button data-preset={JSON.stringify(v)}>{n}</button>)}
+        </div>
+      )}
+      <div class="ai-vp-read" data-read></div>
+    </div>
+  </div>
+  <div class="ai-gt-play">
+    <button class="ai-pill ai-pill--solid" data-play>▶ 播放变换</button>
+    <label><span>t = <b data-tval>1</b></span><input type="range" min="0" max="1" step="0.01" value="1" data-t /></label>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type M2 = [[number, number], [number, number]];
+  const NS = 'http://www.w3.org/2000/svg';
+  let uid = 0;
+  const F_SHAPE: [number, number][] = [[0.25, 0.2], [0.25, 1.7], [1.25, 1.7], [1.25, 1.42], [0.53, 1.42], [0.53, 1.05], [1.05, 1.05], [1.05, 0.78], [0.53, 0.78], [0.53, 0.2]];
+
+  function init(fig: HTMLElement) {
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const read = fig.querySelector<HTMLElement>('[data-read]')!;
+    const tInput = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    const tVal = fig.querySelector<HTMLElement>('[data-tval]')!;
+    const playBtn = fig.querySelector<HTMLButtonElement>('[data-play]')!;
+    const table = fig.querySelector<HTMLTableElement>('[data-m="G"]')!;
+    const inputs = [0, 1].map((i) => [0, 1].map((j) => table.tBodies[0].rows[i].querySelectorAll('td')[j].querySelector('input')!));
+    const id = 'gt' + uid++;
+    const MIN = -3, MAX = 3, PAD = 20, SIZE = 360, S = (SIZE - 2 * PAD) / (MAX - MIN);
+    const X = (x: number) => PAD + (x - MIN) * S;
+    const Y = (y: number) => SIZE - PAD - (y - MIN) * S;
+    let W: M2 = JSON.parse(fig.dataset.m!);
+    let t = 1;
+    let anim = 0;
+    let fallback = 0;
+
+    const fmt = (v: number) => { v = Math.round(v * 1000) / 1000; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+    const par = (v: number) => (v < 0 ? '(' + fmt(v) + ')' : fmt(v));
+    const cur = (): M2 => [
+      [1 + (W[0][0] - 1) * t, W[0][1] * t],
+      [W[1][0] * t, 1 + (W[1][1] - 1) * t],
+    ];
+    const apply = (M: M2, u: number, v: number): [number, number] => [u * M[0][0] + v * M[1][0], u * M[0][1] + v * M[1][1]];
+
+    // static: clip, original grid, axes, markers, layers
+    let s = `<defs><clipPath id="${id}-clip"><rect x="${PAD}" y="${PAD}" width="${SIZE - 2 * PAD}" height="${SIZE - 2 * PAD}"/></clipPath>`;
+    for (const c of ['accent', 'key']) s += `<marker id="${id}-${c}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--${c})"/></marker>`;
+    s += `</defs><g class="ai-gt-orig">`;
+    for (let i = MIN; i <= MAX; i++) s += `<line x1="${X(i)}" y1="${Y(MIN)}" x2="${X(i)}" y2="${Y(MAX)}"/><line x1="${X(MIN)}" y1="${Y(i)}" x2="${X(MAX)}" y2="${Y(i)}"/>`;
+    s += `</g><g clip-path="url(#${id}-clip)" data-dyn></g>`;
+    svg.innerHTML = s;
+    const dyn = svg.querySelector<SVGGElement>('[data-dyn]')!;
+    const mkHandle = (row: 0 | 1, color: string) => {
+      const h = document.createElementNS(NS, 'circle');
+      h.setAttribute('r', '8');
+      h.setAttribute('class', 'ai-vp-handle');
+      h.setAttribute('style', `stroke: var(--${color})`);
+      h.setAttribute('tabindex', '0');
+      h.setAttribute('aria-label', row === 0 ? 'W 的第 1 行（(1, 0) 的去向）' : 'W 的第 2 行（(0, 1) 的去向）');
+      h.dataset.row = String(row);
+      svg.appendChild(h);
+      return h;
+    };
+    const handles = [mkHandle(0, 'accent'), mkHandle(1, 'key')];
+
+    function draw() {
+      const M = cur();
+      const P = (u: number, v: number) => { const p = apply(M, u, v); return `${X(p[0])},${Y(p[1])}`; };
+      let d = '';
+      for (let i = -9; i <= 9; i++) {
+        const a1 = apply(M, i, -9), a2 = apply(M, i, 9), b1 = apply(M, -9, i), b2 = apply(M, 9, i);
+        const axis = i === 0 ? ' is-axis' : '';
+        d += `<line class="ai-gt-line${axis}" x1="${X(a1[0])}" y1="${Y(a1[1])}" x2="${X(a2[0])}" y2="${Y(a2[1])}"/>`;
+        d += `<line class="ai-gt-line${axis}" x1="${X(b1[0])}" y1="${Y(b1[1])}" x2="${X(b2[0])}" y2="${Y(b2[1])}"/>`;
+      }
+      d += `<polygon class="ai-gt-unit" points="${P(0, 0)} ${P(1, 0)} ${P(1, 1)} ${P(0, 1)}"/>`;
+      d += `<polygon class="ai-gt-f" points="${F_SHAPE.map(([u, v]) => P(u, v)).join(' ')}"/>`;
+      const e1 = apply(M, 1, 0), e2 = apply(M, 0, 1);
+      const arrow = (p: [number, number], c: string) => (Math.hypot(p[0], p[1]) < 1e-9 ? '' :
+        `<line class="ai-vp-vec" x1="${X(0)}" y1="${Y(0)}" x2="${X(p[0])}" y2="${Y(p[1])}" style="stroke: var(--${c})" marker-end="url(#${id}-${c})"/>`);
+      d += arrow(e1, 'accent') + arrow(e2, 'key');
+      dyn.innerHTML = d;
+      handles[0].setAttribute('cx', String(X(e1[0]))); handles[0].setAttribute('cy', String(Y(e1[1])));
+      handles[1].setAttribute('cx', String(X(e2[0]))); handles[1].setAttribute('cy', String(Y(e2[1])));
+
+      const det = M[0][0] * M[1][1] - M[0][1] * M[1][0];
+      const px = apply(M, 1, 1);
+      const note = Math.abs(det) < 1e-6 ? '面积变成 0：整个平面被压成一条线（或一个点），不同的输入会落到同一个位置'
+        : det < 0 ? '行列式为负：平面被翻了过来，注意「F」变成了镜像'
+        : Math.abs(det - 1) < 0.005 ? '面积不变' : `面积变成原来的 ${fmt(det)} 倍`;
+      read.innerHTML =
+        (t < 1 ? `<div class="ai-vp-row ai-vp-hint">中间状态：t = ${fmt(t)}，矩阵从单位矩阵向 W 走了 ${Math.round(t * 100)}%</div>` : '')
+        + `<div class="ai-vp-row"><span>(1, 0) →</span><div><b class="c-accent">(${fmt(e1[0])}, ${fmt(e1[1])})</b>　即第 1 行</div></div>`
+        + `<div class="ai-vp-row"><span>(0, 1) →</span><div><b class="c-key">(${fmt(e2[0])}, ${fmt(e2[1])})</b>　即第 2 行</div></div>`
+        + `<div class="ai-vp-row"><span>(1, 1) →</span><div>1×第 1 行 + 1×第 2 行 = (${fmt(px[0])}, ${fmt(px[1])})</div></div>`
+        + `<div class="ai-vp-row"><span>行列式</span><div>${par(M[0][0])}×${par(M[1][1])} − ${par(M[0][1])}×${par(M[1][0])} = <b>${fmt(det)}</b></div></div>`
+        + `<div class="ai-vp-row ai-vp-hint">${note}</div>`;
+      tVal.textContent = fmt(t);
+      tInput.value = String(t);
+    }
+    const syncInputs = () => inputs.forEach((r, i) => r.forEach((inp, j) => { inp.value = fmt(W[i][j]).replace('−', '-'); }));
+    const readInputs = () => {
+      inputs.forEach((r, i) => r.forEach((inp, j) => { const v = parseFloat(inp.value.replace('−', '-')); W[i][j] = isNaN(v) ? 0 : v; }));
+    };
+    const stop = () => { cancelAnimationFrame(anim); clearTimeout(fallback); anim = 0; playBtn.textContent = '▶ 播放变换'; };
+    function play() {
+      stop();
+      const t0 = performance.now(), dur = 1400;
+      playBtn.textContent = '播放中…';
+      const step = (now: number) => {
+        const p = Math.min(1, (now - t0) / dur);
+        t = p < 0.5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+        draw();
+        if (p < 1) anim = requestAnimationFrame(step); else stop();
+      };
+      t = 0; draw();
+      anim = requestAnimationFrame(step);
+      // 页面在后台时浏览器会暂停动画帧：时间到了还没走完，就直接显示最终状态
+      fallback = window.setTimeout(() => { if (anim) { stop(); t = 1; draw(); } }, dur + 300);
+    }
+
+    fig.addEventListener('input', (e) => {
+      const tg = e.target as HTMLElement;
+      if (tg === tInput) { stop(); t = parseFloat(tInput.value); draw(); return; }
+      if (tg.tagName === 'INPUT') { stop(); readInputs(); t = 1; draw(); }
+    });
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-preset],[data-play]');
+      if (!b) return;
+      if (b.dataset.preset) { W = JSON.parse(b.dataset.preset); syncInputs(); play(); }
+      else play();
+    });
+
+    // drag the two basis tips = edit the two rows of W
+    let drag: 0 | 1 | null = null;
+    const snap = (v: number) => Math.max(MIN, Math.min(MAX, Math.round(v * 10) / 10));
+    const toUser = (e: PointerEvent): [number, number] => {
+      const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM()!.inverse());
+      return [snap(MIN + (pt.x - PAD) / S), snap(MIN + (SIZE - PAD - pt.y) / S)];
+    };
+    svg.addEventListener('pointerdown', (e) => {
+      const tg = e.target as SVGElement;
+      if (!tg.dataset?.row) return;
+      stop(); t = 1;
+      drag = Number(tg.dataset.row) as 0 | 1;
+      svg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    svg.addEventListener('pointermove', (e) => {
+      if (drag === null) return;
+      const p = toUser(e);
+      W[drag] = [p[0], p[1]];
+      syncInputs(); draw();
+    });
+    svg.addEventListener('pointerup', () => { drag = null; });
+    svg.addEventListener('pointercancel', () => { drag = null; });
+    svg.addEventListener('keydown', (e) => {
+      const tg = e.target as SVGElement;
+      if (!tg.dataset?.row) return;
+      const r = Number(tg.dataset.row) as 0 | 1;
+      const d = { ArrowLeft: [-0.1, 0], ArrowRight: [0.1, 0], ArrowUp: [0, 0.1], ArrowDown: [0, -0.1] }[e.key];
+      if (!d) return;
+      e.preventDefault(); stop(); t = 1;
+      W[r] = [snap(W[r][0] + d[0]), snap(W[r][1] + d[1])];
+      syncInputs(); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-gridt]').forEach(init);
+</script>

@@ -1,0 +1,137 @@
+---
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  view: 'home' | 'part' | 'lec';
+}
+const { title, view } = Astro.props;
+---
+<!doctype html>
+<html lang="zh-CN" data-route="full">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title} · AI Infra 课程</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
+    <script is:inline>
+      try { document.documentElement.dataset.route = localStorage.getItem('ai-route') || 'full'; } catch (e) {}
+    </script>
+  </head>
+  <body class={view === 'lec' ? 'is-read' : undefined}>
+    <div class="ai-app" id="app" data-side="closed">
+      <header class="ai-top" id="top">
+        <div class="ai-top-l">
+          {view !== 'home' && <button class="ai-menu" data-act="side">目录</button>}
+          <a class="ai-brand" href="/"><i></i>AI Infra 课程</a>
+        </div>
+        <button class="ai-searchbtn" data-act="pal"><span>搜索讲、篇或小节…</span><span class="ai-kbd">⌘K</span></button>
+        <div class="ai-top-r">
+          <div class="ai-seg" role="group" aria-label="学习路线">
+            <button data-route-btn="full">完整路线</button>
+            <button data-route-btn="fast">Infra 快速路线</button>
+          </div>
+        </div>
+      </header>
+      <slot />
+    </div>
+
+    <script>
+      /* ---------- 路线切换 ---------- */
+      const html = document.documentElement;
+      const routeBtns = document.querySelectorAll<HTMLButtonElement>('[data-route-btn]');
+      function syncRoute() {
+        routeBtns.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.routeBtn === html.dataset.route)));
+      }
+      routeBtns.forEach((b) =>
+        b.addEventListener('click', () => {
+          html.dataset.route = b.dataset.routeBtn;
+          try { localStorage.setItem('ai-route', b.dataset.routeBtn!); } catch (e) {}
+          syncRoute();
+        }),
+      );
+      syncRoute();
+
+      /* ---------- 顶栏：滚动后才出现分隔线 ---------- */
+      const top = document.getElementById('top')!;
+      const onScroll = () => top.classList.toggle('is-scrolled', window.scrollY > 4);
+      window.addEventListener('scroll', onScroll, { passive: true });
+      onScroll();
+
+      /* ---------- 窄屏目录抽屉 ---------- */
+      const app = document.getElementById('app')!;
+      document.querySelector('[data-act="side"]')?.addEventListener('click', () => {
+        app.dataset.side = app.dataset.side === 'open' ? 'closed' : 'open';
+      });
+
+      /* ---------- ⌘K 搜索 ---------- */
+      type Item = { k: string; href: string; num: string; t: string; sub: string; hay: string; sec?: string };
+      let IDX: Item[] | null = null;
+      let pal: HTMLDivElement | null = null;
+      let pres: Item[] = [];
+      let psel = 0;
+      const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      function hl(s: string, q: string) {
+        let out = esc(s);
+        q.toLowerCase().split(/\s+/).filter(Boolean).forEach((t) => {
+          out = out.replace(new RegExp(esc(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), (m) => '<mark>' + m + '</mark>');
+        });
+        return out;
+      }
+      function search(q: string) {
+        if (!IDX) return [];
+        const ts = q.toLowerCase().split(/\s+/).filter(Boolean);
+        if (!ts.length) return IDX.filter((x) => x.k === '篇');
+        const ord: Record<string, number> = { 篇: 0, 讲: 1, 小节: 2 };
+        return IDX.filter((x) => {
+          if (!ts.every((t) => x.hay.includes(t))) return false;
+          if (x.k === '小节') return ts.some((t) => x.sec!.includes(t));
+          return true;
+        }).sort((a, b) => ord[a.k] - ord[b.k]).slice(0, 40);
+      }
+      function draw() {
+        if (!pal) return;
+        const q = pal.querySelector('input')!.value.trim();
+        pres = search(q);
+        psel = Math.min(psel, Math.max(pres.length - 1, 0));
+        let last = '', out = '';
+        pres.forEach((x, i) => {
+          if (x.k !== last) { out += '<li class="ai-pal-k">' + (q ? x.k : '按篇跳转') + '</li>'; last = x.k; }
+          out += '<li role="option" aria-selected="' + (i === psel) + '" data-i="' + i + '"><a href="' + x.href + '"><span class="ai-num">' + x.num + '</span><span>' + hl(x.t, q) + '<small>' + hl(x.sub, q) + '</small></span><span class="ai-pal-kind">' + x.k + '</span></a></li>';
+        });
+        pal.querySelector('ul')!.innerHTML = IDX ? (out || '<li class="ai-pal-empty">没有找到。试试讲名、问题里的词，或「自注意力 手算」这样定位到小节。</li>') : '<li class="ai-pal-empty">正在加载…</li>';
+        pal.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+      }
+      async function openPal() {
+        if (pal) return;
+        pal = document.createElement('div');
+        pal.className = 'ai-pal-bg';
+        pal.innerHTML = '<div class="ai-pal" role="dialog" aria-label="搜索"><input placeholder="搜索讲名或问题；加空格可定位小节，如「KV 工程」" aria-label="搜索"><ul role="listbox"></ul><div class="ai-pal-foot">↑↓ 选择 · Enter 打开 · Esc 关闭</div></div>';
+        document.body.appendChild(pal);
+        psel = 0;
+        pal.querySelector('input')!.focus();
+        pal.addEventListener('input', () => { psel = 0; draw(); });
+        pal.addEventListener('mousedown', (e) => { if (e.target === pal) closePal(); });
+        draw();
+        if (!IDX) { IDX = await (await fetch('/search.json')).json(); draw(); }
+      }
+      function closePal() { pal?.remove(); pal = null; }
+      function pick(i: number) { const x = pres[i]; closePal(); if (x) location.href = x.href; }
+      document.querySelector('[data-act="pal"]')!.addEventListener('click', openPal);
+      document.addEventListener('keydown', (e) => {
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); pal ? closePal() : openPal(); return; }
+        if (!pal) {
+          const tag = (document.activeElement as HTMLElement | null)?.tagName || '';
+          if (e.key === '/' && !/INPUT|TEXTAREA|SELECT/.test(tag)) { e.preventDefault(); openPal(); }
+          return;
+        }
+        if (e.key === 'Escape') closePal();
+        else if (e.key === 'ArrowDown') { e.preventDefault(); psel = Math.min(psel + 1, pres.length - 1); draw(); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); psel = Math.max(psel - 1, 0); draw(); }
+        else if (e.key === 'Enter') { e.preventDefault(); pick(psel); }
+      });
+    </script>
+  </body>
+</html>

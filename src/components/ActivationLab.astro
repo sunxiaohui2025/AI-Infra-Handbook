@@ -1,0 +1,195 @@
+---
+// 激活函数实验台。
+//   mode="curve"：切换激活函数，看曲线和导数（斜率）；拖动滑块 z，读出 f(z) 和 f'(z)；可以叠加其他函数做对比。
+//   mode="fit"  ：一层 N 个神经元 h_k = f(s·(x − c_k))，转折点 c_k 均匀排在 [−3, 3]，
+//                 输出 ŷ = v₀ + Σ v_k·h_k。输出权重 v 用最小二乘直接算出（不是训练），看不同激活函数、不同 N 能把曲线拟合得多好。
+// 可传 acts（按钮列表）、act（默认选中）、n（fit 的神经元个数）、z（curve 的初始 z）、title、caption。
+type Act = 'none' | 'step' | 'relu' | 'gelu' | 'silu' | 'sigmoid' | 'tanh';
+interface Props { mode?: 'curve' | 'fit'; acts?: Act[]; act?: Act; n?: number; z?: number; title?: string; caption?: string }
+const {
+  mode = 'curve',
+  acts = mode === 'fit' ? ['none', 'relu', 'gelu', 'silu'] : ['relu', 'gelu', 'silu', 'sigmoid', 'tanh', 'step'],
+  act = 'relu', n = 6, z = -1,
+  title = mode === 'fit' ? '用 N 个神经元拟合一条曲线' : '切换激活函数，看曲线和斜率',
+  caption,
+} = Astro.props;
+const NAME: Record<Act, string> = { none: '不加激活', step: '阶跃', relu: 'ReLU', gelu: 'GELU', silu: 'SiLU', sigmoid: 'Sigmoid', tanh: 'Tanh' };
+---
+<figure class="ai-gt ai-al" data-actlab data-cfg={JSON.stringify({ mode, act, n, z })}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets">
+    {acts.map((a) => <button data-a={a} aria-pressed={a === act ? 'true' : 'false'}>{NAME[a]}</button>)}
+  </div>
+  <div class="ai-vp-body">
+    <svg class="ai-vp-svg" viewBox="0 0 360 300" role="img" aria-label={title}></svg>
+    <div class="ai-vp-side">
+      <div class="ai-pc-sl">
+        {mode === 'curve'
+          ? <label><span><i>z</i> = <b data-v></b></span><input type="range" min="-4" max="4" step="0.05" value={z} data-s /></label>
+          : <label><span>N = <b data-v></b></span><input type="range" min="1" max="12" step="1" value={n} data-s /></label>}
+      </div>
+      <label class="ai-al-chk"><input type="checkbox" data-opt checked={mode === 'curve'} />{mode === 'curve' ? '叠加其他几个函数做对比' : '画出每个神经元的贡献'}</label>
+      <div class="ai-vp-read" data-read></div>
+    </div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Act = 'none' | 'step' | 'relu' | 'gelu' | 'silu' | 'sigmoid' | 'tanh';
+  const NAME: Record<Act, string> = { none: '不加激活', step: '阶跃', relu: 'ReLU', gelu: 'GELU', silu: 'SiLU', sigmoid: 'Sigmoid', tanh: 'Tanh' };
+  // 误差函数（Abramowitz–Stegun 7.1.26，误差 < 1.5e-7），用来算 GELU 的 Φ(z)
+  const erf = (x: number) => {
+    const s = Math.sign(x); x = Math.abs(x);
+    const t = 1 / (1 + 0.3275911 * x);
+    const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+    return s * y;
+  };
+  const sig = (z: number) => 1 / (1 + Math.exp(-z));
+  const Phi = (z: number) => 0.5 * (1 + erf(z / Math.SQRT2));
+  const phi = (z: number) => Math.exp(-z * z / 2) / Math.sqrt(2 * Math.PI);
+  const F: Record<Act, (z: number) => number> = {
+    none: (z) => z, step: (z) => (z > 0 ? 1 : 0), relu: (z) => Math.max(0, z),
+    gelu: (z) => z * Phi(z), silu: (z) => z * sig(z), sigmoid: sig, tanh: Math.tanh,
+  };
+  const D: Record<Act, (z: number) => number> = {
+    none: () => 1, step: () => 0, relu: (z) => (z > 0 ? 1 : 0),
+    gelu: (z) => Phi(z) + z * phi(z), silu: (z) => sig(z) * (1 + z * (1 - sig(z))),
+    sigmoid: (z) => sig(z) * (1 - sig(z)), tanh: (z) => 1 - Math.tanh(z) ** 2,
+  };
+  // zs：z 的数值；zp：做乘数时加了括号的 z
+  const FORM: Record<Act, (zs: string, zp: string) => string> = {
+    none: (zs) => `f(${zs}) = ${zs}`,
+    step: (zs) => `f(${zs}) = 1（z &gt; 0）或 0（z ≤ 0）`,
+    relu: (zs) => `f(${zs}) = max(0, ${zs})`,
+    gelu: (zs, zp) => `f(${zs}) = ${zp} × Φ(${zs})`,
+    silu: (zs, zp) => `f(${zs}) = ${zp} × σ(${zs})`,
+    sigmoid: (zs) => `f(${zs}) = 1 / (1 + e<sup>−(${zs})</sup>)`,
+    tanh: (zs) => `f(${zs}) = tanh(${zs})`,
+  };
+  const fmt = (v: number, d = 2) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const par = (v: number) => (v < 0 ? '(' + fmt(v) + ')' : fmt(v));
+
+  // 最小二乘：解 (AᵀA + λI) v = Aᵀy，高斯消元
+  function lsq(A: number[][], y: number[]): number[] {
+    const m = A[0].length, M = Array.from({ length: m }, (_, i) => {
+      const row = Array.from({ length: m + 1 }, (_, j) => (j < m ? A.reduce((s, r) => s + r[i] * r[j], 0) : A.reduce((s, r, k) => s + r[i] * y[k], 0)));
+      row[i] += 1e-6; return row;
+    });
+    for (let c = 0; c < m; c++) {
+      let p = c; for (let r = c + 1; r < m; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+      [M[c], M[p]] = [M[p], M[c]];
+      for (let r = 0; r < m; r++) if (r !== c) { const k = M[r][c] / M[c][c]; for (let j = c; j <= m; j++) M[r][j] -= k * M[c][j]; }
+    }
+    return M.map((r, i) => r[m] / r[i]);
+  }
+
+  let uid = 0;
+  function init(fig: HTMLElement) {
+    const cfg = JSON.parse(fig.dataset.cfg!);
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const read = fig.querySelector<HTMLElement>('[data-read]')!;
+    const sl = fig.querySelector<HTMLInputElement>('[data-s]')!;
+    const sv = fig.querySelector<HTMLElement>('[data-v]')!;
+    const opt = fig.querySelector<HTMLInputElement>('[data-opt]')!;
+    let act: Act = cfg.act;
+    const id = 'al' + uid++;
+    const W = 360, H = 300, L = 36, R = 344, T = 14, B = 276;
+
+    function plotFrame(x0: number, x1: number, y0: number, y1: number, xt: number[], yt: number[]) {
+      const X = (v: number) => L + (v - x0) / (x1 - x0) * (R - L), Y = (v: number) => B - (v - y0) / (y1 - y0) * (B - T);
+      let s = `<g class="ai-vp-grid">`;
+      for (const v of xt) s += `<line x1="${X(v)}" y1="${T}" x2="${X(v)}" y2="${B}"/>`;
+      for (const v of yt) s += `<line x1="${L}" y1="${Y(v)}" x2="${R}" y2="${Y(v)}"/>`;
+      s += `</g><g class="ai-vp-axis"><line x1="${L}" y1="${Y(0)}" x2="${R}" y2="${Y(0)}"/><line x1="${X(0)}" y1="${T}" x2="${X(0)}" y2="${B}"/></g><g class="ai-vp-tick">`;
+      for (const v of xt) if (v !== 0) s += `<text x="${X(v)}" y="${B + 14}" text-anchor="middle">${fmt(v)}</text>`;
+      for (const v of yt) if (v !== 0) s += `<text x="${L - 5}" y="${Y(v) + 3}" text-anchor="end">${fmt(v)}</text>`;
+      return { s: s + '</g>', X, Y };
+    }
+    const path = (fn: (v: number) => number, x0: number, x1: number, X: (v: number) => number, Y: (v: number) => number, y0: number, y1: number) => {
+      let d = '', prev: number | null = null;
+      for (let i = 0; i <= 240; i++) {
+        const v = x0 + (x1 - x0) * i / 240, y = Math.max(y0 - 1, Math.min(y1 + 1, fn(v)));
+        d += `${i === 0 || (prev !== null && Math.abs(y - prev) > 0.5) ? 'M' : 'L'}${X(v).toFixed(1)} ${Y(y).toFixed(1)} `;
+        prev = y;
+      }
+      return d;
+    };
+
+    function drawCurve() {
+      const z = parseFloat(sl.value), f = F[act], df = D[act];
+      const y0 = -1.5, y1 = 4;
+      const { s: frame, X, Y } = plotFrame(-4, 4, y0, y1, [-4, -3, -2, -1, 0, 1, 2, 3, 4], [-1, 1, 2, 3, 4]);
+      let s = `<defs><clipPath id="${id}-c"><rect x="${L}" y="${T}" width="${R - L}" height="${B - T}"/></clipPath></defs>` + frame + `<g clip-path="url(#${id}-c)">`;
+      if (opt.checked) for (const a of ['relu', 'gelu', 'silu'] as Act[]) if (a !== act) s += `<path class="ai-al-ghost" d="${path(F[a], -4, 4, X, Y, y0, y1)}"/><text class="ai-al-gl" x="${X(3.3)}" y="${Y(F[a](3.3)) + (a === 'relu' ? -6 : 14)}">${NAME[a]}</text>`;
+      s += `<path class="ai-al-d" d="${path(df, -4, 4, X, Y, y0, y1)}"/>`;
+      s += `<path class="ai-al-f" d="${path(f, -4, 4, X, Y, y0, y1)}"/>`;
+      // 切线
+      const fz = f(z), k = df(z);
+      if (act !== 'step' || Math.abs(z) > 0.05) s += `<line class="ai-al-tan" x1="${X(z - 1)}" y1="${Y(fz - k)}" x2="${X(z + 1)}" y2="${Y(fz + k)}"/>`;
+      s += `</g><line class="ai-al-zl" x1="${X(z)}" y1="${T}" x2="${X(z)}" y2="${B}"/><circle class="ai-np-dot" cx="${X(z)}" cy="${Y(fz)}" r="5"/>`;
+      s += `<text class="ai-al-lab" x="${L + 6}" y="${T + 12}"><tspan class="c-accent">— f(z)</tspan>　<tspan class="c-key">- - 斜率 f′(z)</tspan></text>`;
+      svg.innerHTML = s;
+      sv.textContent = fmt(z);
+      const zs = fmt(z);
+      let h = `<div class="ai-vp-row"><span>函数值</span><div>${FORM[act](fmt(z), par(z))} = <b class="c-accent">${fmt(fz, 3)}</b></div></div>`;
+      if (act === 'gelu') h += `<div class="ai-vp-row"><span></span><div>Φ(${zs}) = ${fmt(Phi(z), 3)}：标准正态分布小于 z 的概率</div></div>`;
+      if (act === 'silu') h += `<div class="ai-vp-row"><span></span><div>σ(${zs}) = ${fmt(sig(z), 3)}：Sigmoid，把 z 压到 0 和 1 之间</div></div>`;
+      h += `<div class="ai-vp-row"><span>斜率</span><div>f′(${zs}) = <b class="c-key">${fmt(k, 3)}</b></div></div>`;
+      const note: Record<Act, string> = {
+        none: '一条直线：斜率处处是 1。',
+        step: '斜率处处是 0（z = 0 处是一个跳变）：参数小改动，输出没反应。',
+        relu: z > 0 ? 'z > 0：原样放行，斜率 1。' : 'z ≤ 0：一律变成 0，斜率也是 0。',
+        gelu: z < 0 ? '负的一侧不是一刀切成 0，而是平滑地压下去，在 z ≈ −0.75 处最低（约 −0.17）。' : '正的一侧越来越接近 y = z，斜率接近 1。',
+        silu: z < 0 ? '和 GELU 很像，负的一侧更深一点，在 z ≈ −1.28 处最低（约 −0.28）。' : '正的一侧越来越接近 y = z。',
+        sigmoid: '输出总在 0 和 1 之间；z 离 0 远了，曲线变平，斜率接近 0。',
+        tanh: '输出总在 −1 和 1 之间，形状和 Sigmoid 一样，只是上下拉伸、居中到 0。',
+      };
+      h += `<div class="ai-vp-row ai-vp-hint">${note[act]}</div>`;
+      read.innerHTML = h;
+    }
+
+    function drawFit() {
+      const N = parseInt(sl.value), f = F[act];
+      const target = (x: number) => Math.sin(1.5 * x);
+      const sc = act === 'relu' || act === 'none' ? 1 : Math.max(1, N / 2);
+      const cs = Array.from({ length: N }, (_, k) => -3 + 6 * (k + 0.5) / N);
+      const xs = Array.from({ length: 121 }, (_, i) => -3 + i * 0.05);
+      const feat = (x: number) => [1, ...cs.map((c) => f(sc * (x - c)))];
+      const A = xs.map(feat), ys = xs.map(target);
+      const v = lsq(A, ys);
+      const pred = (x: number) => feat(x).reduce((s, h, i) => s + h * v[i], 0);
+      const mse = xs.reduce((s, x, i) => s + (pred(x) - ys[i]) ** 2, 0) / xs.length;
+      const y0 = -2, y1 = 2;
+      const { s: frame, X, Y } = plotFrame(-3, 3, y0, y1, [-3, -2, -1, 0, 1, 2, 3], [-2, -1, 1, 2]);
+      let s = `<defs><clipPath id="${id}-f"><rect x="${L}" y="${T}" width="${R - L}" height="${B - T}"/></clipPath></defs>` + frame + `<g clip-path="url(#${id}-f)">`;
+      if (opt.checked) cs.forEach((c, k) => { s += `<path class="ai-al-ghost" d="${path((x) => v[k + 1] * f(sc * (x - c)), -3, 3, X, Y, y0, y1)}"/>`; });
+      s += `<path class="ai-al-target" d="${path(target, -3, 3, X, Y, y0, y1)}"/><path class="ai-al-f" d="${path(pred, -3, 3, X, Y, y0, y1)}"/>`;
+      s += `</g>`;
+      cs.forEach((c) => { s += `<line class="ai-al-tick" x1="${X(c)}" y1="${B - 5}" x2="${X(c)}" y2="${B}"/>`; });
+      s += `<text class="ai-al-lab" x="${L + 6}" y="${T + 12}"><tspan class="ai-faint">- - 目标 sin(1.5x)</tspan>　<tspan class="c-accent">— 拟合结果</tspan></text>`;
+      svg.innerHTML = s;
+      sv.textContent = String(N);
+      const inner = act === 'none' ? `${sc === 1 ? '' : sc + '·'}(x − c<sub>k</sub>)` : `${NAME[act]}(${sc === 1 ? '' : fmt(sc) + '·'}(x − c<sub>k</sub>))`;
+      let h = `<div class="ai-vp-row"><span>隐藏层</span><div>h<sub>k</sub> = ${inner}，k = 1…${N}，转折点 c<sub>k</sub> 是底部的小竖线</div></div>`;
+      h += `<div class="ai-vp-row"><span>输出</span><div>ŷ = v<sub>0</sub> + v<sub>1</sub>h<sub>1</sub> + … + v<sub>${N}</sub>h<sub>${N}</sub>，参数共 ${3 * N + 1} 个</div></div>`;
+      h += `<div class="ai-vp-row"><span>误差</span><div>均方误差 = <b class="c-accent">${fmt(mse, 4)}</b></div></div>`;
+      const note = act === 'none' ? '不加激活：不管 N 是多少，结果都是一条直线。N 个线性神经元加起来，还是一个线性函数。'
+        : act === 'relu' ? '每个 ReLU 神经元在自己的转折点处折一下，N 个折点连成一条折线。N 越大，折线越贴近曲线。'
+        : '平滑的激活函数拼出来的是平滑的曲线，N 稍大一点就几乎和目标重合。';
+      h += `<div class="ai-vp-row ai-vp-hint">${note}</div>`;
+      read.innerHTML = h;
+    }
+    const draw = () => (cfg.mode === 'fit' ? drawFit() : drawCurve());
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-a]');
+      if (!btn) return;
+      act = btn.dataset.a as Act;
+      fig.querySelectorAll('[data-a]').forEach((x) => x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-actlab]').forEach(init);
+</script>

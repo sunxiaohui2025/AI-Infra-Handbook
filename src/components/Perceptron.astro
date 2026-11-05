@@ -1,0 +1,300 @@
+---
+// 感知机演示：平面上的二分类。
+//   z = w1·x1 + w2·x2 + b，z > 0 输出 1，否则输出 0；分界线是 z = 0 的那条直线。
+// 读者可以：拖动分界线（平移，改 b）、拖动 w 箭头的末端（转向、伸缩，改 w）、用滑块精确调 w1、w2、b；
+//   切换数据集（sets）；train 打开后，可以按感知机学习规则一步一步训练：
+//   错了就 w ← w + (y − 输出)·x，b ← b + (y − 输出)。
+// 数据集：fruit（甜度–酸度的水果，顾客说好吃 / 不好吃）、and、or、xor（逻辑门的 4 个点）。
+// 可传 data、sets、w、b、train、title、caption，供后面的讲复用（例如第 13 讲调权重和偏置）。
+interface Props {
+  data?: 'fruit' | 'and' | 'or' | 'xor';
+  sets?: ('fruit' | 'and' | 'or' | 'xor')[];
+  w?: [number, number];
+  b?: number;
+  train?: boolean;
+  title?: string;
+  caption?: string;
+}
+const {
+  data = 'fruit',
+  sets = [],
+  train = false,
+  w = train ? [0, 0] : data === 'fruit' ? [1, 0] : [1, 1],
+  b = train ? 0 : data === 'fruit' ? -5 : -0.5,
+  title = train ? '让感知机自己找分界线' : '拖动分界线，把两类点分开',
+  caption,
+} = Astro.props;
+const NAMES = { fruit: '水果', and: '与', or: '或', xor: '异或' };
+---
+<figure class="ai-gt ai-pc" data-perceptron data-set={data} data-w={JSON.stringify(w)} data-b={b} data-train={train ? '1' : ''}>
+  <div class="ai-ms-title">{title}</div>
+  {sets.length > 1 && (
+    <div class="ai-gt-pre ai-pc-sets">
+      {sets.map((s) => <button data-ds={s} aria-pressed={s === data ? 'true' : 'false'}>{NAMES[s]}</button>)}
+    </div>
+  )}
+  <div class="ai-vp-body">
+    <svg class="ai-vp-svg" viewBox="0 0 360 360" role="img" aria-label={title}></svg>
+    <div class="ai-vp-side">
+      <div class="ai-pc-sl">
+        <label><span><i>w</i><sub>1</sub> = <b data-v="w1"></b></span><input type="range" min="-3" max="3" step="0.1" data-s="w1" /></label>
+        <label><span><i>w</i><sub>2</sub> = <b data-v="w2"></b></span><input type="range" min="-3" max="3" step="0.1" data-s="w2" /></label>
+        <label><span><i>b</i> = <b data-v="b"></b></span><input type="range" min="-3" max="3" step="0.1" data-s="b" /></label>
+      </div>
+      <div class="ai-vp-read" data-read></div>
+    </div>
+  </div>
+  {train && (
+    <div class="ai-pc-train">
+      <div class="ai-gt-play">
+        <button class="ai-pill ai-pill--solid" data-act="step">下一个样本</button>
+        <button class="ai-pill" data-act="epoch">跑完这一轮</button>
+        <button class="ai-pill" data-act="auto">▶ 自动训练</button>
+        <button class="ai-pill" data-act="reset">重置</button>
+      </div>
+      <div class="ai-pc-log" data-log></div>
+    </div>
+  )}
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  interface P { name: string; x: number; y: number; t: 0 | 1 }
+  interface DS { pts: P[]; range: [number, number]; grid: number; tick: number; xl: string; yl: string; yes: string; no: string; brange: number; wk: number }
+  const gate = (t: [0 | 1, 0 | 1, 0 | 1, 0 | 1]): P[] =>
+    [[0, 0], [0, 1], [1, 0], [1, 1]].map(([x, y], i) => ({ name: `(${x}, ${y})`, x, y, t: t[i] }));
+  const GATE = { range: [-1, 2] as [number, number], grid: 0.5, tick: 1, xl: 'x₁', yl: 'x₂', yes: '1', no: '0', brange: 3, wk: 0.5 };
+  const DATA: Record<string, DS> = {
+    fruit: {
+      pts: [
+        { name: '苹果', x: 7, y: 4, t: 1 }, { name: '香蕉', x: 8, y: 1, t: 1 }, { name: '芒果', x: 9, y: 3, t: 1 }, { name: '梨', x: 5, y: 2, t: 1 },
+        { name: '柠檬', x: 2, y: 9, t: 0 }, { name: '葡萄柚', x: 4, y: 7, t: 0 }, { name: '菠萝', x: 7, y: 7, t: 0 },
+      ],
+      range: [0, 10], grid: 1, tick: 2, xl: '甜度', yl: '酸度', yes: '好吃', no: '不好吃', brange: 10, wk: 1.6,
+    },
+    and: { ...GATE, pts: gate([0, 0, 0, 1]) },
+    or: { ...GATE, pts: gate([0, 1, 1, 1]) },
+    xor: { ...GATE, pts: gate([0, 1, 1, 0]) },
+  };
+  const NS = 'http://www.w3.org/2000/svg';
+  let uid = 0;
+  const r1 = (v: number) => Math.round(v * 10) / 10;
+  const fmt = (v: number) => { v = Math.round(v * 100) / 100; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const par = (v: number) => (v < 0 ? '(' + fmt(v) + ')' : fmt(v));
+
+  function init(fig: HTMLElement) {
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const read = fig.querySelector<HTMLElement>('[data-read]')!;
+    const log = fig.querySelector<HTMLElement>('[data-log]');
+    const sl = Object.fromEntries(['w1', 'w2', 'b'].map((k) => [k, fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!]));
+    const sv = Object.fromEntries(['w1', 'w2', 'b'].map((k) => [k, fig.querySelector<HTMLElement>(`[data-v="${k}"]`)!]));
+    const isTrain = !!fig.dataset.train;
+    const id = 'pc' + uid++;
+    const PAD = 28, SIZE = 360;
+    const w0: [number, number] = JSON.parse(fig.dataset.w!);
+    const b0 = Number(fig.dataset.b);
+    let ds: DS = DATA[fig.dataset.set!];
+    let w: [number, number] = [...w0];
+    let b = b0;
+    // 训练状态
+    let idx = 0, epoch = 1, errs = 0, last = '', summary: string[] = [], done = false, timer = 0, started = false;
+    const MAX_EPOCH = 20;
+
+    let MIN = 0, MAX = 0, S = 0;
+    const X = (x: number) => PAD + (x - MIN) * S;
+    const Y = (y: number) => SIZE - PAD - (y - MIN) * S;
+    const toUser = (e: PointerEvent): [number, number] => {
+      const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM()!.inverse());
+      return [MIN + (pt.x - PAD) / S, MIN + (SIZE - PAD - pt.y) / S];
+    };
+    const z = (p: P) => w[0] * p.x + w[1] * p.y + b;
+    const out = (p: P): 0 | 1 => (z(p) > 1e-9 ? 1 : 0);
+
+    function setup() {
+      [MIN, MAX] = ds.range;
+      S = (SIZE - 2 * PAD) / (MAX - MIN);
+      sl.b.min = String(-ds.brange); sl.b.max = String(ds.brange);
+      let s = `<defs><clipPath id="${id}-clip"><rect x="${X(MIN)}" y="${Y(MAX)}" width="${X(MAX) - X(MIN)}" height="${Y(MIN) - Y(MAX)}"/></clipPath>`
+        + `<marker id="${id}-m" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--ink)"/></marker></defs>`;
+      s += `<g data-region clip-path="url(#${id}-clip)"></g><g class="ai-vp-grid">`;
+      const n = Math.round((MAX - MIN) / ds.grid);
+      for (let i = 0; i <= n; i++) { const v = MIN + i * ds.grid; s += `<line x1="${X(v)}" y1="${Y(MIN)}" x2="${X(v)}" y2="${Y(MAX)}"/><line x1="${X(MIN)}" y1="${Y(v)}" x2="${X(MAX)}" y2="${Y(v)}"/>`; }
+      s += `</g><g class="ai-vp-axis">`;
+      if (MIN < 0) s += `<line x1="${X(0)}" y1="${Y(MIN)}" x2="${X(0)}" y2="${Y(MAX)}"/><line x1="${X(MIN)}" y1="${Y(0)}" x2="${X(MAX)}" y2="${Y(0)}"/>`;
+      else s += `<line x1="${X(MIN)}" y1="${Y(MIN)}" x2="${X(MAX)}" y2="${Y(MIN)}"/><line x1="${X(MIN)}" y1="${Y(MIN)}" x2="${X(MIN)}" y2="${Y(MAX)}"/>`;
+      s += `</g><g class="ai-vp-tick">`;
+      for (let v = Math.ceil(MIN / ds.tick) * ds.tick; v <= MAX + 1e-9; v += ds.tick) {
+        s += `<text x="${X(v)}" y="${Y(MIN) + 14}" text-anchor="middle">${fmt(v)}</text>`;
+        if (v !== MIN || MIN >= 0) s += `<text x="${X(MIN) - 6}" y="${Y(v) + 3}" text-anchor="end">${fmt(v)}</text>`;
+      }
+      s += `</g><text class="ai-vp-axlabel" x="${X(MAX)}" y="${Y(MIN) - 6}" text-anchor="end">${ds.xl} →</text>`
+        + `<text class="ai-vp-axlabel" x="${X(MIN) + 6}" y="${Y(MAX) + 12}">↑ ${ds.yl}</text>`;
+      s += `<g data-dyn clip-path="url(#${id}-clip)"></g><g data-pts></g><g data-top></g>`;
+      svg.innerHTML = s;
+    }
+
+    // 把画布这个正方形按 z > 0 切开，得到「输出 1」那一半的多边形
+    function halfPlane(sign: 1 | -1): string {
+      const sq: [number, number][] = [[MIN, MIN], [MAX, MIN], [MAX, MAX], [MIN, MAX]];
+      const f = (p: [number, number]) => sign * (w[0] * p[0] + w[1] * p[1] + b);
+      const res: [number, number][] = [];
+      for (let i = 0; i < 4; i++) {
+        const a = sq[i], c = sq[(i + 1) % 4], fa = f(a), fc = f(c);
+        if (fa > 0) res.push(a);
+        if ((fa > 0) !== (fc > 0)) { const t = fa / (fa - fc); res.push([a[0] + t * (c[0] - a[0]), a[1] + t * (c[1] - a[1])]); }
+      }
+      return res.map(([x, y]) => `${X(x)},${Y(y)}`).join(' ');
+    }
+
+    // 分界线上离画布中心最近的点，w 箭头从这里画出
+    const anchor = (): [number, number] => {
+      const c = (MIN + MAX) / 2, n2 = w[0] * w[0] + w[1] * w[1];
+      const k = (w[0] * c + w[1] * c + b) / n2;
+      return [c - k * w[0], c - k * w[1]];
+    };
+
+    function draw() {
+      const region = svg.querySelector('[data-region]')!, dyn = svg.querySelector('[data-dyn]')!;
+      const ptsG = svg.querySelector('[data-pts]')!, top = svg.querySelector('[data-top]')!;
+      const n2 = w[0] * w[0] + w[1] * w[1];
+      const hasLine = n2 > 1e-9;
+      let rg = '', d = '', tp = '';
+      if (hasLine) {
+        rg = `<polygon class="ai-pc-yes" points="${halfPlane(1)}"/><polygon class="ai-pc-no" points="${halfPlane(-1)}"/>`;
+        const A = anchor(), L = (MAX - MIN) * 2, dx = -w[1] / Math.sqrt(n2), dy = w[0] / Math.sqrt(n2);
+        const p1 = [A[0] - dx * L, A[1] - dy * L], p2 = [A[0] + dx * L, A[1] + dy * L];
+        d += `<line class="ai-pc-line" x1="${X(p1[0])}" y1="${Y(p1[1])}" x2="${X(p2[0])}" y2="${Y(p2[1])}"/>`;
+        d += `<line class="ai-pc-hit" data-drag="line" x1="${X(p1[0])}" y1="${Y(p1[1])}" x2="${X(p2[0])}" y2="${Y(p2[1])}"/>`;
+        const T = [A[0] + ds.wk * w[0], A[1] + ds.wk * w[1]];
+        d += `<line class="ai-vp-vec ai-pc-w" x1="${X(A[0])}" y1="${Y(A[1])}" x2="${X(T[0])}" y2="${Y(T[1])}" marker-end="url(#${id}-m)"/>`;
+        const lx = X(T[0]) + (w[0] >= 0 ? 8 : -8);
+        d += `<text class="ai-vp-label" x="${lx}" y="${Y(T[1]) - 6}" text-anchor="${w[0] >= 0 ? 'start' : 'end'}">w</text>`;
+        if (T[0] >= MIN && T[0] <= MAX && T[1] >= MIN && T[1] <= MAX)
+          tp += `<circle class="ai-vp-handle" data-drag="w" cx="${X(T[0])}" cy="${Y(T[1])}" r="8" style="stroke: var(--ink)"><title>拖动改变 w</title></circle>`;
+      } else {
+        rg = `<rect class="ai-pc-no" x="${X(MIN)}" y="${Y(MAX)}" width="${X(MAX) - X(MIN)}" height="${Y(MIN) - Y(MAX)}"/>`;
+      }
+      region.innerHTML = rg; dyn.innerHTML = d;
+      let ps = '';
+      const cur = isTrain && !done ? ds.pts[idx] : null;
+      for (const p of ds.pts) {
+        const ok = out(p) === p.t;
+        if (p === cur) ps += `<circle class="ai-pc-cur" cx="${X(p.x)}" cy="${Y(p.y)}" r="12"/>`;
+        if (!ok) ps += `<circle class="ai-pc-bad" cx="${X(p.x)}" cy="${Y(p.y)}" r="9"/>`;
+        ps += `<circle class="ai-pc-pt ${p.t ? 'is-yes' : 'is-no'}" cx="${X(p.x)}" cy="${Y(p.y)}" r="5.5"/>`;
+        if (ds !== DATA.fruit) continue;
+        const right = p.x > MAX - 1.6;
+        ps += `<text class="ai-vp-ptname" x="${X(p.x) + (right ? -10 : 10)}" y="${Y(p.y) + 4}" text-anchor="${right ? 'end' : 'start'}">${p.name}</text>`;
+      }
+      ptsG.innerHTML = ps; top.innerHTML = tp;
+
+      // 读数
+      sl.w1.value = String(w[0]); sl.w2.value = String(w[1]); sl.b.value = String(b);
+      sv.w1.textContent = fmt(w[0]); sv.w2.textContent = fmt(w[1]); sv.b.textContent = fmt(b);
+      const good = ds.pts.filter((p) => out(p) === p.t).length;
+      let h = `<div class="ai-vp-row"><span>打分</span><div>z = ${par(w[0])}·${ds.xl} + ${par(w[1])}·${ds.yl} + ${par(b)}</div></div>`;
+      h += `<div class="ai-vp-row"><span>分界线</span><div>${hasLine ? `${par(w[0])}·${ds.xl} + ${par(w[1])}·${ds.yl} + ${par(b)} = 0` : 'w = (0, 0)，还没有分界线：z 恒等于 b'}</div></div>`;
+      h += `<table class="ai-vp-tbl"><thead><tr><th>${ds === DATA.fruit ? '水果' : '输入'}</th><th>z</th><th>输出</th><th>应为</th><th></th></tr></thead><tbody>`;
+      for (const p of ds.pts) {
+        const o = out(p), ok = o === p.t;
+        h += `<tr class="${ok ? '' : 'is-bad'}"><td>${p.name}${ds === DATA.fruit ? ` <span class="ai-faint">(${p.x}, ${p.y})</span>` : ''}</td><td>${fmt(z(p))}</td><td>${o ? ds.yes : ds.no}</td><td>${p.t ? ds.yes : ds.no}</td><td>${ok ? '✓' : '✗'}</td></tr>`;
+      }
+      h += `</tbody></table>`;
+      const n = ds.pts.length;
+      const tip = good === n ? '全部分对了' : ds === DATA.xor ? '异或：不管怎么调，一条直线最多只能分对 3 个' : '带圈的点分错了，试着调整分界线';
+      h += `<div class="ai-vp-row ai-vp-hint">分对 <b>${good} / ${n}</b>。${tip}</div>`;
+      read.innerHTML = h;
+      if (log) {
+        const head = done ? '' : `<div class="ai-pc-now">下一个：第 ${epoch} 轮，第 ${idx + 1} 个样本 ${ds.pts[idx].name}</div>`;
+        log.innerHTML = (last ? `<div class="ai-pc-last">${last}</div>` : '<div class="ai-pc-last ai-faint">点「下一个样本」，从 w = (0, 0)、b = 0 开始训练，看感知机怎么根据一个样本改权重。</div>')
+          + head + (summary.length ? `<div class="ai-pc-sum">${summary.join('<br>')}</div>` : '');
+      }
+    }
+
+    // 学习规则：处理一个样本
+    function step() {
+      if (done) return;
+      if (!started) { w = [0, 0]; b = 0; started = true; } // 训练总是从 w = (0, 0)、b = 0 开始，除非读者先手动调过
+      const p = ds.pts[idx], zz = z(p), o = out(p), e = p.t - o;
+      const calc = `z = ${par(w[0])}×${p.x} + ${par(w[1])}×${p.y} + ${par(b)} = ${fmt(zz)}，输出 ${o}，应为 ${p.t}`;
+      if (e === 0) last = `第 ${epoch} 轮 · ${p.name}：${calc}。<b class="c-accent">对了，不改。</b>`;
+      else {
+        const nw: [number, number] = [r1(w[0] + e * p.x), r1(w[1] + e * p.y)], nb = r1(b + e);
+        const sgn = e > 0 ? '+' : '−';
+        last = `第 ${epoch} 轮 · ${p.name}：${calc}。<b class="c-key">错了</b>，y − 输出 = ${e > 0 ? 1 : '−1'}：`
+          + `<br>w ← (${fmt(w[0])}, ${fmt(w[1])}) ${sgn} (${p.x}, ${p.y}) = (${fmt(nw[0])}, ${fmt(nw[1])})；b ← ${fmt(b)} ${sgn} 1 = ${fmt(nb)}`;
+        w = nw; b = nb; errs++;
+      }
+      idx++;
+      if (idx === ds.pts.length) {
+        summary.push(`第 ${epoch} 轮：错了 ${errs} 次，结束时 w = (${fmt(w[0])}, ${fmt(w[1])})，b = ${fmt(b)}`);
+        if (errs === 0) { done = true; summary.push('<b>这一轮一个都没错，训练结束。</b>'); }
+        else if (epoch >= MAX_EPOCH) { done = true; summary.push(`<b>已经跑了 ${MAX_EPOCH} 轮，每一轮都有错，停不下来。</b>`); }
+        idx = 0; epoch++; errs = 0;
+      }
+      if (summary.length > 8) summary = [summary[0], '…', ...summary.slice(-6)];
+    }
+    const stopAuto = () => { clearInterval(timer); timer = 0; const a = fig.querySelector('[data-act="auto"]'); if (a) a.textContent = '▶ 自动训练'; };
+    function resetTrain() { stopAuto(); w = [...w0]; b = b0; idx = 0; epoch = 1; errs = 0; last = ''; summary = []; done = false; started = false; }
+
+    fig.addEventListener('input', (e) => {
+      const tg = e.target as HTMLInputElement;
+      if (!tg.dataset.s) return;
+      const v = parseFloat(tg.value);
+      if (tg.dataset.s === 'w1') w = [v, w[1]]; else if (tg.dataset.s === 'w2') w = [w[0], v]; else b = v;
+      if (isTrain) { stopAuto(); last = '你手动改了参数。接着训练会从这组参数继续。'; done = false; started = true; }
+      draw();
+    });
+    fig.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-ds],[data-act]');
+      if (!btn) return;
+      if (btn.dataset.ds) {
+        ds = DATA[btn.dataset.ds];
+        fig.querySelectorAll('[data-ds]').forEach((x) => x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'));
+        if (isTrain) resetTrain(); else { w = ds === DATA.fruit ? [1, 0] : [1, 1]; b = ds === DATA.fruit ? -5 : -0.5; }
+        setup(); draw(); return;
+      }
+      const act = btn.dataset.act;
+      if (act === 'step') { stopAuto(); step(); }
+      else if (act === 'epoch') { stopAuto(); const e0 = epoch; while (!done && epoch === e0) step(); }
+      else if (act === 'reset') resetTrain();
+      else if (act === 'auto') {
+        if (timer) { stopAuto(); return; }
+        btn.textContent = '暂停';
+        timer = window.setInterval(() => { step(); draw(); if (done) stopAuto(); }, 350);
+      }
+      draw();
+    });
+
+    // 拖动：拖线 = 让线穿过鼠标所在的点（只改 b）；拖 w 的末端 = 改 w（锚点不动，b 跟着变）
+    let drag: '' | 'line' | 'w' = '';
+    let A: [number, number] = [0, 0];
+    svg.addEventListener('pointerdown', (e) => {
+      const tg = e.target as SVGElement;
+      const k = tg.dataset?.drag as 'line' | 'w' | undefined;
+      if (!k) return;
+      drag = k; A = anchor();
+      if (isTrain) { stopAuto(); last = '你手动改了参数。接着训练会从这组参数继续。'; done = false; started = true; }
+      svg.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    svg.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const p = toUser(e);
+      if (drag === 'line') b = Math.max(-ds.brange, Math.min(ds.brange, r1(-(w[0] * p[0] + w[1] * p[1]))));
+      else {
+        const nw: [number, number] = [r1((p[0] - A[0]) / ds.wk), r1((p[1] - A[1]) / ds.wk)].map((v) => Math.max(-3, Math.min(3, v))) as [number, number];
+        if (nw[0] === 0 && nw[1] === 0) return;
+        w = nw;
+        b = Math.max(-ds.brange, Math.min(ds.brange, r1(-(w[0] * A[0] + w[1] * A[1]))));
+      }
+      draw();
+    });
+    const end = () => { drag = ''; };
+    svg.addEventListener('pointerup', end);
+    svg.addEventListener('pointercancel', end);
+
+    setup(); draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-perceptron]').forEach(init);
+</script>

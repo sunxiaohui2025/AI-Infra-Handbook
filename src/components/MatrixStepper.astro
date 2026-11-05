@@ -1,0 +1,131 @@
+---
+// 矩阵步进器：▶ 播放 / 下一格 / 全部算完 / 重置，或直接点结果 C 的任意一格。
+// 数据来自 tinylm.json 的 examples[ex]（默认 "03"）：需要 X、W、tokens；如果有 b，就显示「+ b」，算的是 X·W + b（线性层）。
+// X、W（和 b）可以在页面上改，结果实时重算。
+import tiny from '../../../tinylm/tinylm.json';
+import Mat from './Mat.astro';
+import MatBox from './MatBox.astro';
+
+interface Props { title?: string; ex?: '03' | '13'; wName?: string; cName?: string }
+const { ex: key = '03', wName = 'W', cName } = Astro.props;
+const ex = tiny.examples[key] as { X: number[][]; W: number[][]; tokens: string[]; b?: number[] };
+const hasB = Array.isArray(ex.b);
+const { title = hasB ? 'X · W + b，一格一格地算' : 'X × W，一格一格地算' } = Astro.props;
+const out = cName ?? (hasB ? 'Y' : 'C');
+const blank = ex.X.map(() => ex.W[0].map(() => ''));
+const sh = (m: number[][]) => `${m.length}×${m[0].length}`;
+---
+<div class="ai-ms" data-stepper data-x={JSON.stringify(ex.X)} data-w={JSON.stringify(ex.W)} data-tok={JSON.stringify(ex.tokens)} data-b={hasB ? JSON.stringify(ex.b) : undefined} data-wn={wName}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-ms-grid">
+    <MatBox sym="X" color="accent" sub={`${sh(ex.X)} · ${ex.tokens.join(' ')}`}><Mat name="A" v={ex.X} labels={ex.tokens} edit /></MatBox>
+    <div class="ai-ms-op">×</div>
+    <MatBox sym={wName} color="key" sub={`${sh(ex.W)} · 权重`}><Mat name="B" v={ex.W} edit /></MatBox>
+    {hasB && <div class="ai-ms-op">+</div>}
+    {hasB && <MatBox sym="b" color="key" sub={`${ex.b!.length} 个 · 偏置`}><Mat name="D" v={[ex.b!]} edit /></MatBox>}
+    <div class="ai-ms-op">=</div>
+    <MatBox sym={out} color="ink" sub={`${ex.X.length}×${ex.W[0].length} · 结果`}><Mat name="C" v={blank} labels={ex.tokens} /></MatBox>
+  </div>
+  <div class="ai-ms-ctl">
+    <button class="ai-pill ai-pill--solid" data-ms="play">▶ 播放</button>
+    <button class="ai-pill" data-ms="next">下一格</button>
+    <button class="ai-pill" data-ms="end">全部算完</button>
+    <button class="ai-pill" data-ms="reset">重置</button>
+    <span class="ai-ms-count" data-ms-step></span>
+  </div>
+  <div class="ai-hint" data-ms-eq></div>
+</div>
+
+<script>
+  function init(box: HTMLElement) {
+    const X0: number[][] = JSON.parse(box.dataset.x!);
+    const W0: number[][] = JSON.parse(box.dataset.w!);
+    const TOK: string[] = JSON.parse(box.dataset.tok!);
+    const B0: number[] | null = box.dataset.b ? JSON.parse(box.dataset.b) : null;
+    const WN = box.dataset.wn || 'W';
+    const M = X0.length, K = W0.length, N = W0[0].length, TOTAL = M * N;
+    let step = 0;
+    let timer: number | null = null;
+    const eq = box.querySelector<HTMLElement>('[data-ms-eq]')!;
+    const st = box.querySelector<HTMLElement>('[data-ms-step]')!;
+    const play = box.querySelector<HTMLButtonElement>('[data-ms="play"]')!;
+    const cell = (m: string, i: number, j: number) =>
+      box.querySelector<HTMLTableElement>(`[data-m="${m}"]`)!.tBodies[0].rows[i].querySelectorAll('td')[j];
+    const val = (m: string, i: number, j: number) => {
+      const v = parseFloat(cell(m, i, j).querySelector('input')!.value.replace('−', '-'));
+      return isNaN(v) ? 0 : v;
+    };
+    const fmt = (v: number) => { v = Math.round(v * 100) / 100; return v < 0 ? '−' + String(-v) : String(v); };
+    const par = (v: number) => (v < 0 ? '(' + fmt(v) + ')' : fmt(v));
+    const dot = (i: number, j: number) => { let s = B0 ? val('D', 0, j) : 0; for (let t = 0; t < K; t++) s += val('A', i, t) * val('B', t, j); return s; };
+    const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+    function draw() {
+      box.querySelectorAll('.ai-mat td').forEach((td) => td.classList.remove('is-row', 'is-col', 'is-cur'));
+      for (let s = 0; s < TOTAL; s++) {
+        const c = cell('C', Math.floor(s / N), s % N), v = c.querySelector('.v')!;
+        if (s < step) { v.textContent = fmt(dot(Math.floor(s / N), s % N)); c.classList.remove('is-empty'); }
+        else { v.textContent = ''; c.classList.add('is-empty'); }
+      }
+      let txt = '点「播放」一格一格地算，或直接点结果 C 里的任意一格。';
+      if (step > 0) {
+        const i = Math.floor((step - 1) / N), j = (step - 1) % N, terms: string[] = [];
+        for (let t = 0; t < K; t++) {
+          cell('A', i, t).classList.add('is-row');
+          cell('B', t, j).classList.add('is-col');
+          terms.push(par(val('A', i, t)) + '×' + par(val('B', t, j)));
+        }
+        cell('C', i, j).classList.add('is-cur');
+        if (B0) { cell('D', 0, j).classList.add('is-col'); terms.push(par(val('D', 0, j))); }
+        txt = '「' + TOK[i] + '」这一行 · ' + WN + ' 第 ' + (j + 1) + ' 列' + (B0 ? ' + 第 ' + (j + 1) + ' 个偏置' : '') + ' = ' + terms.join(' + ') + ' = ' + fmt(dot(i, j));
+        if (step === TOTAL) txt += '　·　全部算完：' + TOTAL + ' 格 × ' + K + ' 次乘加 = ' + TOTAL * K + ' 次乘加' + (B0 ? '，再加 ' + TOTAL + ' 次偏置' : '');
+      }
+      eq.textContent = txt;
+      st.textContent = step + ' / ' + TOTAL;
+      box.querySelector<HTMLButtonElement>('[data-ms="next"]')!.disabled = step === TOTAL;
+      box.querySelector<HTMLButtonElement>('[data-ms="end"]')!.disabled = step === TOTAL;
+      play.textContent = timer ? '❚❚ 暂停' : step === TOTAL ? '▶ 重新播放' : '▶ 播放';
+    }
+    box.addEventListener('click', (e) => {
+      const target = e.target as HTMLElement;
+      const td = target.closest<HTMLTableCellElement>('[data-m="C"] td');
+      if (td) {
+        stop();
+        const tr = td.parentElement as HTMLTableRowElement;
+        const i = Array.from(tr.parentElement!.children).indexOf(tr);
+        const j = Array.from(tr.querySelectorAll('td')).indexOf(td);
+        step = i * N + j + 1;
+        draw();
+        return;
+      }
+      const b = target.closest<HTMLElement>('[data-ms]');
+      if (!b) return;
+      const a = b.dataset.ms;
+      if (a === 'play') {
+        if (timer) stop();
+        else {
+          if (step === TOTAL) step = 0;
+          step++;
+          timer = window.setInterval(() => {
+            if (step < TOTAL) step++;
+            if (step >= TOTAL) stop();
+            draw();
+          }, 700);
+        }
+      } else {
+        stop();
+        if (a === 'next' && step < TOTAL) step++;
+        else if (a === 'end') step = TOTAL;
+        else if (a === 'reset') {
+          step = 0;
+          ([['A', X0], ['B', W0], ...(B0 ? [['D', [B0]]] : [])] as [string, number[][]][]).forEach(([m, src]) =>
+            src.forEach((r, i) => r.forEach((x, j) => { cell(m, i, j).querySelector('input')!.value = String(x); })),
+          );
+        }
+      }
+      draw();
+    });
+    box.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-stepper]').forEach(init);
+</script>

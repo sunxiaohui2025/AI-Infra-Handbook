@@ -1,0 +1,49 @@
+---
+// 首页：5 章横排成 5 列（第一章第一列 … 第五章第五列），每列自上而下是本章各篇，篇卡里列出全部讲。
+// 查找用顶栏的搜索（⌘K），首页不再单独放筛选框。
+import Base from '../layouts/Base.astro';
+import WfPart from '../components/WfPart.astro';
+import { getCollection } from 'astro:content';
+import { CH, LECTURES, chLs, chName, fastCount } from '../data/course';
+const written = (await getCollection('lectures')).length;
+---
+<Base title="学习路线" view="home">
+  <main class="ai-scroll" id="main">
+    <div class="ai-home">
+      <div class="ai-hero">
+        <div>
+          <h1>AI Infra 学习路线</h1>
+          <p>从矩阵乘法讲到分布式推理。一讲只讲一个技术点，按依赖顺序排列：读到任何一讲时，它用到的概念都已在前面讲过。</p>
+          <p class="route-note-fast"><b>Infra 快速路线：</b>第一章只读 03、05、06、10、11；第二章跳过 16–20 和第 6 篇。</p>
+        </div>
+        <div class="ai-hero-side">
+          <div class="ai-stats">
+            <div class="ai-stat"><b>5</b><span>章</span></div>
+            <div class="ai-stat"><b>14</b><span>篇</span></div>
+            <div class="ai-stat"><b>110</b><span>讲</span></div>
+            <div class="ai-stat"><b><span class="r-full">{LECTURES.length}</span><span class="r-fast">{fastCount(LECTURES)}</span></b><span>当前路线</span></div>
+            <div class="ai-stat ai-stat-done"><b>{written}</b><span>已写</span></div>
+          </div>
+          <span class="ai-wf-legend"><i class="ai-dot"></i>重点<span class="ai-wf-opt">灰字</span>选读 / 轻量线</span>
+        </div>
+      </div>
+
+      <div class="ai-wf" id="wf">
+        {CH.map((c) => {
+          const cls = chLs(c.n);
+          return (
+            <section class="ai-wf-chsec" data-ch={c.n}>
+              <header class="ai-wf-ch">
+                <h2><span class="ai-step-n">{c.n}</span>{chName(c)}</h2>
+                <small>{c.parts.length} 篇 · {cls.length} 讲<span class="r-fast"> · 快速路线读 {fastCount(cls)}</span></small>
+              </header>
+              <div class="ai-wf-parts">
+                {c.parts.map((p) => <WfPart p={p} ch={c.n} />)}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  </main>
+</Base>

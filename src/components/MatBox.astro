@@ -1,0 +1,9 @@
+---
+// 矩阵外框：斜体衬线的矩阵名（着色）+ 形状说明。
+interface Props { sym: string; color: 'accent' | 'key' | 'ink'; sub: string }
+const { sym, color, sub } = Astro.props;
+---
+<div class="ai-mx" style={`--mc: var(--${color})`}>
+  <div class="ai-mx-cap"><b>{sym}</b>{sub}</div>
+  <slot />
+</div>

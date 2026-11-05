@@ -1,0 +1,8 @@
+---
+import { lecture, pad } from '../data/course';
+interface Props { ids: number[] }
+const { ids } = Astro.props;
+---
+<div class="ai-pre-links">
+  {ids.map((id) => { const l = lecture(id); return <a href={`/l/${id}`}><span class="ai-num">{pad(id)}</span>{l.title}</a>; })}
+</div>

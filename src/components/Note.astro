@@ -1,0 +1,10 @@
+---
+// 说明框：point = 要点（这一节最该记住的一句话），column = 专栏（延伸话题，可跳过），warn = 注意（容易弄错的地方）。
+interface Props { kind?: 'point' | 'column' | 'warn'; title?: string }
+const { kind = 'point', title } = Astro.props;
+const label = title ?? { point: '要点', column: '专栏', warn: '注意' }[kind];
+---
+<aside class={`ai-note ai-note--${kind}`}>
+  <div class="ai-note-label">{label}</div>
+  <div class="ai-note-body"><slot /></div>
+</aside>

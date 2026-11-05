@@ -1,0 +1,265 @@
+---
+// 二维平面上的向量演示。拖动箭头末端（或聚焦后用方向键），右侧实时写出当前算式。
+//   mode="explore"：在「甜度–酸度」坐标里拖一个新水果，看坐标、长度、离哪种水果最近
+//   mode="add"    ：拖动 a、b，看 a + b 和平行四边形
+//   mode="scale"  ：拖动 a、调 k，看 k·a 怎样伸缩、反向
+//   mode="compare"：拖动一个新向量，同时看它到各个已知点的「距离」和「余弦相似度」
+//   mode="dot"    ：拖动 a、b，看点积、夹角、余弦和 b 在 a 上的投影
+// 可传 a、b、k、points、range、xLabel、yLabel、aName 覆盖默认值，供后面的讲复用。
+interface Pt { name: string; x: number; y: number }
+interface Props {
+  mode?: 'explore' | 'add' | 'scale' | 'compare' | 'dot';
+  range?: [number, number];
+  xLabel?: string;
+  yLabel?: string;
+  aName?: string;
+  title?: string;
+  caption?: string;
+  a?: [number, number];
+  b?: [number, number];
+  k?: number;
+  points?: Pt[];
+}
+const {
+  mode = 'explore',
+  title,
+  caption,
+  a = mode === 'explore' ? [6, 5] : mode === 'compare' ? [4, 1] : [3, 1],
+  b = mode === 'dot' ? [1, 3] : [1, 2],
+  range = mode === 'explore' ? [0, 10] : mode === 'compare' ? [0, 12] : [-5, 5],
+  xLabel = mode === 'explore' ? '甜度' : undefined,
+  yLabel = mode === 'explore' ? '酸度' : undefined,
+  aName = mode === 'explore' ? '新水果' : mode === 'compare' ? '新向量' : 'a',
+  k = 2,
+  points = [
+    { name: '苹果', x: 7, y: 4 },
+    { name: '柠檬', x: 2, y: 9 },
+    { name: '香蕉', x: 8, y: 1 },
+    { name: '葡萄柚', x: 4, y: 7 },
+  ],
+} = Astro.props;
+const cfg = { mode, a, b, k, range, xLabel, yLabel, aName, points: mode === 'explore' || mode === 'compare' ? points : [] };
+const defaultTitle = {
+  explore: '拖动「新水果」，看它的坐标和长度', add: '拖动 a 和 b，看 a + b', scale: '拖动 a、调整 k，看 k·a',
+  compare: `拖动「${aName}」，同时比较距离和余弦相似度`, dot: '拖动 a 和 b，看点积和夹角',
+}[mode];
+---
+<figure class="ai-vp" data-vplane data-cfg={JSON.stringify(cfg)}>
+  <div class="ai-ms-title">{title ?? defaultTitle}</div>
+  <div class="ai-vp-body">
+    <svg class="ai-vp-svg" viewBox="0 0 360 360" role="img" aria-label={title ?? defaultTitle}></svg>
+    <div class="ai-vp-side">
+      <div class="ai-vp-read" data-read></div>
+      {mode === 'scale' && (
+        <label class="ai-vp-k">
+          <span>k = <b data-kval>{k}</b></span>
+          <input type="range" min="-2" max="3" step="0.5" value={k} data-k />
+        </label>
+      )}
+      <button class="ai-pill" data-reset>重置</button>
+    </div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type P = [number, number];
+  interface Cfg {
+    mode: 'explore' | 'add' | 'scale' | 'compare' | 'dot'; a: P; b: P; k: number; range: P;
+    xLabel?: string; yLabel?: string; aName: string; points: { name: string; x: number; y: number }[];
+  }
+  const NS = 'http://www.w3.org/2000/svg';
+  let uid = 0;
+
+  function init(fig: HTMLElement) {
+    const cfg: Cfg = JSON.parse(fig.dataset.cfg!);
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const read = fig.querySelector<HTMLElement>('[data-read]')!;
+    const kInput = fig.querySelector<HTMLInputElement>('[data-k]');
+    const kVal = fig.querySelector<HTMLElement>('[data-kval]');
+    const id = 'vp' + uid++;
+    const explore = cfg.mode === 'explore' || cfg.mode === 'compare';
+    const [min, max] = cfg.range;
+    const twoHandles = cfg.mode === 'add' || cfg.mode === 'dot';
+    const PAD = 30, SIZE = 360, S = (SIZE - 2 * PAD) / (max - min);
+    const X = (x: number) => PAD + (x - min) * S;
+    const Y = (y: number) => SIZE - PAD - (y - min) * S;
+    const ox = X(explore ? 0 : 0), oy = Y(0);
+    let a: P = [...cfg.a], b: P = [...cfg.b], k = cfg.k;
+
+    const fmt = (v: number) => { v = Math.round(v * 100) / 100; return v < 0 ? '−' + -v : String(v); };
+    const par = (v: number) => (v < 0 ? '(' + fmt(v) + ')' : fmt(v));
+    const vec = (p: P) => `(${fmt(p[0])}, ${fmt(p[1])})`;
+    const len = (p: P) => Math.hypot(p[0], p[1]);
+
+    // ---- static layer: grid, axes, labels, arrow markers ----
+    let s = `<defs>`;
+    for (const c of ['accent', 'key', 'ink', 'ink-3']) {
+      s += `<marker id="${id}-${c}" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" style="fill: var(--${c})"/></marker>`;
+    }
+    s += `</defs><g class="ai-vp-grid">`;
+    for (let i = min; i <= max; i++) {
+      s += `<line x1="${X(i)}" y1="${Y(min)}" x2="${X(i)}" y2="${Y(max)}"/><line x1="${X(min)}" y1="${Y(i)}" x2="${X(max)}" y2="${Y(i)}"/>`;
+    }
+    s += `</g><g class="ai-vp-axis"><line x1="${X(min)}" y1="${oy}" x2="${X(max)}" y2="${oy}"/><line x1="${ox}" y1="${Y(min)}" x2="${ox}" y2="${Y(max)}"/></g><g class="ai-vp-tick">`;
+    for (let i = min; i <= max; i += 2) {
+      if (i === 0 && !explore) continue;
+      s += `<text x="${X(i)}" y="${oy + 16}" text-anchor="middle">${fmt(i)}</text>`;
+      if (i !== 0) s += `<text x="${ox - 8}" y="${Y(i) + 4}" text-anchor="end">${fmt(i)}</text>`;
+    }
+    s += `</g>`;
+    if (cfg.xLabel) s += `<text class="ai-vp-axlabel" x="${X(max)}" y="${oy - 8}" text-anchor="end">${cfg.xLabel} →</text>`;
+    if (cfg.yLabel) s += `<text class="ai-vp-axlabel" x="${ox + 8}" y="${Y(max) + 4}">↑ ${cfg.yLabel}</text>`;
+    if (explore) {
+      for (const p of cfg.points) {
+        s += `<line class="ai-vp-ghost" x1="${ox}" y1="${oy}" x2="${X(p.x)}" y2="${Y(p.y)}" marker-end="url(#${id}-ink-3)"/><circle class="ai-vp-pt" cx="${X(p.x)}" cy="${Y(p.y)}" r="3.5"/><text class="ai-vp-ptname" x="${X(p.x) > SIZE - 110 ? X(p.x) - 7 : X(p.x) + 7}" y="${Y(p.y) - 9}" text-anchor="${X(p.x) > SIZE - 110 ? 'end' : 'start'}">${p.name} (${fmt(p.x)}, ${fmt(p.y)})</text>`;
+      }
+    }
+    s += `<g data-dyn></g>`;
+    svg.innerHTML = s;
+    const dyn = svg.querySelector<SVGGElement>('[data-dyn]')!;
+
+    // ---- draggable handles ----
+    const mkHandle = (key: 'a' | 'b', color: string) => {
+      const h = document.createElementNS(NS, 'circle');
+      h.setAttribute('r', '9');
+      h.setAttribute('class', 'ai-vp-handle');
+      h.setAttribute('style', `stroke: var(--${color})`);
+      h.setAttribute('tabindex', '0');
+      h.setAttribute('role', 'slider');
+      h.setAttribute('aria-label', key === 'a' ? cfg.aName : '向量 b');
+      h.dataset.key = key;
+      svg.appendChild(h);
+      return h;
+    };
+    const handles: Record<string, SVGCircleElement> = { a: mkHandle('a', 'accent') };
+    if (twoHandles) handles.b = mkHandle('b', 'key');
+
+    const arrow = (from: P, to: P, color: string, cls = '') =>
+      Math.hypot(to[0] - from[0], to[1] - from[1]) < 1e-9 ? `<circle cx="${X(to[0])}" cy="${Y(to[1])}" r="3.5" style="fill: var(--${color})"/>` :
+      `<line class="ai-vp-vec ${cls}" x1="${X(from[0])}" y1="${Y(from[1])}" x2="${X(to[0])}" y2="${Y(to[1])}" style="stroke: var(--${color})" marker-end="url(#${id}-${color})"/>`;
+    const label = (p: P, text: string, color: string, dx = 8, dy = -8) =>
+      `<text class="ai-vp-label" x="${X(p[0]) + dx}" y="${Y(p[1]) + dy}" style="fill: var(--${color})">${text}</text>`;
+
+    function draw() {
+      let d = '';
+      let r = '';
+      if (cfg.mode === 'explore') {
+        const L = len(a);
+        let best = cfg.points[0], bd = Infinity;
+        for (const p of cfg.points) { const dd = Math.hypot(a[0] - p.x, a[1] - p.y); if (dd < bd) { bd = dd; best = p; } }
+        d += `<line class="ai-vp-dist" x1="${X(a[0])}" y1="${Y(a[1])}" x2="${X(best.x)}" y2="${Y(best.y)}"/>`;
+        d += arrow([0, 0], a, 'accent') + label(a, cfg.aName, 'accent', -52, -12);
+        r = `<div class="ai-vp-row"><span>坐标</span><div><b>${vec(a)}</b></div></div>`
+          + `<div class="ai-vp-row"><span>含义</span><div>甜度 ${fmt(a[0])}，酸度 ${fmt(a[1])}</div></div>`
+          + `<div class="ai-vp-row"><span>长度</span><div>√(${par(a[0])}² + ${par(a[1])}²) = ${fmt(L)}</div></div>`
+          + `<div class="ai-vp-row"><span>最近的</span><div><b>${best.name}</b>，距离 √((${fmt(a[0])}−${fmt(best.x)})² + (${fmt(a[1])}−${fmt(best.y)})²) = ${fmt(bd)}</div></div>`;
+      } else if (cfg.mode === 'compare') {
+        const La = len(a);
+        const rows = cfg.points.map((p) => {
+          const dist = Math.hypot(a[0] - p.x, a[1] - p.y);
+          const cos = La && (p.x || p.y) ? (a[0] * p.x + a[1] * p.y) / (La * Math.hypot(p.x, p.y)) : NaN;
+          return { p, dist, cos };
+        });
+        const nearD = rows.reduce((m, r) => (r.dist < m.dist ? r : m));
+        const nearC = rows.reduce((m, r) => (r.cos > m.cos ? r : m));
+        d += `<line class="ai-vp-dist" x1="${X(a[0])}" y1="${Y(a[1])}" x2="${X(nearD.p.x)}" y2="${Y(nearD.p.y)}"/>`;
+        d += arrow([0, 0], a, 'accent') + label(a, cfg.aName, 'accent', -20, -14);
+        r = `<div class="ai-vp-row"><span>${cfg.aName}</span><div><b class="c-accent">${vec(a)}</b></div></div>`
+          + `<table class="ai-vp-tbl"><thead><tr><th></th><th>距离</th><th>余弦相似度</th></tr></thead><tbody>`
+          + rows.map((x) => `<tr><td>${x.p.name}</td><td class="${x === nearD ? 'is-best' : ''}">${fmt(x.dist)}</td><td class="${x === nearC ? 'is-best' : ''}">${isNaN(x.cos) ? '—' : fmt(x.cos)}</td></tr>`).join('')
+          + `</tbody></table>`
+          + `<div class="ai-vp-row ai-vp-hint">按距离，最像的是「${nearD.p.name}」；按余弦相似度，最像的是「${isNaN(nearC.cos) ? '—' : nearC.p.name}」${nearD === nearC ? '，两种量法一致' : '——两种量法给出了不同的答案'}</div>`;
+      } else if (cfg.mode === 'dot') {
+        const dot = a[0] * b[0] + a[1] * b[1], La = len(a), Lb = len(b);
+        const cos = La && Lb ? dot / (La * Lb) : NaN;
+        const deg = isNaN(cos) ? NaN : (Math.acos(Math.max(-1, Math.min(1, cos))) * 180) / Math.PI;
+        if (La && Lb) {
+          const ta = Math.atan2(a[1], a[0]), tb = Math.atan2(b[1], b[0]);
+          let dl = tb - ta; while (dl > Math.PI) dl -= 2 * Math.PI; while (dl <= -Math.PI) dl += 2 * Math.PI;
+          const R = 26, x1 = ox + R * Math.cos(ta), y1 = oy - R * Math.sin(ta), x2 = ox + R * Math.cos(tb), y2 = oy - R * Math.sin(tb);
+          d += `<path class="ai-vp-arc" d="M${x1} ${y1} A${R} ${R} 0 0 ${dl > 0 ? 0 : 1} ${x2} ${y2}"/>`;
+          const tm = ta + dl / 2;
+          d += `<text class="ai-vp-arclabel" x="${ox + (R + 12) * Math.cos(tm)}" y="${oy - (R + 12) * Math.sin(tm) + 4}" text-anchor="middle">θ</text>`;
+          const t2 = dot / (La * La), proj: P = [t2 * a[0], t2 * a[1]];
+          d += `<line class="ai-vp-guide" x1="${X(b[0])}" y1="${Y(b[1])}" x2="${X(proj[0])}" y2="${Y(proj[1])}" style="stroke: var(--ink-3)"/>`;
+          d += `<line class="ai-vp-proj" x1="${ox}" y1="${oy}" x2="${X(proj[0])}" y2="${Y(proj[1])}" style="stroke: var(--${dot >= 0 ? 'key' : 'ink-3'})"/>`;
+        }
+        d += arrow([0, 0], a, 'accent') + label(a, 'a', 'accent', 10, 16);
+        d += arrow([0, 0], b, 'key') + label(b, 'b', 'key', -16, -8);
+        const sign = isNaN(cos) ? '有一个是零向量，夹角没有定义' : Math.abs(dot) < 1e-9 ? '点积 = 0：两个向量互相垂直' : dot > 0 ? '点积 > 0：夹角小于 90°，大致同向' : '点积 < 0：夹角大于 90°，大致反向';
+        r = `<div class="ai-vp-row"><span>a · b</span><div>${fmt(a[0])}×${par(b[0])} + ${par(a[1])}×${par(b[1])} = <b>${fmt(dot)}</b></div></div>`
+          + `<div class="ai-vp-row"><span>长度</span><div>|a| = ${fmt(La)}，|b| = ${fmt(Lb)}</div></div>`
+          + `<div class="ai-vp-row"><span>cos θ</span><div>${fmt(dot)} ÷ (${fmt(La)} × ${fmt(Lb)}) = <b>${isNaN(cos) ? '—' : fmt(cos)}</b></div></div>`
+          + `<div class="ai-vp-row"><span>夹角 θ</span><div>${isNaN(deg) ? '—' : fmt(deg) + '°'}</div></div>`
+          + `<div class="ai-vp-row ai-vp-hint">${sign}。粗线是 b 在 a 方向上的投影（影子）</div>`;
+      } else if (cfg.mode === 'add') {
+        const sum: P = [a[0] + b[0], a[1] + b[1]];
+        d += `<line class="ai-vp-guide" x1="${X(a[0])}" y1="${Y(a[1])}" x2="${X(sum[0])}" y2="${Y(sum[1])}" style="stroke: var(--key)"/>`;
+        d += `<line class="ai-vp-guide" x1="${X(b[0])}" y1="${Y(b[1])}" x2="${X(sum[0])}" y2="${Y(sum[1])}" style="stroke: var(--accent)"/>`;
+        d += arrow([0, 0], sum, 'ink', 'is-result') + label(sum, 'a + b', 'ink');
+        d += arrow([0, 0], a, 'accent') + label(a, 'a', 'accent', 10, 16);
+        d += arrow([0, 0], b, 'key') + label(b, 'b', 'key', -16, -8);
+        r = `<div class="ai-vp-row"><span>a</span><div><b class="c-accent">${vec(a)}</b></div></div>`
+          + `<div class="ai-vp-row"><span>b</span><div><b class="c-key">${vec(b)}</b></div></div>`
+          + `<div class="ai-vp-row"><span>a + b</span><div>(${fmt(a[0])} + ${par(b[0])}, ${fmt(a[1])} + ${par(b[1])}) = <b>${vec(sum)}</b></div></div>`
+          + `<div class="ai-vp-row ai-vp-hint">虚线：把 b 接在 a 的末端（或把 a 接在 b 的末端），走到的是同一个点</div>`;
+      } else {
+        const ka: P = [k * a[0], k * a[1]];
+        d += arrow([0, 0], ka, 'key', 'is-result') + label(ka, k === 0 ? '' : `${fmt(k)}·a`, 'key', 8, 18);
+        d += arrow([0, 0], a, 'accent') + label(a, 'a', 'accent');
+        const note = k < 0 ? 'k 是负数：方向反过来' : k === 0 ? 'k = 0：变成零向量，只剩原点' : k < 1 ? '0 < k < 1：缩短，方向不变' : k === 1 ? 'k = 1：不变' : 'k > 1：拉长，方向不变';
+        r = `<div class="ai-vp-row"><span>a</span><div><b class="c-accent">${vec(a)}</b></div></div>`
+          + `<div class="ai-vp-row"><span>k·a</span><div>${fmt(k)} × ${vec(a)} = (${fmt(k)}×${par(a[0])}, ${fmt(k)}×${par(a[1])}) = <b class="c-key">${vec(ka)}</b></div></div>`
+          + `<div class="ai-vp-row"><span>长度</span><div>|k·a| = |${fmt(k)}| × ${fmt(len(a))} = ${fmt(Math.abs(k) * len(a))}</div></div>`
+          + `<div class="ai-vp-row ai-vp-hint">${note}</div>`;
+      }
+      dyn.innerHTML = d;
+      handles.a.setAttribute('cx', String(X(a[0])));
+      handles.a.setAttribute('cy', String(Y(a[1])));
+      if (handles.b) { handles.b.setAttribute('cx', String(X(b[0]))); handles.b.setAttribute('cy', String(Y(b[1]))); }
+      read.innerHTML = r;
+      if (kVal) kVal.textContent = fmt(k);
+    }
+
+    // ---- interaction ----
+    const clamp = (v: number) => Math.max(min, Math.min(max, v));
+    const snap = (v: number) => Math.round(v * 2) / 2;
+    let drag: 'a' | 'b' | null = null;
+    const toUser = (e: PointerEvent): P => {
+      const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM()!.inverse());
+      return [clamp(snap(min + (pt.x - PAD) / S)), clamp(snap(min + (SIZE - PAD - pt.y) / S))];
+    };
+    const set = (key: 'a' | 'b', p: P) => { if (key === 'a') a = p; else b = p; draw(); };
+    svg.addEventListener('pointerdown', (e) => {
+      const t = e.target as SVGElement;
+      if (t.classList.contains('ai-vp-handle')) drag = (t.dataset.key as 'a' | 'b');
+      else drag = 'a';
+      svg.setPointerCapture(e.pointerId);
+      set(drag, toUser(e));
+      e.preventDefault();
+    });
+    svg.addEventListener('pointermove', (e) => { if (drag) set(drag, toUser(e)); });
+    svg.addEventListener('pointerup', () => { drag = null; });
+    svg.addEventListener('pointercancel', () => { drag = null; });
+    svg.addEventListener('keydown', (e) => {
+      const t = e.target as SVGElement;
+      const key = t.dataset?.key as 'a' | 'b' | undefined;
+      if (!key) return;
+      const p: P = key === 'a' ? [...a] : [...b];
+      const step = 0.5;
+      if (e.key === 'ArrowLeft') p[0] -= step; else if (e.key === 'ArrowRight') p[0] += step;
+      else if (e.key === 'ArrowUp') p[1] += step; else if (e.key === 'ArrowDown') p[1] -= step; else return;
+      e.preventDefault();
+      set(key, [clamp(p[0]), clamp(p[1])]);
+    });
+    kInput?.addEventListener('input', () => { k = parseFloat(kInput.value); draw(); });
+    fig.querySelector('[data-reset]')!.addEventListener('click', () => {
+      a = [...cfg.a]; b = [...cfg.b]; k = cfg.k;
+      if (kInput) kInput.value = String(cfg.k);
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-vplane]').forEach(init);
+</script>

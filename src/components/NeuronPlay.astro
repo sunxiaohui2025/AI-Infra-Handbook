@@ -1,0 +1,166 @@
+---
+// 一个神经元：z = w1·x1 + … + wn·xn + b，输出 y = f(z)。
+// 上半部分是结构图（连线粗细 = |权重|，绿色为正、琥珀色为负）；下半部分画「只改一个参数时，输出怎么变」的曲线。
+// 读者可以用滑块改输入 x、权重 w、偏置 b；最近动过的那个参数会画在下面的曲线里。
+// act：'none' 不加激活（y = z）、'step' 阶跃（第 12 讲的感知机）；toggle 打开后可以在两者之间切换。
+// 可传 x、w、b、names、xRange、wRange、bRange、act、toggle，供后面的讲复用（例如第 14 讲换激活函数）。
+interface Props {
+  x?: number[];
+  w?: number[];
+  b?: number;
+  names?: string[];
+  xRange?: [number, number];
+  wRange?: [number, number];
+  bRange?: [number, number];
+  act?: 'none' | 'step';
+  toggle?: boolean;
+  title?: string;
+  caption?: string;
+}
+const {
+  x = [7, 4], w = [1, -1], b = -1, names = ['甜度', '酸度'],
+  xRange = [0, 10], wRange = [-2, 2], bRange = [-10, 10],
+  act = 'none', toggle = false, title = '调权重和偏置，看输出怎么变', caption,
+} = Astro.props;
+const sub = (i: number) => String(i + 1).split('').map((c) => '₀₁₂₃₄₅₆₇₈₉'[+c]).join('');
+const step = (r: [number, number]) => (r[1] - r[0] > 6 ? (r[1] - r[0] > 12 ? 1 : 0.5) : 0.1);
+---
+<figure class="ai-gt ai-np" data-neuron data-cfg={JSON.stringify({ x, w, b, names, act })}>
+  <div class="ai-ms-title">{title}</div>
+  {toggle && (
+    <div class="ai-gt-pre ai-pc-sets">
+      <button data-act="none" aria-pressed={act === 'none' ? 'true' : 'false'}>不加激活：y = z</button>
+      <button data-act="step" aria-pressed={act === 'step' ? 'true' : 'false'}>阶跃：z &gt; 0 输出 1</button>
+    </div>
+  )}
+  <div class="ai-vp-body">
+    <svg class="ai-vp-svg" viewBox="0 0 360 360" role="img" aria-label={title}></svg>
+    <div class="ai-vp-side">
+      <div class="ai-pc-sl">
+        {x.map((v, i) => <label><span>{names[i]} = <b data-v={`x${i}`}></b></span><input type="range" min={xRange[0]} max={xRange[1]} step={step(xRange)} value={v} data-s={`x${i}`} /></label>)}
+        {w.map((v, i) => <label><span><i>w</i>{sub(i)} = <b data-v={`w${i}`}></b></span><input type="range" min={wRange[0]} max={wRange[1]} step="0.1" value={v} data-s={`w${i}`} /></label>)}
+        <label><span><i>b</i> = <b data-v="b"></b></span><input type="range" min={bRange[0]} max={bRange[1]} step={bRange[1] - bRange[0] > 6 ? 0.5 : 0.1} value={b} data-s="b" /></label>
+      </div>
+      <div class="ai-vp-read" data-read></div>
+    </div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  interface Cfg { x: number[]; w: number[]; b: number; names: string[]; act: 'none' | 'step' }
+  const fmt = (v: number) => { v = Math.round(v * 100) / 100; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const par = (v: number) => (v < 0 ? '(' + fmt(v) + ')' : fmt(v));
+  const SUB = (i: number) => '₁₂₃₄₅₆₇₈₉'[i];
+
+  function init(fig: HTMLElement) {
+    const cfg: Cfg = JSON.parse(fig.dataset.cfg!);
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const read = fig.querySelector<HTMLElement>('[data-read]')!;
+    const n = cfg.x.length;
+    let x = [...cfg.x], w = [...cfg.w], b = cfg.b, act = cfg.act;
+    let focus = 'w0';
+    const slider = (k: string) => fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!;
+    const f = (z: number) => (act === 'step' ? (z > 1e-9 ? 1 : 0) : z);
+    const zOf = (xx: number[], ww: number[], bb: number) => xx.reduce((s, v, i) => s + v * ww[i], bb);
+    const pname = (k: string) => (k === 'b' ? 'b' : k[0] === 'w' ? 'w' + SUB(+k.slice(1)) : cfg.names[+k.slice(1)]);
+    // 把参数 k 换成 v，算输出
+    const outWith = (k: string, v: number) => {
+      const xx = [...x], ww = [...w]; let bb = b;
+      if (k === 'b') bb = v; else if (k[0] === 'w') ww[+k.slice(1)] = v; else xx[+k.slice(1)] = v;
+      return f(zOf(xx, ww, bb));
+    };
+    const curVal = (k: string) => (k === 'b' ? b : k[0] === 'w' ? w[+k.slice(1)] : x[+k.slice(1)]);
+
+    function draw() {
+      const z = zOf(x, w, b), y = f(z);
+      // ---- 结构图 ----
+      const top = 22, bot = 168, rows = n + 1;
+      const ny = (i: number) => top + (bot - top) * (rows === 1 ? 0.5 : i / (rows - 1));
+      const SX = 205, SY = 95, OX = 318;
+      let s = '';
+      for (let i = 0; i < rows; i++) {
+        const isB = i === n, val = isB ? b : w[i], yy = ny(i);
+        const col = val >= 0 ? 'accent' : 'key';
+        const wd = 0.8 + Math.min(1, Math.abs(val) / 2) * 5;
+        s += `<line x1="62" y1="${yy}" x2="${SX - 24}" y2="${SY}" style="stroke: var(--${col}); stroke-width: ${Math.abs(val) < 1e-9 ? 0.8 : wd}; ${Math.abs(val) < 1e-9 ? 'stroke-dasharray: 3 3; opacity: .5;' : ''}"/>`;
+        const lx = 62 + (SX - 24 - 62) * 0.42, ly = yy + (SY - yy) * 0.42;
+        s += `<text class="ai-np-wl" x="${lx}" y="${ly - 6}" text-anchor="middle" style="fill: var(--${col})">${isB ? 'b' : 'w' + SUB(i)} = ${fmt(val)}</text>`;
+        s += `<circle class="ai-np-in" cx="44" cy="${yy}" r="18"/>`;
+        s += `<text class="ai-np-v" x="44" y="${yy + 4}" text-anchor="middle">${isB ? '1' : fmt(x[i])}</text>`;
+        s += `<text class="ai-vp-ptname" x="44" y="${yy - 23}" text-anchor="middle">${isB ? '常数' : cfg.names[i]}</text>`;
+      }
+      s += `<circle class="ai-np-sum" cx="${SX}" cy="${SY}" r="24"/><text class="ai-np-sig" x="${SX}" y="${SY + 6}" text-anchor="middle">Σ</text>`;
+      s += `<text class="ai-np-z" x="${SX}" y="${SY + 42}" text-anchor="middle">z = ${fmt(z)}</text>`;
+      if (act === 'step') {
+        s += `<line x1="${SX + 24}" y1="${SY}" x2="248" y2="${SY}" class="ai-np-wire"/><rect class="ai-np-f" x="248" y="${SY - 15}" width="30" height="30" rx="5"/>`;
+        s += `<path d="M253 ${SY + 7} h10 v-14 h10" class="ai-np-glyph"/><line x1="278" y1="${SY}" x2="${OX - 20}" y2="${SY}" class="ai-np-wire"/>`;
+      } else s += `<line x1="${SX + 24}" y1="${SY}" x2="${OX - 20}" y2="${SY}" class="ai-np-wire"/>`;
+      s += `<circle class="ai-np-out" cx="${OX}" cy="${SY}" r="20"/><text class="ai-np-v" x="${OX}" y="${SY + 4}" text-anchor="middle">${fmt(y)}</text>`;
+      s += `<text class="ai-vp-ptname" x="${OX}" y="${SY - 26}" text-anchor="middle">输出 y</text>`;
+
+      // ---- 曲线：只改 focus 这一个参数 ----
+      const sl = slider(focus), lo = +sl.min, hi = +sl.max;
+      const PX0 = 44, PX1 = 340, PY0 = 220, PY1 = 336;
+      const N = 160, xs = Array.from({ length: N + 1 }, (_, i) => lo + (hi - lo) * i / N), ys = xs.map((v) => outWith(focus, v));
+      let ymin = Math.min(...ys, 0), ymax = Math.max(...ys, 0);
+      if (ymax - ymin < 1e-9) { ymin -= 1; ymax += 1; }
+      const padY = (ymax - ymin) * 0.08; ymin -= padY; ymax += padY;
+      const PX = (v: number) => PX0 + (v - lo) / (hi - lo) * (PX1 - PX0);
+      const PY = (v: number) => PY1 - (v - ymin) / (ymax - ymin) * (PY1 - PY0);
+      s += `<line class="ai-np-sep" x1="0" y1="196" x2="360" y2="196"/>`;
+      s += `<text class="ai-np-ptitle" x="${PX0}" y="212">只改 ${pname(focus)}，其他不动：输出怎么变</text>`;
+      s += `<g class="ai-vp-axis"><line x1="${PX0}" y1="${PY(0)}" x2="${PX1}" y2="${PY(0)}"/>${lo <= 0 && hi >= 0 ? `<line x1="${PX(0)}" y1="${PY0}" x2="${PX(0)}" y2="${PY1}"/>` : ''}</g>`;
+      s += `<g class="ai-vp-tick"><text x="${PX0}" y="${PY1 + 14}" text-anchor="middle">${fmt(lo)}</text><text x="${PX1}" y="${PY1 + 14}" text-anchor="middle">${fmt(hi)}</text>`
+        + `<text x="${PX0 - 6}" y="${PY(ymax - padY) + 3}" text-anchor="end">${fmt(ymax - padY)}</text><text x="${PX0 - 6}" y="${PY(ymin + padY) + 3}" text-anchor="end">${fmt(ymin + padY)}</text></g>`;
+      let d = '';
+      xs.forEach((v, i) => {
+        const jump = i > 0 && Math.abs(ys[i] - ys[i - 1]) > (ymax - ymin) * 0.3;
+        d += `${i === 0 || jump ? 'M' : 'L'}${PX(v).toFixed(1)} ${PY(ys[i]).toFixed(1)} `;
+      });
+      s += `<path class="ai-np-curve" d="${d}"/>`;
+      const cv = curVal(focus);
+      s += `<circle class="ai-np-dot" cx="${PX(cv)}" cy="${PY(y)}" r="5"/>`;
+      svg.innerHTML = s;
+
+      // ---- 读数 ----
+      x.forEach((v, i) => { fig.querySelector(`[data-v="x${i}"]`)!.textContent = fmt(v); });
+      w.forEach((v, i) => { fig.querySelector(`[data-v="w${i}"]`)!.textContent = fmt(v); });
+      fig.querySelector('[data-v="b"]')!.textContent = fmt(b);
+      const terms = x.map((v, i) => `${par(w[i])}×${par(v)}`).join(' + ');
+      let h = `<div class="ai-vp-row"><span>加权求和</span><div>z = ${terms} + ${par(b)} = <b>${fmt(z)}</b></div></div>`;
+      h += `<div class="ai-vp-row"><span>输出</span><div>${act === 'step' ? `y = 阶跃(${fmt(z)}) = <b>${y}</b>` : `y = z = <b>${fmt(y)}</b>`}</div></div>`;
+      h += `<table class="ai-vp-tbl"><thead><tr><th>参数加 0.1</th><th>输出变化</th><th>为什么</th></tr></thead><tbody>`;
+      const keys = [...w.map((_, i) => 'w' + i), 'b'];
+      for (const k of keys) {
+        const dy = outWith(k, curVal(k) + 0.1) - y;
+        const why = act === 'step' ? (Math.abs(dy) < 1e-9 ? '没跨过 0，不变' : '跨过了 0，跳变')
+          : k === 'b' ? '0.1 × 1' : `0.1 × ${cfg.names[+k.slice(1)]} ${par(x[+k.slice(1)])}`;
+        h += `<tr${k === focus ? ' class="is-focus"' : ''}><td>${pname(k)}</td><td>${dy >= 0 ? '+' : ''}${fmt(dy)}</td><td>${why}</td></tr>`;
+      }
+      h += `</tbody></table>`;
+      h += `<div class="ai-vp-row ai-vp-hint">${act === 'step'
+        ? '阶跃：参数小小地动一下，输出多半纹丝不动，只有 z 跨过 0 时才突然跳一下。'
+        : '不加激活：每个权重加 0.1，输出就变 0.1 × 它连着的那个输入。输入越大，这个权重越「敏感」。'}</div>`;
+      read.innerHTML = h;
+    }
+
+    fig.addEventListener('input', (e) => {
+      const tg = e.target as HTMLInputElement, k = tg.dataset.s;
+      if (!k) return;
+      const v = parseFloat(tg.value);
+      if (k === 'b') b = v; else if (k[0] === 'w') w[+k.slice(1)] = v; else x[+k.slice(1)] = v;
+      focus = k; draw();
+    });
+    fig.addEventListener('focusin', (e) => { const k = (e.target as HTMLElement).dataset?.s; if (k && k !== focus) { focus = k; draw(); } });
+    fig.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+      if (!btn) return;
+      act = btn.dataset.act as 'none' | 'step';
+      fig.querySelectorAll('[data-act]').forEach((x) => x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-neuron]').forEach(init);
+</script>

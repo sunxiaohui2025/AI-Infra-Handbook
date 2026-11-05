@@ -1,0 +1,61 @@
+---
+// 文章页：居中两栏，左侧本章目录；右侧白底衬线正文，不设本页目录。
+// 有 src/content/lectures 里对应 MDX 的讲渲染正文；还没写的讲显示这一讲要解决的问题和计划中的演示。
+import { getCollection, render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import SideNav from '../../components/SideNav.astro';
+import Tags from '../../components/Tags.astro';
+import { LECTURES, PN, partLs, pad, lecture } from '../../data/course';
+
+export function getStaticPaths() {
+  return LECTURES.map((l) => ({ params: { id: String(l.id) } }));
+}
+
+const l = lecture(Number(Astro.params.id));
+const entry = (await getCollection('lectures')).find((e) => e.data.id === l.id);
+const Content = entry ? (await render(entry)).Content : null;
+const ls = partLs(l.part);
+const idx = ls.findIndex((x) => x.id === l.id) + 1;
+const prev = LECTURES[l.id - 2];
+const next = LECTURES[l.id];
+---
+<Base title={`${pad(l.id)} ${l.title}`} view="lec">
+  <main class="ai-scroll ai-read" id="main">
+    <div class="ai-shell">
+      <SideNav ch={l.ch} part={l.part} lec={l.id} />
+      <div class="ai-shell-main">
+        <div class="ai-doc">
+          <article class="ai-article">
+            <header class="ai-art-head" id="top-of-article">
+              <div class="ai-kicker"><a href={`/p/${l.part}`}>第 {l.part} 篇 {PN[l.part]}</a><span>第 {idx} 讲 / 共 {ls.length} 讲</span></div>
+              <h1><span class="ai-art-no">{pad(l.id)}</span>{l.title}</h1>
+              {entry?.data.formula && <div class="ai-art-formula" set:html={entry.data.formula} />}
+              {entry?.data.shape && <div class="ai-art-shape">{entry.data.shape}</div>}
+              <p class="ai-art-q">{l.q}</p>
+              <div class="ai-article-meta">
+                <Tags l={l} />
+                {entry?.data.minutes && <span class="ai-tag ai-tag--opt">约 {entry.data.minutes} 分钟</span>}
+              </div>
+            </header>
+
+            {Content ? <Content /> : (
+              <div class="ai-todo">
+                <p class="ai-todo-title">这一讲还没有写</p>
+                <dl>
+                  <dt>要回答的问题</dt><dd>{l.q}</dd>
+                  <dt>{l.part === 14 ? '对应原理讲' : '计划中的演示'}</dt><dd>{l.demo}</dd>
+                </dl>
+                <p class="ai-todo-hint">想读这一讲时，对写作助手说「写第 {l.id} 讲」即可。</p>
+              </div>
+            )}
+
+            <nav class="ai-stepnav">
+              {prev ? <a class="ai-pill" href={`/l/${prev.id}`}>← 上一讲</a> : <span class="ai-pill is-disabled">← 上一讲</span>}
+              {next ? <a class="ai-pill ai-pill--solid" href={`/l/${next.id}`}>下一讲：{next.title} →</a> : <span></span>}
+            </nav>
+          </article>
+        </div>
+      </div>
+    </div>
+  </main>
+</Base>

@@ -1,0 +1,33 @@
+---
+// 方括号矩阵：列编号在上，行首可标 token；可选高亮行、列、当前格，或把格子做成输入框。
+type Cell = number | string;
+interface Props {
+  name: string;
+  v: Cell[][];
+  labels?: string[];
+  colLabels?: string[];
+  edit?: boolean;
+  row?: number;
+  col?: number;
+  cur?: [number, number];
+}
+const { name, v, labels, colLabels, edit = false, row = -1, col = -1, cur } = Astro.props;
+const fmt = (x: Cell) => (typeof x === 'number' ? (x < 0 ? '−' + -x : String(x)) : x);
+const cls = (i: number, j: number, x: Cell) =>
+  [i === row && 'is-row', j === col && 'is-col', cur && cur[0] === i && cur[1] === j && 'is-cur', x === '' && 'is-empty'].filter(Boolean).join(' ') || undefined;
+---
+<table class="ai-mat" data-m={name}>
+  <thead><tr>{labels && <th></th>}{v[0].map((_, j) => <th>{colLabels ? colLabels[j] : j + 1}</th>)}</tr></thead>
+  <tbody>
+    {v.map((r, i) => (
+      <tr>
+        {labels && <th>{labels[i]}</th>}
+        {r.map((x, j) => (
+          <td class={cls(i, j, x)}>
+            <span class="v">{edit ? <input value={String(x)} inputmode="decimal" aria-label={`${name}[${i + 1},${j + 1}]`} /> : fmt(x)}</span>
+          </td>
+        ))}
+      </tr>
+    ))}
+  </tbody>
+</table>

@@ -1,0 +1,26 @@
+---
+// 第 03 讲「直觉」：高亮 X 的一行、W 的一列，指向 C 的一格。数字来自 tinylm.json。
+import tiny from '../../../tinylm/tinylm.json';
+import Mat from './Mat.astro';
+import MatBox from './MatBox.astro';
+
+interface Props { row?: number; col?: number }
+const { row = 1, col = 0 } = Astro.props;
+const ex = tiny.examples['03'];
+const X = ex.X, W = ex.W, tok = ex.tokens;
+const C: (number | string)[][] = X.map(() => W[0].map(() => ''));
+C[row][col] = ex.C[row][col];
+const fmt = (v: number) => (v < 0 ? '−' + -v : String(v));
+const par = (v: number) => (v < 0 ? `(${fmt(v)})` : fmt(v));
+const terms = X[row].map((x, t) => `${par(x)}×${par(W[t][col])}`).join(' + ');
+---
+<div class="ai-fig">
+  <div class="ai-ms-grid">
+    <MatBox sym="X" color="accent" sub="4×4 · 每行一个 token"><Mat name="fa" v={X} labels={tok} row={row} /></MatBox>
+    <div class="ai-ms-op">×</div>
+    <MatBox sym="W" color="key" sub="4×4 · 每列一个方向"><Mat name="fb" v={W} col={col} /></MatBox>
+    <div class="ai-ms-op">=</div>
+    <MatBox sym="C" color="ink" sub="4×4 · 点积表"><Mat name="fc" v={C} labels={tok} cur={[row, col]} /></MatBox>
+  </div>
+  <p class="ai-fig-cap">「{tok[row]}」这一行 · W 第 {col + 1} 列 = {terms} = {fmt(ex.C[row][col])}</p>
+</div>
