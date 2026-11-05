@@ -1,9 +1,9 @@
 ---
 // 二维平面上的向量演示。拖动箭头末端（或聚焦后用方向键），右侧实时写出当前算式。
-//   mode="explore"：在「甜度–酸度」坐标里拖一个新水果，看坐标、长度、离哪种水果最近
+//   mode="explore"：在“甜度–酸度”坐标里拖一个新水果，看坐标、长度、离哪种水果最近
 //   mode="add"    ：拖动 a、b，看 a + b 和平行四边形
 //   mode="scale"  ：拖动 a、调 k，看 k·a 怎样伸缩、反向
-//   mode="compare"：拖动一个新向量，同时看它到各个已知点的「距离」和「余弦相似度」
+//   mode="compare"：拖动一个新向量，同时看它到各个已知点的“距离”和“余弦相似度”
 //   mode="dot"    ：拖动 a、b，看点积、夹角、余弦和 b 在 a 上的投影
 // 可传 a、b、k、points、range、xLabel、yLabel、aName 覆盖默认值，供后面的讲复用。
 interface Pt { name: string; x: number; y: number }
@@ -40,8 +40,8 @@ const {
 } = Astro.props;
 const cfg = { mode, a, b, k, range, xLabel, yLabel, aName, points: mode === 'explore' || mode === 'compare' ? points : [] };
 const defaultTitle = {
-  explore: '拖动「新水果」，看它的坐标和长度', add: '拖动 a 和 b，看 a + b', scale: '拖动 a、调整 k，看 k·a',
-  compare: `拖动「${aName}」，同时比较距离和余弦相似度`, dot: '拖动 a 和 b，看点积和夹角',
+  explore: '拖动“新水果”，看它的坐标和长度', add: '拖动 a 和 b，看 a + b', scale: '拖动 a、调整 k，看 k·a',
+  compare: `拖动“${aName}”，同时比较距离和余弦相似度`, dot: '拖动 a 和 b，看点积和夹角',
 }[mode];
 ---
 <figure class="ai-vp" data-vplane data-cfg={JSON.stringify(cfg)}>
@@ -169,7 +169,7 @@ const defaultTitle = {
           + `<table class="ai-vp-tbl"><thead><tr><th></th><th>距离</th><th>余弦相似度</th></tr></thead><tbody>`
           + rows.map((x) => `<tr><td>${x.p.name}</td><td class="${x === nearD ? 'is-best' : ''}">${fmt(x.dist)}</td><td class="${x === nearC ? 'is-best' : ''}">${isNaN(x.cos) ? '—' : fmt(x.cos)}</td></tr>`).join('')
           + `</tbody></table>`
-          + `<div class="ai-vp-row ai-vp-hint">按距离，最像的是「${nearD.p.name}」；按余弦相似度，最像的是「${isNaN(nearC.cos) ? '—' : nearC.p.name}」${nearD === nearC ? '，两种量法一致' : '——两种量法给出了不同的答案'}</div>`;
+          + `<div class="ai-vp-row ai-vp-hint">按距离，最像的是“${nearD.p.name}”；按余弦相似度，最像的是“${isNaN(nearC.cos) ? '—' : nearC.p.name}”${nearD === nearC ? '，两种量法一致' : '——两种量法给出了不同的答案'}</div>`;
       } else if (cfg.mode === 'dot') {
         const dot = a[0] * b[0] + a[1] * b[1], La = len(a), Lb = len(b);
         const cos = La && Lb ? dot / (La * Lb) : NaN;

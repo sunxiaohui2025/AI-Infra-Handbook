@@ -1,5 +1,5 @@
 ---
-// 第 03 讲「直觉」：高亮 X 的一行、W 的一列，指向 C 的一格。数字来自 tinylm.json。
+// 第 03 讲“直觉”：高亮 X 的一行、W 的一列，指向 C 的一格。数字来自 tinylm.json。
 import tiny from '../../../tinylm/tinylm.json';
 import Mat from './Mat.astro';
 import MatBox from './MatBox.astro';
@@ -22,5 +22,5 @@ const terms = X[row].map((x, t) => `${par(x)}×${par(W[t][col])}`).join(' + ');
     <div class="ai-ms-op">=</div>
     <MatBox sym="C" color="ink" sub="4×4 · 点积表"><Mat name="fc" v={C} labels={tok} cur={[row, col]} /></MatBox>
   </div>
-  <p class="ai-fig-cap">「{tok[row]}」这一行 · W 第 {col + 1} 列 = {terms} = {fmt(ex.C[row][col])}</p>
+  <p class="ai-fig-cap">“{tok[row]}”这一行 · W 第 {col + 1} 列 = {terms} = {fmt(ex.C[row][col])}</p>
 </div>

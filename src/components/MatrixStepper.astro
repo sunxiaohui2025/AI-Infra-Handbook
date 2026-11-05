@@ -1,6 +1,6 @@
 ---
 // 矩阵步进器：▶ 播放 / 下一格 / 全部算完 / 重置，或直接点结果 C 的任意一格。
-// 数据来自 tinylm.json 的 examples[ex]（默认 "03"）：需要 X、W、tokens；如果有 b，就显示「+ b」，算的是 X·W + b（线性层）。
+// 数据来自 tinylm.json 的 examples[ex]（默认 "03"）：需要 X、W、tokens；如果有 b，就显示“+ b”，算的是 X·W + b（线性层）。
 // X、W（和 b）可以在页面上改，结果实时重算。
 import tiny from '../../../tinylm/tinylm.json';
 import Mat from './Mat.astro';
@@ -66,7 +66,7 @@ const sh = (m: number[][]) => `${m.length}×${m[0].length}`;
         if (s < step) { v.textContent = fmt(dot(Math.floor(s / N), s % N)); c.classList.remove('is-empty'); }
         else { v.textContent = ''; c.classList.add('is-empty'); }
       }
-      let txt = '点「播放」一格一格地算，或直接点结果 C 里的任意一格。';
+      let txt = '点“播放”一格一格地算，或直接点结果 C 里的任意一格。';
       if (step > 0) {
         const i = Math.floor((step - 1) / N), j = (step - 1) % N, terms: string[] = [];
         for (let t = 0; t < K; t++) {
@@ -76,7 +76,7 @@ const sh = (m: number[][]) => `${m.length}×${m[0].length}`;
         }
         cell('C', i, j).classList.add('is-cur');
         if (B0) { cell('D', 0, j).classList.add('is-col'); terms.push(par(val('D', 0, j))); }
-        txt = '「' + TOK[i] + '」这一行 · ' + WN + ' 第 ' + (j + 1) + ' 列' + (B0 ? ' + 第 ' + (j + 1) + ' 个偏置' : '') + ' = ' + terms.join(' + ') + ' = ' + fmt(dot(i, j));
+        txt = '“' + TOK[i] + '”这一行 · ' + WN + ' 第 ' + (j + 1) + ' 列' + (B0 ? ' + 第 ' + (j + 1) + ' 个偏置' : '') + ' = ' + terms.join(' + ') + ' = ' + fmt(dot(i, j));
         if (step === TOTAL) txt += '　·　全部算完：' + TOTAL + ' 格 × ' + K + ' 次乘加 = ' + TOTAL * K + ' 次乘加' + (B0 ? '，再加 ' + TOTAL + ' 次偏置' : '');
       }
       eq.textContent = txt;
