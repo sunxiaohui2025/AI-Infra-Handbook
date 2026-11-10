@@ -1,0 +1,4 @@
+'The capital of France is'：32 个 token 全部相同
+'def fibonacci(n):'：32 个 token 全部相同
+'一个推理引擎由哪几部分组成？'：前 25 个 token 相同，第 26 个开始不同（HuggingFace '问题：某'，INT8 '1. '）
+'1, 2, 3, 4, 5,'：32 个 token 全部相同

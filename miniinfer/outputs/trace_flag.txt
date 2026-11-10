@@ -1,0 +1,20 @@
+“long_prefill_token_threshold”出现在 3 个文件里，共 21 处：
+
+vllm/config/scheduler.py（7 处）
+     90  long_prefill_token_threshold: int = Field(default=0, ge=0)
+    102  long_prefill_token_threshold is nonzero."""
+    313  "long_prefill_token_threshold",
+    344  self.long_prefill_token_threshold = 0
+         …还有 3 处
+
+vllm/engine/arg_utils.py（3 处）
+    618  long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
+   1796  **scheduler_kwargs["long_prefill_token_threshold"],
+   2708  long_prefill_token_threshold=self.long_prefill_token_threshold,
+
+vllm/v1/core/sched/scheduler.py（11 处）
+    631  long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
+    770  # `long_prefill_token_threshold` exists to stop a long prefill from
+    775  long_prefill_token_threshold = (
+    776  self.scheduler_config.long_prefill_token_threshold
+         …还有 7 处

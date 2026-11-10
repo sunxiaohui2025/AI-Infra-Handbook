@@ -1,0 +1,6 @@
+一致：'The capital of France is' → ' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital'
+一致：'def fibonacci(n):' → '\n    if n == 0:\n        return 0\n    elif n == 1:\n        return 1\n    else:\n        return fibonacci(n'
+一致：'一个推理引擎由哪几部分组成？' → '它如何运作？  请提供一个例子，说明如何使用它来解决一个实际问题。\n答案：  问题：某公司需要为员工'
+一致：'1, 2, 3, 4, 5,' → ' 6, 7, 8, 9, 10, 11, 12, 13, 14,'
+运行中发生了 2 次抢占
+v3：4/4 条与 HuggingFace 逐 token 一致

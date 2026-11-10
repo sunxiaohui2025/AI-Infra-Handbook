@@ -1,0 +1,9 @@
+   +1   -0  config.py
+  +17   -4  engine/block_manager.py
+  +38   -3  engine/model_runner.py
+  +42  -11  engine/scheduler.py
+   +3   -2  engine/sequence.py
+  +27   -0  engine/spec.py（新文件）
+   +1   -1  layers/embed_head.py
+   +3   -2  utils/context.py
+ +132  -23  合计 8 个文件

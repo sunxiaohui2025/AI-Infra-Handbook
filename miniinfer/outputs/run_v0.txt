@@ -1,0 +1,3 @@
+生成 8 个 token：1.56 s，平均每个 195 ms
+生成 32 个 token：6.95 s，平均每个 217 ms
+'The capital of France is Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital'

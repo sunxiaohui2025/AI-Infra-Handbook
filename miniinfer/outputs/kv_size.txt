@@ -1,0 +1,2 @@
+FP32：每个 token 224 KiB；一个 2048 token 的请求 448 MiB
+BF16：每个 token 112 KiB；一个 2048 token 的请求 224 MiB
