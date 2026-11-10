@@ -1,0 +1,62 @@
+---
+// 有缓存和无缓存的计算量对比。提示 4 个 token，之后一步一步生成。
+// 每一行是一次前向（第 1 行是 prefill），每一格是一个 token 位置：
+//   深色 = 这次前向里要完整计算的位置；浅色 = 直接用缓存里存好的 k、v，不再计算；空白 = 还没生成。
+// 读者可以：切换“无缓存 / 有缓存”，拖动已生成的步数，或点“播放”；下方统计累计计算了多少个位置、缓存里存了多少。
+interface Props { title?: string; caption?: string }
+const { title = '有缓存和无缓存：每一步要算多少', caption } = Astro.props;
+---
+<figure class="ai-gt ai-kvc" data-kvcache>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="no" aria-pressed="false">无缓存</button><button data-v="yes" aria-pressed="true">有 KV Cache</button></div>
+    <label class="ai-tl-lr"><span>已生成 <b data-tv></b> 个 token</span><input type="range" min="0" max="12" step="1" value="6" data-t /></label>
+    <div class="ai-gt-pre ai-pc-sets"><button data-act="play">▶ 播放</button></div>
+  </div>
+  <div class="ai-kvc-grid" data-grid></div>
+  <div class="ai-mc-cards" data-cards></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const P = 4, MAXT = 12;
+  function init(fig: HTMLElement) {
+    let mode = 'yes', timer = 0;
+    const tIn = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    function draw() {
+      const T = Number(tIn.value);
+      fig.querySelector('[data-tv]')!.textContent = String(T);
+      const cols = P + MAXT;
+      let h = `<table class="ai-att-tbl ai-kvc-tbl"><thead><tr><th></th>${Array.from({ length: cols }, (_, j) => `<th>${j < P ? '提示' : '生成'}<small>${j + 1}</small></th>`).join('')}</tr></thead><tbody>`;
+      let computed = 0;
+      for (let r = 0; r <= T; r++) {
+        const n = P + r;                    // 这次前向时序列已有 n 个 token（prefill 时是 4）
+        h += `<tr><th>${r === 0 ? 'prefill' : `第 ${r} 步`}</th>`;
+        for (let j = 0; j < cols; j++) {
+          let cls = '';
+          if (j < n) {
+            const isNew = r === 0 ? true : j === n - 1;
+            if (mode === 'no' || isNew) { cls = 'is-calc'; computed++; } else cls = 'is-cached';
+          }
+          h += `<td class="${cls}"></td>`;
+        }
+        h += '</tr>';
+      }
+      fig.querySelector<HTMLElement>('[data-grid]')!.innerHTML = h + '</tbody></table>';
+      const noCache = Array.from({ length: T + 1 }, (_, r) => P + r).reduce((a, b) => a + b, 0), yesCache = P + T;
+      fig.querySelector<HTMLElement>('[data-cards]')!.innerHTML =
+        `<div><span>累计计算的位置（${mode === 'no' ? '无缓存' : '有缓存'}）</span><b>${computed}</b><small>无缓存 ${noCache}，有缓存 ${yesCache}；无缓存时按 1 + 2 + … 平方增长</small></div>`
+        + `<div><span>缓存里存了</span><b>${mode === 'no' ? '0' : `${P + T} 个 token`}</b><small>${mode === 'no' ? '每步重算，不存' : '每个 token 每层一组 k、v；Llama-3-8B 每 token 128 KiB'}</small></div>`
+        + `<div><span>这一步要算</span><b>${mode === 'no' ? `${P + T} 个位置` : '1 个位置'}</b><small>${mode === 'no' ? '整句从头再算一遍' : '只算新 token 的 q、k、v，用 q 去看缓存'}</small></div>`;
+    }
+    const stop = () => { clearInterval(timer); timer = 0; };
+    fig.addEventListener('input', () => { stop(); draw(); });
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, b = t.closest<HTMLElement>('[data-group="m"] [data-v]'), act = t.closest<HTMLElement>('[data-act]');
+      if (b) { mode = b.dataset.v!; fig.querySelectorAll('[data-group="m"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw(); }
+      else if (act) { stop(); tIn.value = '0'; draw(); timer = window.setInterval(() => { const v = Number(tIn.value) + 1; if (v > MAXT) { stop(); return; } tIn.value = String(v); draw(); }, 500); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-kvcache]').forEach(init);
+</script>

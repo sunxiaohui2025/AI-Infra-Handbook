@@ -1,0 +1,107 @@
+---
+id: 109
+slug: v3-paged-kv
+title: v3 · 分页 KV 管理
+chapter: 5
+part: 14
+problem: KV 按块按需分配，同样的显存放下更多请求
+prereqs: [67, 70, 108]
+level: 主线
+demos: [EngineArch, CodeWalk, CodeDiff, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineArch from '../../components/EngineArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CodeDiff from '../../components/CodeDiff.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[67, 70, 108]} />
+
+v2 给每个请求按“提示 + 最大输出”预留一整块连续的 KV Cache。请求刚进来时，它只用了提示那一小段，后面的空间要等它慢慢生成才用得上；可这块空间从一开始就被占住了，别的请求用不了。KV 的空间一紧张，能同时跑的请求数就由“最大长度”而不是“实际用了多少”决定。
+
+第 67 讲的 PagedAttention 给出了办法：把 KV 的空间切成固定大小的块，所有请求共用一个块池；每个请求用一张**块表**记下自己的 KV 放在哪些块里，用到哪里拿到哪里。这一讲把它写进 miniinfer，顺带处理分页带来的新问题：块用完了怎么办。
+
+<EngineArch ver="v3" caption="图 109-1　v3 用 block_manager.py 取代了 kv_cache.py；调度器改成按空闲块数放行，块不够时抢占。模型的代码一行都没改。" />
+
+## 设计：块池、块表、和一个“看起来连续”的视图
+
+三样东西：
+
+- **块池**（KVPool）：一开始就分配好一大块内存，形状 [层数, 块数, 块大小, KV 头数, 头维度]，K、V 各一份。块大小取 16 个位置，Qwen3-0.6B 在 FP32 下一个块（28 层合计）是 16 × 224 KiB = 3.5 MiB。
+- **块表**：每个请求一个整数列表。第 j 项是“我的第 j 个 16 位置的段，放在池子里的第几块”。位置 p 在第 `table[p // 16]` 块的第 `p % 16` 格。
+- **块管理器**（BlockManager）：一个空闲块的列表。请求进来时按提示长度拿块；decode 时位置跨进新块，再拿一块；请求结束，块还回来。
+
+用一个例子看块表：块大小 16，请求 A 有 20 个 token，请求 B 有 40 个。
+
+```text
+块池：  [ 0 ][ 1 ][ 2 ][ 3 ][ 4 ][ 5 ][ 6 ][ 7 ] …
+         A    B    A    B    B
+A 的块表 = [0, 2]       位置 0–15 在块 0，16–19 在块 2 的前 4 格
+B 的块表 = [1, 3, 4]    位置 0–15、16–31、32–39
+```
+
+A 的两个块在池子里并不相邻，中间夹着 B 的块，这正是分页的意义：不需要连续的空间。
+
+模型怎么办？注意力要的是“从位置 0 到现在的全部 K、V”。我们给每个请求包一个小对象 `SeqKV`，它和 v1 的 `KVCache` **接口完全一样**（`write(layer, pos, k, v)` 和 `read(layer, end)`），内部按块表把位置换算成块和格子。这样 model.py 一行都不用改：模型只管调用 write 和 read，不知道背后是一整块还是很多小块。
+
+## block_manager.py：分页的部分
+
+这个文件里和前缀缓存有关的部分（allocate 里算哈希、查表的几行，以及 register）留到下一讲，这一讲只看分页本身。
+
+<CodeWalk file="v3/block_manager.py" steps={[
+  { lines: [5, 12], title: '块池：一次分配好', body: '<p>[28, 块数, 16, 8, 128]，K、V 各一份。压测里用 20 块（320 个位置），只有 70 MiB；真实服务会把扣掉权重之后的显存几乎全部分给块池（第 88 讲的显存账本）。</p>' },
+  { lines: [15, 25], title: 'SeqKV：位置换算成块和格子', body: '<p><code>table[pos // B]</code> 是块号，<code>pos % B</code> 是块内的格子。<code>pos</code> 是一批位置，换算也是一批一起做。</p><p>块表是请求自己的那个列表，SeqKV 只是引用它。decode 时块管理器往块表里追加新块，SeqKV 立刻就能看到。</p>' },
+  { lines: [27, 30], title: '写：每个位置写到它的格子', body: '<p>用两个下标张量（块号、格子号）一次写入一批位置。和 v1 的 <code>self.k[layer, pos] = k</code> 相比，只是多了一次换算。</p>' },
+  { lines: [32, 39], title: '读：按块表取出来，拼成连续的', body: '<p>前 end 个位置占前 ⌈end ÷ 16⌉ 个块。<code>self.pool.k[layer, table]</code> 按块号取出这些块，[n, 16, 8, 128]，reshape 成 [n × 16, 8, 128]，再截到 end。</p><p>这一步会把这个请求的 KV <b>复制</b>成一块连续的内存，每层、每步都要复制一次。我们用它换来代码的简单：注意力还是原来的写法。工业引擎的 PagedAttention kernel 直接按块表去读，不做这次复制（第 76 讲）。第 113 讲会看到这次复制的代价。</p>' },
+  { lines: [42, 54], title: '块管理器的状态', body: '<p>空闲块列表 <code>free</code>，每个块的引用计数 <code>ref</code>（这一讲里每个块只属于一个请求，计数非 0 即 1；下一讲的前缀缓存会让一个块被多个请求共用）。后面两个字典是前缀缓存用的。</p>' },
+  { lines: [56, 65], title: '拿一块', body: '<p>从空闲列表头部取一块，引用计数设为 1。中间三行是前缀缓存的善后（下一讲）。<code>blocks_needed</code> 算 n 个位置要几块：向上取整。</p>' },
+  { lines: [67, 87], title: '请求进来：为它要算的 token 分配块', body: '<p>不看前缀缓存的部分，这个函数就是“要算的 token 有几块，就拿几块”，依次放进块表。注意用的是 <code>len(seq.tokens)</code> 而不是提示长度：被抢占过的请求重新进来时，要连同已经生成的部分一起重算（见下面的调度器）。</p>' },
+  { lines: [89, 96], title: 'decode 前：要进新块就再拿一块', body: '<p>这一步要写的位置是 <code>len(tokens) − 1</code>。如果 token 数超过了块表能放的位置数（块数 × 16），说明这个位置落在一个新块里，再拿一块。每 16 步才会拿一次。</p><p>池子空了就返回 False，交给调度器处理。</p>' },
+  { lines: [113, 119], title: '还块', body: '<p>请求结束（或者被抢占）时，块的引用计数减一，减到 0 的块回到空闲列表。倒序还回去，是为了让一个请求的后几块（下一讲：往往是没装满、不会被复用的块）先被别人拿走。</p>' },
+]} />
+
+## scheduler.py：按块放行，块不够就抢占
+
+分页之后，调度器要回答的问题变了：v2 问的是“KV 空间够不够预留一整份”，现在问的是“空闲块够不够”。还多了一种情况：请求进来时块是够的，可它一边生成一边要新块，几个请求一起长，池子可能在半路用完。这时要有人让出来，这就是第 70 讲的**抢占**。
+
+<CodeDiff a="v2/scheduler.py" b="v3/scheduler.py" caption="图 109-2　scheduler.py 和 v2 的差别：放行条件从“预留得下一整份”换成“空闲块够放下这次要算的 token”；运行中的请求每步先保证有块可写，拿不到就抢占；新增 preempt。" />
+
+<CodeWalk file="v3/scheduler.py" steps={[
+  { lines: [18, 30], title: '运行中的请求：先保证有地方写', body: '<p>对每个运行中的请求，先调用 <code>append_slot</code> 保证下一个位置有块可写。拿不到，就抢占运行队列里<b>最晚进来</b>的请求，把它的块还回池子，再试一次。</p><p>如果最晚进来的就是自己，那就抢占自己，这一步不再给它排 decode。最先进来的请求永远不会被抢占，所以总有请求在往前走，不会出现大家互相抢、谁都完不成的局面。</p>' },
+  { lines: [31, 45], title: '新请求：空闲块够才放进来', body: '<p>和 v2 一样按先来后到，条件改成：这次要算的 token 数在预算之内，而且空闲块够放下它们。放进来时调用 <code>allocate</code> 分配块；返回值是前缀缓存命中的位置数（下一讲），这些位置不用再算，直接记进 <code>num_computed</code>。</p><p>这里只要求放得下<b>现在</b>的 token，不要求放得下将来要生成的。这就是分页能比 v2 多放请求的原因，代价是半路可能要抢占。</p>' },
+  { lines: [47, 54], title: '抢占：还块，回去重排', body: '<p>被抢占的请求释放所有的块，<code>num_computed</code> 清零，放回等待队列的<b>最前面</b>，下次有空就先放它。它已经生成的 token 还留在 <code>tokens</code> 里，重新进来时连同提示一起做一次 prefill，把 KV 重新算出来。</p><p>这种做法叫<b>重算</b>（recompute）。另一种做法是把它的 KV 换出到 CPU 内存，回来时再换回（swap）。重算的代价是多一次 prefill，好处是简单，也不占额外的内存（第 70 讲）。</p>' },
+]} />
+
+引擎的改动只有几行：建块池和块管理器，请求进 batch 时包一个 SeqKV 交给模型。
+
+<CodeDiff a="v2/engine.py" b="v3/engine.py" caption="图 109-3　engine.py 和 v2 的差别。分配 KV 从引擎挪到了调度器（分配块），引擎只把块表包成 SeqKV；每步算完多一行登记前缀缓存（下一讲）。" />
+
+## 先验证，再故意把池子开小
+
+<RunOutput cmd=".venv/bin/python tests/check.py v3" file="outputs/check_v3.txt" caption="图 109-4　v3 和 HuggingFace 逐 token 一致。" />
+
+这个检查用的块池很大，一次抢占都没发生。抢占的代码路径也要验证：把块池开到只有 6 块（96 个位置），4 个请求各要 40 个左右的位置，一定会有人被抢占、重算：
+
+<RunOutput cmd={`.venv/bin/python tests/check.py v3 "{'num_blocks': 6, 'prefix_cache': True}"`} file="outputs/check_v3_small.txt" caption="图 109-5　块池只有 6 块时，运行中发生了 2 次抢占，被抢占的请求重算之后接着生成，4 条输出仍然和 HuggingFace 逐 token 一致。" />
+
+被抢占的请求要把提示和已经生成的 token 一起重算一遍，算出来的 K、V 和被扔掉的那份完全一样，所以输出不受影响。这也说明“重算”在正确性上是安全的：KV 只是一种缓存，扔掉了总可以从 token 重新算出来。
+
+## 测一测：同样只有 320 个位置
+
+还是第 108 讲的 16 个请求，这次把 KV 的空间限制在 320 个位置（20 个块）。v2 按“提示 + 最大输出”整份预留；v3 按块按需分配。
+
+<RunOutput cmd=".venv/bin/python bench/paging.py" file="outputs/bench_paging.txt" caption="图 109-6　KV 空间只有 320 个位置时：v2 平均每步只能放 3.3 个请求，240 步、17.0 token/s；v3 平均每步 4.7 个，167 步、22.8 token/s，期间抢占 9 次。" />
+
+v2 每个请求要预留“十一二个 token 的提示 + 8 到 96 个输出”这么多位置，320 个位置只够同时放 3 到 4 个请求，8 个槽有一半空着。v3 进来时只要提示的 1 个块，8 个槽很快坐满；它们一起往下生成，块用完了就抢占最晚进来的，等有空再重算。抢占了 9 次，多做了 9 次 prefill，但每步多跑的 1.4 个请求远远抵得过，吞吐提高了 34%。
+
+如果 KV 的空间足够大（比如第 108 讲那样不设限），两者就没有区别了：v2 预留的空间本来就够用。分页的价值，在 KV 空间成为瓶颈时才显现出来，而真实的服务几乎总是如此：显存扣掉权重之后剩下的那部分，决定了能同时服务多少个请求。
+
+<Note kind="point">分页把“每个请求一整块连续的 KV”换成“共用的块池 + 每个请求一张块表”。请求只按现在要算的 token 拿块，decode 每跨进一个新块再拿一块，结束时还回去。代价是池子可能在半路用完，需要抢占：最晚进来的请求还回所有的块，回到队首，之后连同已生成的 token 一起重算。</Note>
+
+## 回顾
+
+v3 新增 block_manager.py：KVPool 是一大块按 [层, 块, 16, 头, 维] 分好的内存；BlockManager 管空闲块和引用计数；SeqKV 按块表把位置换算成块和格子，接口和 v1 的 KVCache 一样，所以模型不用改。调度器按空闲块数放行，运行中的请求拿不到新块时抢占最晚进来的那个，被抢占的请求回到队首重算。和 HuggingFace 仍然逐 token 一致，块池只有 6 块、发生抢占时也一样。KV 只有 320 个位置时，吞吐从 v2 的 17.0 提高到 22.8 token/s。
+
+块表还带来一个新的可能：两个请求的提示开头一样（比如同一段系统提示），它们的前几个块里存的 K、V 也一模一样。能不能让第二个请求直接用第一个请求的块？下一讲：**v3+ · 前缀缓存**。

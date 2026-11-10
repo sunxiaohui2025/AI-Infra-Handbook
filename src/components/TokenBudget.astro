@@ -1,0 +1,96 @@
+---
+// vLLM V1 统一的 token 预算调度（简化自 v1/core/sched/scheduler.py 的 schedule()，见第 117 讲）：
+//   每个请求只有 num_computed_tokens 和 num_tokens_with_spec（提示 + 已生成 + 草稿）两个数；
+//   每一步先按顺序给运行中的请求分 token（每个请求最多 long_prefill_token_threshold 个），再按先来先到放等待中的请求，
+//   直到 max_num_batched_tokens 用完。没有 prefill / decode 阶段：分块 prefill、decode、投机解码都是“补上差额”。
+// 简化：不考虑 KV 块不够时的抢占；B 带 2 个草稿，每步接受 1 个；E 进来时前缀缓存命中 128 个 token。
+// 读者可以：调整每步的 token 预算和长 prefill 的上限，一步步看每个请求分到多少。
+interface Props { title?: string; caption?: string }
+const { title = '一步的 token 预算怎么分', caption } = Astro.props;
+---
+<figure class="ai-gt ai-tb" data-tokenbudget>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-k">max_num_batched_tokens <input type="range" min="256" max="4096" step="256" value="1024" data-b /> <b data-bv></b></label>
+    <label class="ai-tl-k">long_prefill_token_threshold <input type="range" min="0" max="2048" step="128" value="512" data-l /> <b data-lv></b></label>
+    <span class="ai-gt-pre ai-pc-sets"><button data-act="step">下一步 →</button><button data-act="reset">从头开始</button></span>
+  </div>
+  <div data-svg></div>
+  <table class="ai-sm-arr" data-tbl></table>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type R = { n: string; prompt: number; tokens: number; computed: number; spec: number; out: number; max: number; arrive: number; hit: number; state: string; h: number };
+  const INIT = (): R[] => [
+    { n: 'A', prompt: 300, tokens: 340, computed: 339, spec: 0, out: 40, max: 200, arrive: 0, hit: 0, state: 'running', h: 210 },
+    { n: 'B', prompt: 500, tokens: 520, computed: 519, spec: 2, out: 20, max: 200, arrive: 0, hit: 0, state: 'running', h: 25 },
+    { n: 'C', prompt: 3000, tokens: 3000, computed: 512, spec: 0, out: 0, max: 50, arrive: 0, hit: 0, state: 'running', h: 140 },
+    { n: 'D', prompt: 800, tokens: 800, computed: 0, spec: 0, out: 0, max: 50, arrive: 0, hit: 0, state: 'waiting', h: 280 },
+    { n: 'E', prompt: 200, tokens: 200, computed: 0, spec: 0, out: 0, max: 50, arrive: 1, hit: 128, state: 'waiting', h: 330 },
+  ];
+  function init(fig: HTMLElement) {
+    const bI = fig.querySelector<HTMLInputElement>('[data-b]')!, lI = fig.querySelector<HTMLInputElement>('[data-l]')!;
+    let reqs = INIT(), step = 0, last: Record<string, number> = {}, note = '';
+    function plan() {
+      const budget0 = +bI.value, thr = +lI.value;
+      let budget = budget0; const got: Record<string, number> = {};
+      for (const r of reqs.filter((x) => x.state === 'running')) {          // 先排运行中的
+        if (budget <= 0) break;
+        let need = r.tokens + r.spec - r.computed;
+        if (thr > 0 && need > thr) need = thr;
+        need = Math.min(need, budget);
+        if (need > 0) { got[r.n] = need; budget -= need; }
+      }
+      for (const r of reqs.filter((x) => x.state === 'waiting' && x.arrive <= step)) {   // 再按先来先到放新请求
+        if (budget <= 0) break;
+        const start = r.hit;                                                // 前缀缓存命中的部分不用算
+        let need = r.tokens - start;
+        if (thr > 0 && need > thr) need = thr;
+        need = Math.min(need, budget);
+        got[r.n] = need; budget -= need;
+      }
+      return { got, used: budget0 - budget, budget0 };
+    }
+    function advance() {
+      const { got } = plan(); last = got; const msgs: string[] = [];
+      for (const r of reqs) {
+        const g = got[r.n]; if (!g) continue;
+        if (r.state === 'waiting') { r.state = 'running'; r.computed = r.hit; if (r.hit) msgs.push(`${r.n} 进来时前缀缓存命中 ${r.hit} 个`); }
+        r.computed += g;
+        if (r.computed >= r.tokens + r.spec) {                              // 补齐了：这一步会采样出新 token
+          if (r.spec) { r.tokens += 2; r.computed = r.tokens - 1; msgs.push(`${r.n} 的 2 个草稿接受了 1 个，加上采样的 1 个，一步 +2`); }
+          else { r.tokens += 1; r.computed = r.tokens - 1; }
+          r.out = r.tokens - r.prompt;
+          if (r.out >= r.max) { r.state = 'finished'; msgs.push(`${r.n} 生成完毕，离开`); }
+        }
+      }
+      step++; note = msgs.join('；');
+    }
+    function draw() {
+      fig.querySelector('[data-bv]')!.textContent = bI.value; fig.querySelector('[data-lv]')!.textContent = lI.value === '0' ? '不限' : lI.value;
+      const p = plan(), W = 880;
+      let x = 10, s = `<svg class="ai-tl-svg" viewBox="0 0 900 64"><text class="ai-al-gl" x="10" y="12">第 ${step + 1} 步将要分出的 token（总宽 = 预算 ${p.budget0}）</text>`;
+      s += `<rect x="10" y="20" width="${W}" height="24" rx="3" class="ai-gb-bar"/>`;
+      for (const r of reqs) { const g = p.got[r.n]; if (!g) continue; const w = W * g / p.budget0;
+        s += `<rect x="${x}" y="20" width="${w}" height="24" style="fill:hsl(${r.h} 60% 55% / .6)"/>`;
+        if (w > 30) s += `<text x="${x + w / 2}" y="36" text-anchor="middle" class="ai-al-gl">${r.n} ${g}</text>`; x += w; }
+      s += `<text class="ai-al-gl" x="10" y="60">用掉 ${p.used} / ${p.budget0}</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s;
+      const kind = (r: R) => r.state === 'finished' ? '结束' : r.state === 'waiting' ? (r.arrive > step ? `第 ${r.arrive + 1} 步到达` : '等待') : r.computed < r.prompt ? 'prefill 中' : r.spec ? 'decode + 2 个草稿' : 'decode';
+      let t = '<tr><th>请求</th><th>状态</th><th>num_computed / num_tokens_with_spec</th><th>上一步分到</th><th>这一步将分到</th></tr>';
+      for (const r of reqs) t += `<tr><th>${r.n}</th><td>${kind(r)}</td><td>${r.state === 'waiting' ? r.hit + '（缓存）' : r.computed} / ${r.tokens + r.spec}</td><td>${last[r.n] ?? '—'}</td><td>${p.got[r.n] ?? '—'}</td></tr>`;
+      fig.querySelector<HTMLElement>('[data-tbl]')!.innerHTML = t;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = (note ? note + '。' : '') + '每个请求要的是“差额” = num_tokens_with_spec − num_computed_tokens：decode 是 1，带草稿是 1 + 草稿数，prefill 是剩下的提示长度。长提示每步最多分 long_prefill_token_threshold 个，其余留给后面的请求。';
+    }
+    fig.addEventListener('click', (e) => {
+      const a = (e.target as Element).closest<HTMLElement>('[data-act]'); if (!a) return;
+      if (a.dataset.act === 'step') advance(); else { reqs = INIT(); step = 0; last = {}; note = ''; }
+      draw();
+    });
+    bI.addEventListener('input', draw); lI.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-tokenbudget]').forEach(init);
+</script>

@@ -1,0 +1,132 @@
+---
+// 损失函数演示：调预测概率，看交叉熵和困惑度怎么变。
+//   mode="vocab" ：TinyLM 的 6 个词，默认是“我”后面下一个词的预测（tinylm.json examples["16"] 第 1 行），正确答案“爱”。
+//   mode="binary"：两个选项（好吃 / 不好吃），并排对比交叉熵和平方误差，以及它们给出的“修正信号”（对 logit 的斜率）。
+// 读者可以：上下拖动柱子改概率（其余选项按比例缩放，总和保持 1）；点选项名字换正确答案；点预设。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { mode?: 'vocab' | 'binary'; title?: string; caption?: string }
+const { mode = 'vocab', caption } = Astro.props;
+const ex = tiny.examples['16'];
+const softmax = (z: number[]) => { const m = Math.max(...z), e = z.map((v) => Math.exp(v - m)), s = e.reduce((a, b) => a + b, 0); return e.map((v) => v / s); };
+const cfg = mode === 'vocab'
+  ? { names: ex.vocab, p: softmax(ex.logits[0]), ans: 1, ctx: '我', compare: false }
+  : { names: ['好吃', '不好吃'], p: [0.7, 0.3], ans: 0, ctx: '', compare: true };
+const { title = mode === 'vocab' ? '“我”后面是哪个词？拖动柱子改预测概率' : '二分类：交叉熵和平方误差对比' } = Astro.props;
+---
+<figure class="ai-gt ai-lp" data-loss data-cfg={JSON.stringify(cfg)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets">
+    {mode === 'vocab' && <button data-pre="model">TinyLM 原样</button>}
+    <button data-pre="uniform">完全不知道（均匀）</button>
+    <button data-pre="right">自信地猜对</button>
+    <button data-pre="wrong">自信地猜错</button>
+  </div>
+  <div class="ai-vp-body">
+    <svg class="ai-vp-svg" viewBox="0 0 360 340" role="img" aria-label={title}></svg>
+    <div class="ai-vp-side"><div class="ai-vp-read" data-read></div></div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  interface Cfg { names: string[]; p: number[]; ans: number; ctx: string; compare: boolean }
+  const fmt = (v: number, d = 3) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const PMIN = 0.001;
+
+  function init(fig: HTMLElement) {
+    const cfg: Cfg = JSON.parse(fig.dataset.cfg!);
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const read = fig.querySelector<HTMLElement>('[data-read]')!;
+    const n = cfg.names.length;
+    let p = [...cfg.p], ans = cfg.ans;
+    // 柱状图区域
+    const BL = 30, BR = 350, BT = 22, BB = 150, slot = (BR - BL) / n, bw = Math.min(40, slot * 0.6);
+    const bx = (i: number) => BL + slot * (i + 0.5);
+    const by = (v: number) => BB - v * (BB - BT);
+    // 曲线区域
+    const CL = 36, CR = 346, CT = 196, CB = 316, YMAX = cfg.compare ? 5 : 7;
+    const cx = (v: number) => CL + v * (CR - CL), cy = (v: number) => CB - Math.min(v, YMAX) / YMAX * (CB - CT);
+
+    function setP(i: number, v: number) {
+      v = Math.max(PMIN, Math.min(1 - PMIN * (n - 1), v));
+      const rest = p.reduce((s, x, j) => (j === i ? s : s + x), 0);
+      p = p.map((x, j) => (j === i ? v : rest > 1e-9 ? Math.max(PMIN, x / rest * (1 - v)) : (1 - v) / (n - 1)));
+      const s = p.reduce((a, b) => a + b, 0); p = p.map((x) => x / s);
+    }
+
+    function draw() {
+      const pa = p[ans], ce = -Math.log(pa), se = (1 - pa) ** 2;
+      let s = `<text class="ai-np-ptitle" x="${BL}" y="12">${cfg.ctx ? `预测“${cfg.ctx}”的下一个词：` : ''}各选项的概率（绿色是正确答案）</text>`;
+      s += `<line class="ai-np-sep" x1="${BL}" y1="${BB}" x2="${BR}" y2="${BB}"/>`;
+      for (let i = 0; i < n; i++) {
+        const h = BB - by(p[i]);
+        s += `<rect class="ai-lp-bar${i === ans ? ' is-ans' : ''}" x="${bx(i) - bw / 2}" y="${by(p[i])}" width="${bw}" height="${Math.max(h, 0.5)}" rx="2"/>`;
+        s += `<rect class="ai-lp-hit" data-bar="${i}" x="${bx(i) - slot / 2}" y="${BT - 8}" width="${slot}" height="${BB - BT + 8}"/>`;
+        s += `<text class="ai-lp-pv" x="${bx(i)}" y="${by(p[i]) - 4}" text-anchor="middle">${fmt(p[i], 3)}</text>`;
+        s += `<text class="ai-lp-name${i === ans ? ' is-ans' : ''}" data-ans="${i}" x="${bx(i)}" y="${BB + 16}" text-anchor="middle">${cfg.names[i]}</text>`;
+      }
+      // 曲线：横轴是正确答案的概率 p，纵轴是损失
+      s += `<line class="ai-np-sep" x1="0" y1="178" x2="360" y2="178"/>`;
+      s += `<text class="ai-np-ptitle" x="${CL}" y="${CT - 6}">损失随“正确答案的概率 p”的变化</text>`;
+      s += `<g class="ai-vp-axis"><line x1="${CL}" y1="${CB}" x2="${CR}" y2="${CB}"/><line x1="${CL}" y1="${CT}" x2="${CL}" y2="${CB}"/></g><g class="ai-vp-tick">`;
+      for (const v of [0, 0.25, 0.5, 0.75, 1]) s += `<text x="${cx(v)}" y="${CB + 13}" text-anchor="middle">${v}</text>`;
+      for (let v = 1; v <= YMAX; v += cfg.compare ? 1 : 2) s += `<text x="${CL - 5}" y="${cy(v) + 3}" text-anchor="end">${v}</text>`;
+      s += `</g>`;
+      let d = '';
+      for (let i = 0; i <= 200; i++) { const v = 0.002 + 0.998 * i / 200; d += `${i ? 'L' : 'M'}${cx(v).toFixed(1)} ${cy(-Math.log(v)).toFixed(1)} `; }
+      s += `<path class="ai-al-f" d="${d}"/>`;
+      if (cfg.compare) {
+        let d2 = '';
+        for (let i = 0; i <= 100; i++) { const v = i / 100; d2 += `${i ? 'L' : 'M'}${cx(v).toFixed(1)} ${cy((1 - v) ** 2).toFixed(1)} `; }
+        s += `<path class="ai-al-d" d="${d2}"/><circle class="ai-lp-dot2" cx="${cx(pa)}" cy="${cy(se)}" r="4.5"/>`;
+      }
+      if (n > 2) s += `<line class="ai-al-zl" x1="${cx(1 / n)}" y1="${CT}" x2="${cx(1 / n)}" y2="${CB}"/><text class="ai-al-gl" x="${cx(1 / n) + 4}" y="${CT + 10}">均匀猜 1/${n}</text>`;
+      s += `<circle class="ai-np-dot" cx="${cx(pa)}" cy="${cy(ce)}" r="5"/>`;
+      s += `<text class="ai-al-lab" x="${CR}" y="${CT + 4}" text-anchor="end"><tspan class="c-accent">— 交叉熵 −ln p</tspan>${cfg.compare ? '　<tspan class="c-key">- - 平方误差 (1 − p)²</tspan>' : ''}</text>`;
+      svg.innerHTML = s;
+
+      const name = cfg.names[ans];
+      let h = `<div class="ai-vp-row"><span>正确答案</span><div>“${name}”，模型给它的概率 p = <b>${fmt(pa)}</b></div></div>`;
+      h += `<div class="ai-vp-row"><span>交叉熵</span><div>−ln p = −ln ${fmt(pa)} = <b class="c-accent">${fmt(ce)}</b></div></div>`;
+      if (!cfg.compare) {
+        h += `<div class="ai-vp-row"><span>困惑度</span><div>e<sup>${fmt(ce)}</sup> = 1 / p = <b>${fmt(1 / pa, 2)}</b>：相当于在 ${fmt(1 / pa, 1)} 个词里均匀地猜</div></div>`;
+        h += `<div class="ai-vp-row"><span>对照</span><div>均匀猜：−ln(1/${n}) = ${fmt(Math.log(n))}，困惑度 ${n}</div></div>`;
+        h += `<table class="ai-vp-tbl"><thead><tr><th>词</th><th>概率</th><th>修正信号 p − y</th></tr></thead><tbody>`;
+        p.forEach((v, i) => { h += `<tr${i === ans ? ' class="is-focus"' : ''}><td>${cfg.names[i]}</td><td>${fmt(v)}</td><td>${fmt(v - (i === ans ? 1 : 0))}</td></tr>`; });
+        h += `</tbody></table><div class="ai-vp-row ai-vp-hint">修正信号是交叉熵对每个词打分（logit）的斜率：负数表示“这个词的分该往上调”，正数表示“该往下调”。第 17、18 讲会用到它。</div>`;
+      } else {
+        const gce = pa - 1, gse = -2 * (1 - pa) * pa * (1 - pa);
+        h += `<div class="ai-vp-row"><span>平方误差</span><div>(1 − p)² = (1 − ${fmt(pa)})² = <b class="c-key">${fmt(se)}</b></div></div>`;
+        h += `<table class="ai-vp-tbl"><thead><tr><th>修正信号（对 logit 的斜率）</th><th>值</th></tr></thead><tbody>`
+          + `<tr><td>交叉熵：p − 1</td><td class="c-accent">${fmt(gce)}</td></tr>`
+          + `<tr><td>平方误差：−2(1 − p) · p(1 − p)</td><td class="c-key">${fmt(gse, 4)}</td></tr></tbody></table>`;
+        h += `<div class="ai-vp-row ai-vp-hint">${pa < 0.1 ? '错得很自信时，平方误差的修正信号几乎为 0，交叉熵的修正信号接近 −1：交叉熵“推”得更用力。' : '把正确答案的概率拖到 0.1 以下，比较两种修正信号。'}</div>`;
+      }
+      read.innerHTML = h;
+    }
+
+    let drag = -1;
+    const toP = (e: PointerEvent) => { const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM()!.inverse()); return (BB - pt.y) / (BB - BT); };
+    svg.addEventListener('pointerdown', (e) => {
+      const t = e.target as SVGElement;
+      if (t.dataset?.ans) { ans = Number(t.dataset.ans); draw(); return; }
+      if (!t.dataset?.bar) return;
+      drag = Number(t.dataset.bar); svg.setPointerCapture(e.pointerId); setP(drag, toP(e)); draw(); e.preventDefault();
+    });
+    svg.addEventListener('pointermove', (e) => { if (drag < 0) return; setP(drag, toP(e)); draw(); });
+    const end = () => { drag = -1; };
+    svg.addEventListener('pointerup', end); svg.addEventListener('pointercancel', end);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-pre]');
+      if (!b) return;
+      const k = b.dataset.pre;
+      if (k === 'model') p = [...cfg.p];
+      else if (k === 'uniform') p = p.map(() => 1 / n);
+      else if (k === 'right') { p = p.map(() => 0.05 / (n - 1)); p[ans] = 0.95; }
+      else { const wrong = ans === 0 ? 1 : 0; p = p.map(() => 0.002); p[ans] = 0.01; p[wrong] = 1 - 0.01 - 0.002 * (n - 2); }  // 正确答案只给 0.01
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-loss]').forEach(init);
+</script>

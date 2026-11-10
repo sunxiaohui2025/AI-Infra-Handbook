@@ -1,0 +1,59 @@
+---
+// 动态形状下的三种程序策略：通用 / 分桶 / 逐形状特化（公式与第 78 讲第二段代码相同）。
+//   一组 = 10 次 FFN：8 次 256 行、1 次 1536 行、1 次 2048 行；FFN 每行 6·4096·12288 FLOPs；RTX PRO 6000 BF16 峰值 503.8 TFLOP/s
+//   通用：按实际行数，MFU 20%，准备 100 ms；分桶（512、2048 两个桶）：多算 45%，MFU 40%，准备 400 ms；特化：MFU 50%，准备 900 ms
+//   跑 r 组的总时间 = 准备 + r × 每组时间
+// 读者可以：调组数 r、切换“程序已经缓存”（准备时间为 0）、调分桶和特化的 MFU，看哪种策略总时间最短、交点在哪里。
+interface Props { title?: string; caption?: string }
+const { title = '为形状专门编译，要跑多少次才值得', caption } = Astro.props;
+---
+<figure class="ai-gt ai-spc" data-speccost>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>跑 <b data-rv></b> 组</span><input type="range" min="1" max="200" step="1" value="70" data-r /></label>
+    <label class="ai-tl-lr"><span>特化的 MFU <b data-sv></b>%</span><input type="range" min="30" max="80" step="5" value="50" data-s /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="c"><span class="ai-tl-k">程序：</span><button data-v="0" aria-pressed="true">第一次编译</button><button data-v="1" aria-pressed="false">已经缓存</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const FL = 6 * 4096 * 12288, PEAK = 503.8e12, REAL = 8 * 256 + 1536 + 2048, PAD = 8 * 512 + 2048 + 2048;
+  function init(fig: HTMLElement) {
+    let cached = false;
+    const q = (s: string) => Number(fig.querySelector<HTMLInputElement>(s)!.value);
+    function draw() {
+      const r = q('[data-r]'), sm = q('[data-s]') / 100;
+      fig.querySelector('[data-rv]')!.textContent = String(r); fig.querySelector('[data-sv]')!.textContent = String(Math.round(sm * 100));
+      const P: [string, number, number, string][] = [
+        ['通用', cached ? 0 : 0.1, FL * REAL / (PEAK * 0.2), 'c-ink'],
+        ['分桶', cached ? 0 : 0.4, FL * PAD / (PEAK * 0.4), 'c-key'],
+        ['特化', cached ? 0 : 0.9, FL * REAL / (PEAK * sm), 'c-acc'],
+      ];
+      const R = 200, tot = (p: (typeof P)[number], n: number) => p[1] + n * p[2], ymax = Math.max(...P.map((p) => tot(p, R)));
+      const x0 = 60, w = 520, y0 = 190, h = 160, X = (n: number) => x0 + n / R * w, Y = (t: number) => y0 - t / ymax * h;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 640 215"><text class="ai-np-ptitle" x="10" y="16">总时间 = 准备 + 组数 × 每组时间（s）</text><line class="ai-sa-ln" x1="${x0}" y1="${y0}" x2="${x0 + w}" y2="${y0}"/>`;
+      for (let n = 0; n <= R; n += 50) s += `<text class="ai-al-gl" x="${X(n)}" y="${y0 + 14}" text-anchor="middle">${n} 组</text>`;
+      P.forEach((p, i) => { s += `<line class="ai-bc-line ${p[3]}" x1="${X(0)}" y1="${Y(p[1])}" x2="${X(R)}" y2="${Y(tot(p, R))}"/><text class="ai-al-gl" x="${X(R) + 4}" y="${Y(tot(p, R)) + 4 + i * 2}">${p[0]}</text>`; });
+      s += `<line class="ai-eps-80" x1="${X(r)}" y1="${y0 - h}" x2="${X(r)}" y2="${y0}"/>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const best = P.reduce((a, b) => (tot(b, r) < tot(a, r) ? b : a));
+      let sw = ''; let prev = '';
+      for (let n = 1; n <= 500; n++) { const b = P.reduce((a, c) => (tot(c, n) < tot(a, n) ? c : a))[0]; if (b !== prev) { sw += `${sw ? '，' : ''}第 ${n} 组起${b}`; prev = b; } }
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        P.map((p) => `${p[0]}：准备 ${(p[1] * 1e3).toFixed(0)} ms + ${r} × ${(p[2] * 1e3).toFixed(1)} ms = ${tot(p, r).toFixed(2)} s`).join('；') + `。跑 ${r} 组最省时的是 <b>${best[0]}</b>。`
+        + `<br>最省时的方案随组数变化：${sw}。`
+        + '<br><span class="ai-faint">分桶多算了 45% 的行，可每组仍比通用快；特化每组最快，但准备时间最长。程序已经缓存时，准备为零，特化从第一组起就最快。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      cached = bt.dataset.v === '1'; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-speccost]').forEach(init);
+</script>

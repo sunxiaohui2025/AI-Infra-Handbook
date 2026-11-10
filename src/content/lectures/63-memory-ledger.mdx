@@ -1,0 +1,148 @@
+---
+id: 63
+slug: memory-ledger
+title: 显存账本
+chapter: 3
+part: 8
+problem: 权重、KV cache、激活各占多少
+prereqs: [35, 39, 61, 62]
+level: 主线
+minutes: 25
+demos: [MemLedger]
+video: ""
+formula: '可用显存 $= \text{权重}+\text{激活}+\text{其他开销}+\text{KV Cache}$；最大并发 $\approx(\text{可用}-\text{权重}-\text{激活}-\text{其他})/(\text{每 token KV}\times\text{每请求 token 数})$'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import MemLedger from '../../components/MemLedger.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[35, 39, 61, 62]} />
+
+部署一个模型前，第一个要回答的问题往往不是“多快”，而是“**放不放得下**”：这个模型能不能装进这张卡？装进去以后，还剩多少地方给 KV Cache？能同时服务多少个请求？上一讲看到，并发数直接决定了吞吐，而并发数的上限是显存给的。
+
+这一讲把一张 GPU 的显存当成一本账，逐项算清楚：**权重、KV Cache、激活、其他开销**各占多少。这本账是部署时选显卡、定精度、定卡数、定最大并发的依据，所以标了重点。
+
+## 账本上的四项
+
+**权重**：最大、也最确定的一项。参数个数乘以每个参数的字节数（第 35 讲）：Llama-3-8B 用 BF16 是 80.3 亿 × 2 字节 ≈ 16.06 GB，即 15.0 GiB。用 FP8 减半，用 4 位量化再减半（第 11 篇）。多卡张量并行时，每张卡放 1/n（第 93 讲）。
+
+**KV Cache**：随请求变化的一项，通常是除权重以外最大的。每个 token 的 KV Cache 是 2 × 层数 × KV 头数 × 每头维度 × 字节数（第 39 讲），Llama-3-8B 用 BF16 是 128 KiB；乘上所有请求的 token 总数，就是 KV Cache 的总量。
+
+**激活**：前向计算时的临时结果，比如每层的 Q、K、V、FFN 中间那个 14336 维的向量（第 31 讲）。推理时不需要像训练那样把它们全部留着给反向用（第 18 讲），算完一层就可以复用这块空间，所以只需要按“一次最多处理多少个 token”预留。prefill 一次处理一大块 token 时最大。按一块 8192 个 token 粗估，Llama-3-8B 约 0.9 GiB。
+
+**其他开销**：CUDA 运行时本身、矩阵乘法库的工作空间、多卡通信的缓冲区、CUDA Graph 等，粗估一两个 GiB。另外，推理引擎通常不会把显存用到 100%，比如 vLLM 默认只用 90%（参数 `gpu_memory_utilization`），剩下的留给意外和碎片。
+
+## 算一张卡的账
+
+拿 Llama-3-8B、BF16、一张 80 GB 的 H100 算一下：
+
+| 项目 | 大小 |
+| --- | --- |
+| 可用显存（80 GB 的 90%） | 67.1 GiB |
+| 权重 | 15.0 GiB |
+| 激活（prefill 一块 8192 token，粗估） | 0.91 GiB |
+| 其他开销（粗估） | 1.9 GiB |
+| **剩给 KV Cache** | **49.3 GiB** |
+
+每个 token 的 KV Cache 是 128 KiB，49.3 GiB 能放约 40 万个 token。如果每个请求的长度是 4096 个 token，最多同时放约 **99 个请求**。
+
+把权重和 KV Cache 都换成 FP8：权重降到 7.5 GiB，每个 token 的 KV Cache 降到 64 KiB，KV Cache 的空间增加到 56.8 GiB，能放约 93 万个 token，**227 个请求**，翻了一倍多。这就是低精度在推理里最直接的价值之一：同样的卡，能服务更多的人。
+
+## 大模型放不下怎么办
+
+换成 Llama-3-70B：
+
+- **BF16，一张 80 GB 的卡**：权重 131.4 GiB，远超可用的 67.1 GiB，放不下。
+- **FP8，一张卡**：权重 65.7 GiB，加上激活和其他开销，已经超过 67.1 GiB，没有地方放 KV Cache。权重勉强“装得进”，模型却没法服务任何请求。
+- **BF16，两张卡（张量并行）**：每张卡 65.7 GiB 的权重，同样没有地方放 KV Cache。
+- **BF16，四张卡**：每张卡权重 32.9 GiB，剩 31.9 GiB 给 KV Cache；每个 token 的 KV Cache 也被 4 张卡分摊，每张卡 80 KiB，能放约 102 个 4096 token 的请求。
+
+所以“一张卡能装下权重”远远不够，还要给 KV Cache 留出足够的空间，否则并发上不去，吞吐就很低，成本也就很高。选多少张卡，本质上就是在权衡“卡的成本”和“KV Cache 的空间（也就是吞吐）”。
+
+下面的显存计算器可以自己换模型、精度、显卡和卡数，调请求长度和并发数，看一张卡的显存条怎么分配。
+
+<MemLedger caption="图 63-1　显存账本。默认 Llama-3-8B、BF16、一张 80 GB 的卡、每请求 4096 token：最多约 99 个请求。试试：换成 FP8；换成 70B 看放不下；把请求长度调到 131072，看能放几个。" />
+
+<Note kind="point">显存账本 = 权重 + KV Cache + 激活 + 其他开销（再加推理引擎的预留）。权重固定，激活和其他开销不大，剩下的全部给 KV Cache；KV Cache 的空间除以每个请求的 KV Cache，就是最大并发数。</Note>
+
+## 推理引擎怎么用这本账
+
+vLLM 这类推理引擎启动时，做的正是这一讲的计算：先加载权重；再用一批假数据跑一次最大规模的前向，测出激活的峰值；用“可用显存 − 权重 − 激活峰值 − 其他”算出 KV Cache 能用多少，然后**一次性**把这些显存全部申请下来，切成一个个固定大小的块，作为 KV Cache 的“池子”（第 67 讲的 PagedAttention）。启动日志里通常会打印出“能放多少个 KV Cache 块”或“最多多少个 token”，就是这本账的结果。
+
+之后，每来一个请求，就从池子里分配块；请求结束，块就还回池子。池子满了，新请求就得排队，或者把正在进行的请求换出（第 70 讲）。
+
+## 用代码复现
+
+下面的代码把这本账写成一个函数，算了 5 种配置：Llama-3-8B 的 BF16 和 FP8，Llama-3-70B 的单卡 BF16、单卡 FP8、两卡和四卡 BF16。
+
+```python
+MODELS = {   # 参数量、层数、隐藏维度、FFN 维度、KV 头数、每头维度
+    "Llama-3-8B": dict(N=8.03e9, L=32, d=4096, f=14336, kv=8, dh=128),
+    "Llama-3-70B": dict(N=70.55e9, L=80, d=8192, f=28672, kv=8, dh=128),
+}
+GiB = 2 ** 30
+
+def ledger(name, gpu_gb, n_gpu=1, w_bytes=2, kv_bytes=2, ctx=4096, chunk=8192, util=0.9, overhead_gb=2.0):
+    m = MODELS[name]
+    total = gpu_gb * 1e9 * util                                 # 推理引擎只用其中 90%，留一点余量
+    weights = m["N"] * w_bytes / n_gpu                          # 张量并行：每张卡放 1/n 的权重（第 93 讲）
+    act = chunk * (4 * m["d"] + 3 * m["f"]) * 2 / n_gpu         # prefill 一块 8192 个 token 时的临时激活（粗估，层与层之间复用）
+    other = overhead_gb * 1e9                                   # CUDA 上下文、通信缓冲、CUDA Graph 等（粗估）
+    kv_tok = 2 * m["L"] * m["kv"] * m["dh"] * kv_bytes / n_gpu  # 每个 token 的 KV Cache，在这张卡上的部分
+    kv_space = total - weights - act - other
+    reqs = kv_space / (kv_tok * ctx)
+    print(f"{name}，{n_gpu} × {gpu_gb} GB，权重 {w_bytes} 字节 / KV {kv_bytes} 字节：")
+    if kv_space <= 0:
+        print(f"  权重 {weights / GiB:.1f} + 激活 {act / GiB:.2f} + 其他 {other / GiB:.1f} GiB，已超过可用的 {total / GiB:.1f} GiB，没有地方放 KV Cache"); return
+    print(f"  可用 {total / GiB:.1f} GiB = 权重 {weights / GiB:.1f} + 激活 {act / GiB:.2f} + 其他 {other / GiB:.1f} + KV Cache {kv_space / GiB:.1f}")
+    print(f"  每 token KV {kv_tok / 1024:.0f} KiB，能放 {kv_space / kv_tok:,.0f} 个 token，即 {reqs:.0f} 个 {ctx} token 的请求")
+
+ledger("Llama-3-8B", 80)
+ledger("Llama-3-8B", 80, w_bytes=1, kv_bytes=1)                 # 权重和 KV Cache 都用 FP8
+ledger("Llama-3-70B", 80)
+ledger("Llama-3-70B", 80, w_bytes=1)
+ledger("Llama-3-70B", 80, n_gpu=2)
+ledger("Llama-3-70B", 80, n_gpu=4)
+```
+
+输出：
+
+```text
+Llama-3-8B，1 × 80 GB，权重 2 字节 / KV 2 字节：
+  可用 67.1 GiB = 权重 15.0 + 激活 0.91 + 其他 1.9 + KV Cache 49.3
+  每 token KV 128 KiB，能放 404,106 个 token，即 99 个 4096 token 的请求
+Llama-3-8B，1 × 80 GB，权重 1 字节 / KV 1 字节：
+  可用 67.1 GiB = 权重 7.5 + 激活 0.91 + 其他 1.9 + KV Cache 56.8
+  每 token KV 64 KiB，能放 930,739 个 token，即 227 个 4096 token 的请求
+Llama-3-70B，1 × 80 GB，权重 2 字节 / KV 2 字节：
+  权重 131.4 + 激活 1.81 + 其他 1.9 GiB，已超过可用的 67.1 GiB，没有地方放 KV Cache
+Llama-3-70B，1 × 80 GB，权重 1 字节 / KV 2 字节：
+  权重 65.7 + 激活 1.81 + 其他 1.9 GiB，已超过可用的 67.1 GiB，没有地方放 KV Cache
+Llama-3-70B，2 × 80 GB，权重 2 字节 / KV 2 字节：
+  权重 65.7 + 激活 0.91 + 其他 1.9 GiB，已超过可用的 67.1 GiB，没有地方放 KV Cache
+Llama-3-70B，4 × 80 GB，权重 2 字节 / KV 2 字节：
+  可用 67.1 GiB = 权重 32.9 + 激活 0.45 + 其他 1.9 + KV Cache 31.9
+  每 token KV 80 KiB，能放 417,950 个 token，即 102 个 4096 token 的请求
+```
+
+逐段对照：8B BF16 能放 99 个 4096 token 的请求，FP8 能放 227 个；70B 单卡 BF16、单卡 FP8、两卡 BF16 都没有地方放 KV Cache；四卡 BF16 能放 102 个。
+
+## 到了大模型里
+
+**长上下文让账本紧张得多。**每个请求 131072 个 token 时，Llama-3-8B 一个请求的 KV Cache 就要 16 GiB，一张 80 GB 的卡只能放 3 个。长上下文的服务，并发低、吞吐低，每个 token 的成本也高得多。这是第 39、40 讲压缩 KV Cache 的动力，也是 KV Cache 量化、卸载到 CPU 内存等技术的出发点。
+
+**你的 DGX Spark 是统一内存。**它的 CPU 和 GPU 共用 128 GB 的内存（待核实），能装下比 80 GB 显卡更大的模型，比如 FP8 的 70B 模型，还能留出一些 KV Cache 的空间；但第 60 讲说过，它的带宽低得多，decode 会慢不少。“装得下”和“跑得快”是两回事。
+
+**这本账是第四章的起点。**多卡、多机推理的每一种切分方式（张量并行、流水线并行、专家并行），首先改变的都是每张卡上这本账的分配：每张卡放多少权重、多少 KV Cache。
+
+## 容易混淆的地方
+
+1. **能装下权重不等于能部署。**还要给 KV Cache 留足空间，否则并发上不去。70B 的 FP8 权重“刚好装进”80 GB，实际上几乎没法用。
+2. **GB 和 GiB 差 7%。**显卡标称的 80 GB 是 80 × 10<sup>9</sup> 字节，约 74.5 GiB。推理引擎的日志通常用 GiB，算账时要统一单位。
+3. **激活和其他开销是粗估。**它们和具体的推理引擎、配置（比如 prefill 一次处理多少 token）有关，实际以引擎启动时测出的为准。但它们通常只占几个 GiB，不影响账本的大局。
+
+## 回顾
+
+一张 GPU 的显存分成四块：权重（参数 × 字节数，最大也最确定）、KV Cache（每 token 的大小 × 所有请求的 token 总数）、激活（按一次处理的 token 数预留，约 1 GiB）、其他开销（一两个 GiB），推理引擎还会预留约 10%。Llama-3-8B 在一张 80 GB 的卡上用 BF16，剩给 KV Cache 约 49 GiB，能放约 99 个 4096 token 的请求；换成 FP8 能放 227 个。Llama-3-70B 用 BF16 至少要四张卡，才有足够的 KV Cache 空间。推理引擎启动时做的就是这本账，然后把剩下的显存全部做成 KV Cache 的池子。
+
+知道了一张卡能放多少请求、每一步要多久，就可以算出一张卡每秒能生成多少 token，再结合 GPU 的价格，算出每个 token 要花多少钱。下一讲：**推理成本模型**。

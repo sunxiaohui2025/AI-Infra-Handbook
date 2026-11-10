@@ -1,0 +1,57 @@
+---
+// 导数与链式法则（与第 8 讲的代码相同的函数）。
+// 上半部分：选一个函数，拖 x 看曲线上那一点的切线和斜率；调 h，看割线斜率 (f(x+h) − f(x)) / h 怎么逼近导数。
+// 下半部分：x → u = 3x + 1 → v = u² → y = ln v，拖 x，看每一步的值、局部导数和它们的乘积 dy/dx。
+interface Props { title?: string; caption?: string }
+const { title = '斜率，以及一串斜率相乘', caption } = Astro.props;
+---
+<figure class="ai-gt ai-dc" data-derivchain>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="f"><button data-v="sq" aria-pressed="true">x²</button><button data-v="sin" aria-pressed="false">sin x</button><button data-v="exp" aria-pressed="false">eˣ</button><button data-v="sig" aria-pressed="false">σ(x)</button></div>
+    <label class="ai-tl-lr"><span>x = <b data-xv></b></span><input type="range" min="-3" max="3" step="0.1" value="1.5" data-x /></label>
+    <label class="ai-tl-lr"><span>h = <b data-hv></b></span><input type="range" min="-3" max="0" step="0.5" value="0" data-h /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  <div class="ai-ms-title ai-pd-h2">链式法则：x → u = 3x + 1 → v = u² → y = ln v</div>
+  <label class="ai-tl-lr"><span>x = <b data-cv></b></span><input type="range" min="0" max="2" step="0.1" value="0.5" data-c /></label>
+  <div class="ai-dc-chain" data-chain></div>
+  <div class="ai-cg-eq" data-eq2></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const sig = (z: number) => 1 / (1 + Math.exp(-z));
+  const F: Record<string, [(x: number) => number, (x: number) => number, string, number, number]> = {
+    sq: [(x) => x * x, (x) => 2 * x, '2x', -1, 9], sin: [Math.sin, Math.cos, 'cos x', -1.2, 1.2], exp: [Math.exp, Math.exp, 'eˣ', -0.5, 20], sig: [sig, (x) => sig(x) * (1 - sig(x)), 'σ(x)(1 − σ(x))', -0.1, 1.1],
+  };
+  function init(fig: HTMLElement) {
+    let fn = 'sq';
+    const q = (k: string) => fig.querySelector<HTMLInputElement>(`[data-${k}]`)!;
+    function draw() {
+      const x = Number(q('x').value), h = 10 ** Number(q('h').value), [f, df, dstr, y0, y1] = F[fn];
+      fig.querySelector('[data-xv]')!.textContent = x.toFixed(1); fig.querySelector('[data-hv]')!.textContent = String(h);
+      const X = (v: number) => 40 + ((v + 3) / 6) * 520, Y = (v: number) => 170 - ((Math.min(Math.max(v, y0), y1) - y0) / (y1 - y0)) * 150;
+      let pts = ''; for (let t = -3; t <= 3.001; t += 0.05) pts += `${X(t)},${Y(f(t))} `;
+      const k = df(x), sec = (f(x + h) - f(x)) / h;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 600 185"><line class="ai-bc-ax" x1="40" x2="560" y1="${Y(0)}" y2="${Y(0)}"/><polyline class="ai-bc-line c-acc" points="${pts}"/>`;
+      s += `<line class="ai-dc-tan" x1="${X(x - 1.2)}" y1="${Y(f(x) - 1.2 * k)}" x2="${X(x + 1.2)}" y2="${Y(f(x) + 1.2 * k)}"/>`;
+      s += `<line class="ai-dc-sec" x1="${X(x)}" y1="${Y(f(x))}" x2="${X(x + h)}" y2="${Y(f(x + h))}"/><circle class="ai-bc-dot" cx="${X(x)}" cy="${Y(f(x))}" r="4.5"/><circle class="ai-sd-dot" cx="${X(x + h)}" cy="${Y(f(x + h))}" r="3"/>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `f(${x.toFixed(1)}) = ${f(x).toFixed(4)}；导数 f′(x) = ${dstr} = <b>${k.toFixed(4)}</b>（实线是切线）。`
+        + `<br>割线斜率 (f(x + h) − f(x)) / h = ${sec.toFixed(4)}（虚线），和导数差 ${Math.abs(sec - k).toFixed(4)}。h 越小，割线越接近切线。`;
+      // 链式法则
+      const c = Number(q('c').value); fig.querySelector('[data-cv]')!.textContent = c.toFixed(1);
+      const u = 3 * c + 1, v = u * u, y = Math.log(v), d1 = 3, d2 = 2 * u, d3 = 1 / v;
+      fig.querySelector<HTMLElement>('[data-chain]')!.innerHTML = [['x', c], ['u = 3x + 1', u], ['v = u²', v], ['y = ln v', y]].map(([n, val], i) => `<span class="ai-dc-node"><small>${n}</small><b>${(val as number).toFixed(4)}</b></span>${i < 3 ? `<span class="ai-dc-arrow">→<small>×${[d1, d2, d3][i].toFixed(i === 2 ? 4 : 1)}</small></span>` : ''}`).join('');
+      fig.querySelector<HTMLElement>('[data-eq2]')!.innerHTML = `局部导数：du/dx = 3，dv/du = 2u = ${d2.toFixed(2)}，dy/dv = 1/v = ${d3.toFixed(4)}。`
+        + `<br>dy/dx = ${d3.toFixed(4)} × ${d2.toFixed(2)} × 3 = <b>${(d1 * d2 * d3).toFixed(4)}</b>（直接求导：dy/dx = 6/(3x + 1) = ${(6 / u).toFixed(4)}）。`
+        + '<br><span class="ai-faint">x 变一点，u 变 3 倍那么多；u 变一点，v 变 2u 倍；v 变一点，y 变 1/v 倍。一串影响接起来，总的倍数就是每一段倍数相乘。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return; fn = b.dataset.v!; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-derivchain]').forEach(init);
+</script>

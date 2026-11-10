@@ -1,0 +1,219 @@
+---
+// 超节点的架构示意图（只用公开资料，数字以各家官方资料和论文为准）。四种系统：
+//   hgx：两台 HGX H100（每台 8 卡 + 4 颗 NVSwitch，每卡一张 400G 网卡，机间走 InfiniBand）
+//   nvl72：GB200 NVL72（18 个计算托盘 × 4 GPU，9 个 NVLink 交换托盘 × 2 颗交换芯片，铜缆背板）
+//   cm384：CloudMatrix384（48 个节点 × 8 NPU，节点内 7 颗一级 UB 交换芯片，7 个二级子平面 × 16 颗）
+//   tpu：TPU v4 的 4×4×4 立方体（每芯片 6 条 ICI 直连邻居，立方体之间经光路交换机 OCS）
+// 读者可以：切换系统；点任意部件看它是什么、带宽多少；切换“路径”看两张卡之间的一次传输经过哪些链路和芯片。
+// 第 103 讲用到；第 56、57 讲也可以复用（传 sys 选默认系统，传 only 只显示部分系统）。
+interface Props { title?: string; caption?: string; sys?: string; only?: string[] }
+const { title = '超节点里是怎么连的', caption, sys = 'hgx', only = ['hgx', 'nvl72', 'cm384', 'tpu'] } = Astro.props;
+const NAMES: Record<string, string> = { hgx: '两台 8 卡服务器', nvl72: 'GB200 NVL72', cm384: 'CloudMatrix384', tpu: 'TPU v4 立方体' };
+---
+<figure class="ai-gt ai-sa" data-sarch data-sys={sys}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="s"><span class="ai-tl-k">系统：</span>{only.map((k) => <button data-v={k} aria-pressed={k === sys ? 'true' : 'false'}>{NAMES[k]}</button>)}</div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="p"></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Box = { t: 'b'; k: string; c: string; x: number; y: number; w: number; h: number; l?: string; p?: string[] };
+  type Line = { t: 'l'; c: string; x1: number; y1: number; x2: number; y2: number; p?: string[]; dash?: boolean };
+  type Txt = { t: 'x'; x: number; y: number; s: string; a?: string };
+  type El = Box | Line | Txt;
+  type Sys = { el: El[]; paths: [string, string, string][]; info: Record<string, string>; def: string };
+
+  const b = (k: string, c: string, x: number, y: number, w: number, h: number, l?: string, p?: string[]): Box => ({ t: 'b', k, c, x, y, w, h, l, p });
+  const ln = (c: string, x1: number, y1: number, x2: number, y2: number, p?: string[], dash = false): Line => ({ t: 'l', c, x1, y1, x2, y2, p, dash });
+  const tx = (x: number, y: number, s: string, a = 'start'): Txt => ({ t: 'x', x, y, s, a });
+
+  function hgx(): Sys {
+    const el: El[] = [];
+    for (let s = 0; s < 2; s++) {
+      const x0 = 10 + s * 320, sv = s ? 'B' : 'A';
+      el.push(b('server', 'grp', x0, 18, 300, 172), tx(x0 + 8, 32, `服务器 ${sv}（HGX H100）`));
+      const sw = [0, 1, 2, 3].map((j) => x0 + 14 + j * 72);
+      const gx = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => x0 + 10 + i * 36);
+      sw.forEach((x, j) => gx.forEach((g, i) => {
+        const p: string[] = [];
+        if (s === 0 && j === 1 && (i === 1 || i === 6)) p.push('in');
+        el.push(ln('nv', g + 15, 95, x + 30, 64, p));
+      }));
+      sw.forEach((x, j) => el.push(b('nvs', 'sw', x, 42, 60, 22, 'NVSwitch', s === 0 && j === 1 ? ['in'] : [])));
+      gx.forEach((g, i) => {
+        const pg: string[] = [];
+        if (s === 0 && (i === 1 || i === 6)) pg.push('in');
+        if ((s === 0 && i === 3) || (s === 1 && i === 5)) pg.push('out');
+        el.push(ln('pcie', g + 15, 121, g + 15, 150, (s === 0 && i === 3) || (s === 1 && i === 5) ? ['out'] : []));
+        el.push(ln('net', g + 15, 168, 320, 240, (s === 0 && i === 3) || (s === 1 && i === 5) ? ['out'] : []));
+        el.push(b('gpu', 'gpu', g, 95, 30, 26, `G${i}`, pg));
+        el.push(b('nic', 'nic', g, 150, 30, 18, 'NIC', (s === 0 && i === 3) || (s === 1 && i === 5) ? ['out'] : []));
+      });
+    }
+    el.push(b('ib', 'net', 120, 240, 400, 26, 'InfiniBand 交换机（域外网络）', ['out']));
+    el.push(tx(320, 292, '每台服务器是一个 8 卡的 NVLink 域；两台之间只能走网卡', 'middle'));
+    return {
+      el, def: 'gpu',
+      paths: [['in', '同一台机器：A.G1 → A.G6', 'A.G1 → NVSwitch → A.G6：两条 NVLink 加一次交换，每卡单向 450 GB/s，实测每次传输的固定延迟约 0.8 μs。'],
+        ['out', '跨机器：A.G3 → B.G5', 'A.G3 → PCIe → 网卡 → InfiniBand 交换机 → 网卡 → PCIe → B.G5：带宽降到每卡 50 GB/s（九分之一），单向延迟约 3.8 μs（四倍多）。这一段就是“域外”。']],
+      info: {
+        gpu: '<b>H100 SXM</b>：80 GB HBM3，显存带宽 3.35 TB/s，BF16 稠密算力约 989 TFLOP/s。18 条第四代 NVLink，每条每方向 25 GB/s，合计每方向 450 GB/s。',
+        nvs: '<b>第三代 NVSwitch</b>：每颗 64 个 NVLink 4 端口。HGX H100 的底板上有 4 颗，每张 GPU 的 18 条 NVLink 分别接到这 4 颗上（4、5、5、4 条），任意两张卡之间都能满速通信。',
+        nic: '<b>ConnectX-7 网卡</b>：每张 GPU 配一张，400 Gbit/s ≈ 50 GB/s，经 PCIe Gen5 x16 接到 GPU 附近的 PCIe 交换芯片上。跨服务器的数据都要从这里出去。',
+        ib: '<b>InfiniBand 交换网络</b>：连接成百上千台服务器，规模几乎不受限，但每卡只有 50 GB/s，延迟也更高（第 56 讲）。',
+        server: '<b>一台 HGX H100 服务器</b>：8 张 GPU、4 颗 NVSwitch、8 张网卡，另有两颗 CPU。DGX H100 整机的功率上限约 10.2 kW。',
+      },
+    };
+  }
+
+  function nvl72(): Sys {
+    const el: El[] = [];
+    el.push(b('rack', 'grp', 8, 14, 624, 222), tx(16, 28, 'GB200 NVL72：一个机柜就是一个 72 卡的 NVLink 域'));
+    const tray = (i: number) => 18 + i * 34;
+    const swx = (j: number) => 36 + j * 64;
+    for (let i = 0; i < 18; i++) el.push(ln('nv', tray(i) + 15, 82, tray(i) + 15, 104, i === 0 || i === 17 ? ['in'] : []));
+    for (let j = 0; j < 9; j++) el.push(ln('nv', swx(j) + 26, 128, swx(j) + 26, 150, j === 4 ? ['in'] : []));
+    for (let i = 0; i < 18; i++) {
+      el.push(b('tray', 'gpu', tray(i), 38, 30, 44, '', i === 0 || i === 17 ? ['in'] : []));
+      for (let g = 0; g < 4; g++) el.push(b('gpu', 'chip', tray(i) + 4 + (g % 2) * 12, 44 + Math.floor(g / 2) * 13, 10, 10));
+      el.push(tx(tray(i) + 15, 78, 'CPU×2', 'middle'));
+    }
+    el.push(b('spine', 'spine', 18, 104, 604, 24, 'NVLink 铜缆背板（spine）：每张 GPU 的 18 条 NVLink 分到 9 个交换托盘', ['in']));
+    for (let j = 0; j < 9; j++) el.push(b('nvsw', 'sw', swx(j), 150, 52, 26, '交换盘', j === 4 ? ['in'] : []));
+    el.push(ln('pcie', 600, 82, 600, 196, ['out'], true));
+    el.push(b('nic', 'nic', 470, 196, 150, 22, '网卡（每 GPU 一张）', ['out']));
+    el.push(b('ib', 'net', 120, 250, 400, 26, '域外网络：机柜与机柜之间', ['out']));
+    el.push(ln('net', 545, 218, 450, 250, ['out']));
+    el.push(tx(320, 292, '18 个计算托盘 × 4 GPU = 72 张；9 个交换托盘 × 2 颗芯片 = 18 颗 NVLink Switch', 'middle'));
+    return {
+      el, def: 'spine',
+      paths: [['in', '机柜内：托盘 1 的 GPU → 托盘 18 的 GPU', '托盘 1 → 背板 → 某个交换托盘 → 背板 → 托盘 18：任意两张卡都只隔一次交换，每卡单向约 900 GB/s。8 卡服务器里只有同一台机器才有这种待遇，这里扩大到了 72 张。'],
+        ['out', '机柜外：去另一个 NVL72', '出了机柜，又回到网卡和数据中心网络：每卡几十 GB/s 的量级。超节点没有消灭域外网络，只是把域的边界往外推了。']],
+      info: {
+        tray: '<b>计算托盘</b>：每个托盘 2 颗 Grace CPU + 4 张 Blackwell GPU。CPU 和 GPU 之间用 NVLink-C2C 相连，GPU 可以较高带宽访问 CPU 的内存。',
+        gpu: '<b>Blackwell GPU</b>：192 GB HBM3e（公开规格，以官方为准），18 条第五代 NVLink，双向合计 1.8 TB/s，即每方向约 900 GB/s。',
+        spine: '<b>NVLink 背板</b>：机柜后部的铜缆，把 72 张 GPU 和 18 颗交换芯片全部连起来。铜缆在机柜尺度（一两米）内能跑这么高的速率，再远就要用光，成本和功耗会上一个台阶（第 57 讲）。',
+        nvsw: '<b>NVLink 交换托盘</b>：每盘 2 颗 NVLink Switch 芯片，共 9 盘 18 颗。每张 GPU 往每颗交换芯片各接 1 条 NVLink，所以 72 张卡之间是无阻塞的：任意一半卡同时向另一半全速发送，也不会在交换层排队。',
+        nic: '<b>网卡</b>：用于机柜之外的 scale-out 网络。多个 NVL72 之间仍靠 InfiniBand 或以太网连接。',
+        ib: '<b>域外网络</b>：连接多个机柜，以及存储和前端服务。',
+        rack: '<b>一个机柜</b>：72 张 GPU 挤在一起，整柜功率在 120 kW 量级（公开报道，待核实），只能用液冷。风冷机柜一般在 40 kW 上下就到头了。',
+      },
+    };
+  }
+
+  function cm384(): Sys {
+    const el: El[] = [];
+    const px = (k: number) => 14 + k * 89;
+    const nx = (n: number) => 14 + n * 104;
+    for (let n = 0; n < 5; n++) for (let k = 0; k < 7; k++) el.push(ln('ub', nx(n) + 12 + k * 11, 128, px(k) + 40, 58, (n === 0 || n === 3) && k === 2 ? ['in'] : []));
+    for (let k = 0; k < 7; k++) el.push(b('l2', 'sw', px(k), 34, 80, 24, `二级子平面 ${k + 1}`, k === 2 ? ['in'] : []));
+    el.push(tx(320, 28, '二级 UB 交换：7 个子平面 × 16 颗交换芯片，装在通信机柜里', 'middle'));
+    for (let n = 0; n < 5; n++) {
+      const x = nx(n);
+      el.push(b('node', 'grp', x, 120, 94, 100));
+      el.push(b('l1', 'sw', x + 6, 128, 82, 16, '一级 UB ×7', n === 0 || n === 3 ? ['in'] : []));
+      for (let g = 0; g < 8; g++) el.push(b('npu', 'gpu', x + 6 + (g % 4) * 21, 152 + Math.floor(g / 4) * 22, 18, 18, '', (n === 0 && g === 1) || (n === 3 && g === 6) ? ['in'] : []));
+      for (let c = 0; c < 4; c++) el.push(b('cpu', 'nic', x + 6 + c * 21, 199, 18, 14, ''));
+      el.push(tx(x + 47, 234, `节点 ${n === 4 ? 48 : n + 1}`, 'middle'));
+    }
+    el.push(tx(448, 175, '……', 'middle'));
+    el.push(b('rdma', 'net', 14, 248, 300, 22, 'RDMA 平面：超节点之间', ['out']));
+    el.push(b('vpc', 'net', 326, 248, 300, 22, 'VPC 平面：接入数据中心网络'));
+    el.push(ln('net', 60, 220, 120, 248, ['out']));
+    el.push(tx(320, 292, '48 个节点 × 8 个 NPU = 384；每个节点还有 4 颗鲲鹏 CPU（全系统 192 颗）', 'middle'));
+    return {
+      el, def: 'l1',
+      paths: [['in', '超节点内：节点 1 的 NPU → 节点 4 的 NPU', 'NPU → 本节点一级 UB 交换 → 二级子平面 → 对方节点一级交换 → NPU：两级交换、四条链路。跨节点和节点内走的是同一张 UB 网，带宽量级相同，这正是它和“8 卡服务器 + 网卡”的区别。'],
+        ['out', '超节点外：去另一个 CloudMatrix384', '出了超节点，走单独的 RDMA 平面。'] ],
+      info: {
+        npu: '<b>昇腾 910C</b>：每颗由两个 die 组成。论文给出每个 NPU 的 UB 单向带宽约 392 GB/s（以论文为准）。',
+        l1: '<b>一级 UB 交换</b>：每个节点 7 颗，节点内 8 个 NPU 和 4 颗 CPU 都接到它们上面，再从它们上联到二级交换。',
+        l2: '<b>二级 UB 交换</b>：7 个子平面，每个 16 颗交换芯片，共 112 颗；加上 48 × 7 = 336 颗一级交换，全系统 448 颗交换芯片。节点到二级交换之间用光模块连接，按无阻塞设计。',
+        cpu: '<b>鲲鹏 CPU</b>：每节点 4 颗，同样接在 UB 上。UB 的目标是让 NPU、CPU、内存按统一的方式互相访问，CPU 的内存也能当作一个可以借用的大池子（见“内存池”一节）。',
+        node: '<b>一个节点</b>：8 个 NPU + 4 颗 CPU + 7 颗一级交换芯片。',
+        rdma: '<b>RDMA 平面</b>：多个超节点之间的 scale-out 网络。',
+        vpc: '<b>VPC 平面</b>：连接存储和业务前端，做租户隔离。',
+      },
+    };
+  }
+
+  function tpu(): Sys {
+    const el: El[] = [];
+    const cx = (i: number) => 40 + i * 62, cy = (j: number) => 46 + j * 56;
+    const P = new Set(['0,0-1,0', '1,0-2,0', '2,0-2,1', '2,1-2,2']);
+    for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+      if (i < 3) el.push(ln('ici', cx(i) + 30, cy(j) + 15, cx(i + 1), cy(j) + 15, P.has(`${i},${j}-${i + 1},${j}`) ? ['in'] : []));
+      if (j < 3) el.push(ln('ici', cx(i) + 15, cy(j) + 30, cx(i) + 15, cy(j + 1), P.has(`${i},${j}-${i},${j + 1}`) ? ['in'] : []));
+    }
+    for (let j = 0; j < 4; j++) { el.push(ln('ici', 22, cy(j) + 15, 40, cy(j) + 15, [], true), ln('ici', cx(3) + 30, cy(j) + 15, cx(3) + 48, cy(j) + 15, [], true)); }
+    for (let i = 0; i < 4; i++) { el.push(ln('ici', cx(i) + 15, 30, cx(i) + 15, 46, [], true), ln('ici', cx(i) + 15, cy(3) + 30, cx(i) + 15, cy(3) + 46, [], true)); }
+    for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+      const on = (i === 0 && j === 0) || (i === 2 && j === 2) || (i === 1 && j === 0) || (i === 2 && j === 0) || (i === 2 && j === 1);
+      el.push(b('chip', 'gpu', cx(i), cy(j), 30, 30, '', on ? ['in'] : []));
+    }
+    el.push(tx(140, 22, '立方体的一层：4 × 4（共 4 层）', 'middle'));
+    el.push(tx(140, 290, '虚线：每一维首尾相连（环面）', 'middle'));
+    el.push(b('ocs', 'net', 420, 120, 150, 40, '光路交换机 OCS', ['out']));
+    el.push(ln('net', 310, 140, 420, 140, ['out']));
+    el.push(tx(365, 132, '本立方体的光口', 'middle'));
+    for (let c = 0; c < 4; c++) {
+      el.push(b('cube', 'grp', 590, 40 + c * 60, 40, 40, `#${c + 2}`, c === 2 ? ['out'] : []));
+      el.push(ln('net', 570, 140, 590, 60 + c * 60, c === 2 ? ['out'] : []));
+    }
+    return {
+      el, def: 'chip',
+      paths: [['in', '立方体内：角上 → 中间', '(0,0) → (1,0) → (2,0) → (2,1) → (2,2)：沿 x 走两跳、沿 y 走两跳，每一跳都经过中间芯片的路由器。三维里最远要六跳。没有交换芯片，代价是跳数随规模增长。'],
+        ['out', '立方体之间：经 OCS', '64 颗芯片组成的立方体之间，用光路交换机连接。OCS 靠转动微镜改变光路，可以按作业需要把几个立方体拼成更大的切片，切换要毫秒级时间。']],
+      info: {
+        chip: '<b>TPU v4 芯片</b>：6 条 ICI（芯片间互联）链路，每条每方向 50 GB/s，直接连到三维里前后左右上下的 6 个邻居。',
+        ocs: '<b>光路交换机（OCS）</b>：在立方体之间重新连光路。它不解析数据包，只是把一根光纤的光“拐”到另一根上。',
+        cube: '<b>64 芯片的立方体</b>：4 × 4 × 4，正好放进一个机柜（连同 16 台主机）。TPU v4 的一个系统最多 4096 颗芯片。',
+      },
+    };
+  }
+
+  const BUILD: Record<string, () => Sys> = { hgx, nvl72, cm384, tpu };
+
+  function init(fig: HTMLElement) {
+    let key = fig.dataset.sys || 'hgx', sys = BUILD[key](), pick = sys.def, path = sys.paths[0][0];
+    const pg = fig.querySelector<HTMLElement>('[data-group="p"]')!;
+    function buttons() {
+      pg.innerHTML = '<span class="ai-tl-k">路径：</span>' + sys.paths.map(([id, name]) => `<button data-v="${id}" aria-pressed="${id === path}">${name}</button>`).join('');
+    }
+    function draw() {
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 300">';
+      for (const e of sys.el) {
+        if (e.t === 'l') s += `<line class="ai-sa-ln ${e.c}${e.p && e.p.includes(path) ? ' is-on' : ''}" x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}"${e.dash ? ' stroke-dasharray="4 3"' : ''}/>`;
+        else if (e.t === 'x') s += `<text class="ai-sa-tx" x="${e.x}" y="${e.y}" text-anchor="${e.a}">${e.s}</text>`;
+        else {
+          const on = e.p && e.p.includes(path), pk = e.k === pick && e.c !== 'chip';
+          s += `<g class="ai-sa-b ${e.c}${on ? ' is-on' : ''}${pk ? ' is-pick' : ''}" data-k="${e.k}"><rect x="${e.x}" y="${e.y}" width="${e.w}" height="${e.h}" rx="3"/>${e.l ? `<text x="${e.x + e.w / 2}" y="${e.y + e.h / 2 + 4}" text-anchor="middle">${e.l}</text>` : ''}</g>`;
+        }
+      }
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const pd = sys.paths.find((p) => p[0] === path)!;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${sys.info[pick] || ''}<br><span class="ai-faint">路径（加粗的线）：${pd[2]}　点图中任意部件看说明。</span>`;
+    }
+    fig.addEventListener('click', (ev) => {
+      const t = ev.target as HTMLElement;
+      const bt = t.closest<HTMLElement>('[data-group] [data-v]');
+      if (bt) {
+        const g = bt.closest<HTMLElement>('[data-group]')!;
+        if (g.dataset.group === 's') {
+          g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+          key = bt.dataset.v!; sys = BUILD[key](); pick = sys.def; path = sys.paths[0][0]; buttons();
+        } else { path = bt.dataset.v!; buttons(); }
+        draw(); return;
+      }
+      const part = t.closest<SVGGElement>('[data-k]');
+      if (part && sys.info[part.dataset.k!]) { pick = part.dataset.k!; draw(); }
+    });
+    buttons(); draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-sarch]').forEach(init);
+</script>

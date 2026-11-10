@@ -1,0 +1,67 @@
+---
+// 代码逐段讲解（第五章）：左边是 miniinfer/ 里的真实文件（构建时读取并高亮），右边是讲解步骤。
+// 读者点步骤（或“上一步 / 下一步”），左边高亮这一步对应的行并滚动过去，其余行变淡；“看整个文件”取消变淡。
+// 用法：<CodeWalk file="v1/model.py" steps={[{ lines: [26, 40], title: '…', body: '…（可含 <code>、<b>）' }, …]} />
+// 可传 from / to 只显示文件的一段（行号仍按原文件）。窄屏时代码在上、讲解在下。
+import { readMini, highlight, sliceLines } from './_mini';
+interface Step { lines: [number, number]; title: string; body: string }
+interface Props { file: string; steps: Step[]; title?: string; caption?: string; from?: number; to?: number }
+const { file, steps, title, caption, from = 1, to } = Astro.props;
+const text = readMini(file);
+const html = await highlight(sliceLines(text, from, to), from);
+const total = text.split('\n').length;
+---
+<figure class="ai-gt ai-cw" data-codewalk>
+  <div class="ai-cw-head">
+    <span class="ai-cw-file">{file}</span>
+    <span class="ai-faint">{to ? `第 ${from}–${to} 行 / 共 ${total} 行` : `共 ${total} 行`}</span>
+    {title && <span class="ai-cw-title">{title}</span>}
+  </div>
+  <div class="ai-cw-body">
+    <div class="ai-cw-code" set:html={html} />
+    <div class="ai-cw-steps">
+      <ol>
+        {steps.map((s, i) => (
+          <li data-step={i} data-a={s.lines[0]} data-b={s.lines[1]} class={i === 0 ? 'is-on' : ''}>
+            <button type="button"><span class="ai-cw-n">{i + 1}</span><span class="ai-cw-t">{s.title}</span><span class="ai-cw-l">第 {s.lines[0]}{s.lines[1] !== s.lines[0] ? `–${s.lines[1]}` : ''} 行</span></button>
+            <div class="ai-cw-txt" set:html={s.body} />
+          </li>
+        ))}
+      </ol>
+      <div class="ai-cw-nav">
+        <button type="button" data-prev>← 上一步</button>
+        <button type="button" data-all>看整个文件</button>
+        <button type="button" data-next>下一步 →</button>
+      </div>
+    </div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const items = [...fig.querySelectorAll<HTMLElement>('[data-step]')];
+    const lines = [...fig.querySelectorAll<HTMLElement>('.ai-cw-code .line')];
+    const pane = fig.querySelector<HTMLElement>('.ai-cw-code')!;
+    let cur = 0, all = false;
+    function show(i: number, scroll = true) {
+      cur = Math.max(0, Math.min(items.length - 1, i));
+      const a = Number(items[cur].dataset.a), b = Number(items[cur].dataset.b);
+      items.forEach((el, k) => el.classList.toggle('is-on', k === cur));
+      let first: HTMLElement | null = null;
+      for (const ln of lines) {
+        const n = Number(ln.dataset.line), on = n >= a && n <= b;
+        ln.classList.toggle('is-hl', on && !all);
+        ln.classList.toggle('is-dim', !on && !all);
+        if (on && !first) first = ln;
+      }
+      if (scroll && first) pane.scrollTo({ top: Math.max(0, first.offsetTop - pane.clientHeight * 0.18), behavior: 'smooth' });
+    }
+    items.forEach((el, k) => el.querySelector('button')!.addEventListener('click', () => { all = false; show(k); }));
+    fig.querySelector('[data-prev]')!.addEventListener('click', () => { all = false; show(cur - 1); });
+    fig.querySelector('[data-next]')!.addEventListener('click', () => { all = false; show(cur + 1); });
+    fig.querySelector('[data-all]')!.addEventListener('click', () => { all = !all; show(cur, false); });
+    show(0, false);
+  }
+  document.querySelectorAll<HTMLElement>('[data-codewalk]').forEach(init);
+</script>

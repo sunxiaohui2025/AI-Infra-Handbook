@@ -1,0 +1,67 @@
+---
+// 命中前缀后，历史 KV 从慢存储读回与新 token 计算的时间线（公式与第 101 讲第二段代码相同）。Qwen3-8B，8192 token 前缀（1.125 GiB，36 层每层 32 MiB），A100 按 156 TFLOP/s。
+//   新 token 的计算 = (2 × 69.5 亿 × n + 因果注意力) ÷ 156 TFLOP/s，均分到 36 层
+//   先读后算：全部读完再算；逐层预取：第 i 层读完才能算第 i 层，读的同时算前面的层；提前读入 p 层：前 p 层在请求开始前已在显存的缓冲里
+// 读者可以：调新 token 数、存储位置、提前读入的层数，看三条时间线和总时间；提前读入的层数达到“读比算多出的字节 ÷ 每层字节”时，读取被完全盖住。
+interface Props { title?: string; caption?: string }
+const { title = '一边读历史 KV，一边算新 token', caption } = Astro.props;
+---
+<figure class="ai-gt ai-lpf" data-lprefetch>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>新 token <b data-nv></b> 个</span><input type="range" min="0" max="5" step="1" value="2" data-n /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="s"><span class="ai-tl-k">历史 KV 在：</span><button data-v="25" aria-pressed="true">主机内存（PCIe 25 GB/s）</button><button data-v="7.1" aria-pressed="false">本地 SSD（7.1 GB/s）</button></div>
+    <label class="ai-tl-lr"><span>提前读入 <b data-pv></b> 层</span><input type="range" min="0" max="36" step="1" value="14" data-p /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const V = 8192 * 144 * 1024, LY = 36, NS = [64, 128, 256, 512, 1024, 2048];
+  const tNew = (n: number) => (2 * 6.95e9 * n + 4 * 32 * 128 * 36 * ((8192 + n) ** 2 - 8192 ** 2) / 2) / 156e12;
+  function lane(pre: number, pr: number, pc: number, serial: boolean) {
+    const reads: [number, number][] = [], comps: [number, number][] = [];
+    if (serial) { for (let i = 0; i < LY; i++) reads.push([i * pr, (i + 1) * pr]); const st = LY * pr; for (let i = 0; i < LY; i++) comps.push([st + i * pc, st + (i + 1) * pc]); return { reads, comps, end: st + LY * pc }; }
+    let t = 0;
+    for (let i = 0; i < LY; i++) {
+      const ready = i < pre ? 0 : (i - pre + 1) * pr;
+      if (i >= pre) reads.push([(i - pre) * pr, ready]);
+      const st = Math.max(ready, t); comps.push([st, st + pc]); t = st + pc;
+    }
+    return { reads, comps, end: t };
+  }
+  function init(fig: HTMLElement) {
+    let bw = 25e9;
+    const nIn = fig.querySelector<HTMLInputElement>('[data-n]')!, pIn = fig.querySelector<HTMLInputElement>('[data-p]')!;
+    function draw() {
+      const n = NS[Number(nIn.value)], p = Number(pIn.value); fig.querySelector('[data-nv]')!.textContent = String(n); fig.querySelector('[data-pv]')!.textContent = String(p);
+      const tr = V / bw, tc = tNew(n), pr = tr / LY, pc = tc / LY;
+      const lanes: [string, ReturnType<typeof lane>][] = [['先读后算', lane(0, pr, pc, true)], ['逐层预取', lane(0, pr, pc, false)], [`提前读入 ${p} 层`, lane(p, pr, pc, false)]];
+      const mx = Math.max(...lanes.map((l) => l[1].end)), sx = 480 / mx, x0 = 110;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 210"><rect class="ai-sn-a" x="110" y="6" width="12" height="10"/><text class="ai-al-gl" x="126" y="15">读历史 KV（每格一层）</text><rect class="ai-sn-b" x="260" y="6" width="12" height="10"/><text class="ai-al-gl" x="276" y="15">算新 token（每格一层）</text>';
+      lanes.forEach(([name, l], k) => {
+        const y = 32 + k * 56;
+        s += `<text class="ai-al-gl" x="${x0 - 6}" y="${y + 18}" text-anchor="end">${name}</text>`;
+        l.reads.forEach(([a, b]) => (s += `<rect class="ai-sn-a" x="${x0 + a * sx}" y="${y}" width="${Math.max((b - a) * sx - 0.5, 0.5)}" height="12"/>`));
+        l.comps.forEach(([a, b]) => (s += `<rect class="ai-sn-b" x="${x0 + a * sx}" y="${y + 16}" width="${Math.max((b - a) * sx - 0.5, 0.5)}" height="12"/>`));
+        s += `<text class="ai-al-gl" x="${x0 + l.end * sx + 4}" y="${y + 26}">${(l.end * 1e3).toFixed(1)} ms</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const buf = Math.max(0, bw * (tr - tc)), need = Math.ceil(buf / (V / LY));
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `读全部 1.125 GiB：${(tr * 1e3).toFixed(1)} ms（每层 ${(pr * 1e3).toFixed(2)} ms）；算 ${n} 个新 token：${(tc * 1e3).toFixed(1)} ms（每层 ${(pc * 1e3).toFixed(3)} ms）。`
+        + (tr > tc ? `读比算多 ${((tr - tc) * 1e3).toFixed(1)} ms，要提前读入 B·(T_读 − T_算) = ${(buf / 1e6).toFixed(0)} MB，即 <b>${need} 层</b>，读取才能被完全盖住。` : '算得比读得久，逐层预取就能把读取完全盖住，不需要缓冲。')
+        + '<br><span class="ai-faint">Transformer 一层一层地算，第 i 层只用第 i 层的 KV，所以读和算可以错开。提前读入的层可以利用前一个 batch 的执行时间，或请求还在排队的时间。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      bw = Number(bt.dataset.v) * 1e9; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-lprefetch]').forEach(init);
+</script>

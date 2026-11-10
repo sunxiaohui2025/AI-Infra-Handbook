@@ -1,0 +1,47 @@
+---
+// 不同精度的理论算力与显存占用（数字与第 55 讲的代码相同；算力是 Tensor Core 稠密算力的公开规格）。
+// 读者可以：选显卡，选模型；看每种精度的算力（柱子）、模型权重的大小、decode 读一遍权重的时间（一张卡，放得下时），
+// 以及乘法器面积的示意（∝ 尾数位数²，方块面积）。
+interface Props { title?: string; caption?: string }
+const { title = '精度减半，算力翻倍', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pr2" data-precision>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="g"><button data-v="h" aria-pressed="true">H100</button><button data-v="b" aria-pressed="false">B200</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="8.03" aria-pressed="false">Llama-3-8B</button><button data-v="70.6" aria-pressed="true">Llama-3.1-70B</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const FMT: [string, number, number][] = [['TF32', 32, 11], ['BF16', 16, 8], ['FP8', 8, 4], ['FP4', 4, 2]];   // 名字、存储位数（TF32 按 32 位存）、尾数位数
+  const GPU: Record<string, [string, Record<string, number>, number, number]> = { h: ['H100', { TF32: 495, BF16: 989, FP8: 1979 }, 3.35e12, 80e9], b: ['B200', { TF32: 1100, BF16: 2250, FP8: 4500, FP4: 9000 }, 8e12, 192e9] };
+  function init(fig: HTMLElement) {
+    let g = 'h', n = 70.6e9;
+    function draw() {
+      const [gname, tf, bw, mem] = GPU[g], mx = Math.max(...Object.values(tf));
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 200"><text class="ai-np-ptitle" x="20" y="12">Tensor Core 稠密算力（TFLOPS）</text><text class="ai-np-ptitle" x="420" y="12">乘法器面积（示意）</text>';
+      FMT.forEach(([f, , m], i) => {
+        const y = 22 + i * 42, v = tf[f];
+        s += `<text class="ai-al-gl" x="60" y="${y + 16}" text-anchor="end">${f}</text>`;
+        s += v ? `<rect class="ai-pr2-bar" x="66" y="${y + 4}" width="${(v / mx) * 300}" height="18"/><text class="ai-al-gl" x="${70 + (v / mx) * 300}" y="${y + 17}">${v}</text>` : `<text class="ai-al-gl" x="70" y="${y + 17}">不支持</text>`;
+        const side = Math.sqrt(m * m / 64) * 34;
+        s += `<rect class="ai-pr2-mul" x="${470 - side / 2}" y="${y + 20 - side / 2}" width="${side}" height="${side}"/><text class="ai-al-gl" x="${510}" y="${y + 18}">${m} 位尾数 → ${(m * m / 64).toFixed(2)}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const rows = FMT.filter(([f]) => f !== 'TF32').map(([f, bits]) => { const w = n * bits / 8; return `${f}：权重 ${(w / 1e9).toFixed(0)} GB${w > mem * 0.9 ? '（一张卡放不下）' : `，decode 读一遍 ${(w / bw * 1e3).toFixed(1)} ms`}`; }).join('；');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${gname}（${mem / 1e9} GB、${(bw / 1e12).toFixed(2)} TB/s）：${rows}。`
+        + '<br><span class="ai-faint">位数减半，同样面积的芯片能放更多乘法器（乘法器的面积大致和尾数位数的平方成正比），算力翻倍；每个数占的字节也减半，读得快一倍、放得下的更多。</span>';
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const gr = b.closest<HTMLElement>('[data-group]')!; gr.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      if (gr.dataset.group === 'g') g = b.dataset.v!; else n = Number(b.dataset.v) * 1e9; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-precision]').forEach(init);
+</script>

@@ -1,0 +1,36 @@
+---
+// KV Cache 量化计算器（公式与第 84 讲的代码相同）：Llama-3-8B，同样 49.3 GiB 的 KV 池子（第 63 讲）。
+// 每个 token 的 KV 有 65536 个元素；BF16 16 位、FP8 8 位、INT4 每 128 个元素配一个 FP16 scale（4.125 位）、INT2 同理（2.125 位）。
+// 满载时 decode 一步 ≈ max(计算 / 989 TFLOPS, (权重 16.06 GB + 所有请求的 KV) / 3.35 TB/s)，上下文都按请求长度算。
+// 读者可以：调请求长度，看每种精度能放多少个请求、满载的 TPOT 和吞吐。
+interface Props { title?: string; caption?: string }
+const { title = '同样的显存，压缩 KV 能放多少请求', caption } = Astro.props;
+---
+<figure class="ai-gt ai-kq" data-kvquant>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-tl-lr"><span>每个请求 <b data-lv></b> 个 token</span><input type="range" min="0" max="5" step="1" value="2" data-l /></label>
+  <div class="ai-kq-rows" data-rows></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const LS = [1024, 2048, 4096, 8192, 16384, 32768], POOL = 49.3 * 2 ** 30, EL = 65536;
+  const N = 8.03e9, NE = 128256 * 4096, F = 989e12, BW = 3.35e12;
+  const FMTS: [string, number][] = [['BF16', 16], ['FP8', 8], ['INT4', 4 + 16 / 128], ['INT2', 2 + 16 / 128]];
+  function init(fig: HTMLElement) {
+    const lIn = fig.querySelector<HTMLInputElement>('[data-l]')!;
+    function draw() {
+      const len = LS[Number(lIn.value)]; fig.querySelector('[data-lv]')!.textContent = String(len);
+      const res = FMTS.map(([n, bits]) => { const per = EL * bits / 8, toks = Math.floor(POOL / per), b = Math.floor(toks / len); const t = Math.max((2 * (N - NE) + 4 * 32 * 4096 * len) * b / F, (N * 2 + per * len * b) / BW); return { n, bits, per, toks, b, t }; });
+      const mx = res[res.length - 1].b;
+      fig.querySelector<HTMLElement>('[data-rows]')!.innerHTML = res.map((r) => `<div class="ai-kq-row"><b>${r.n}</b><span class="ai-kq-bar"><i style="width:${(r.b / mx) * 100}%"></i></span><span>${r.b} 个请求</span><span class="ai-faint">${(r.per / 1024).toFixed(1)} KiB/token · TPOT ${(r.t * 1e3).toFixed(1)} ms · ${Math.round(r.b / r.t).toLocaleString()} token/s</span></div>`).join('');
+      const a = res[0], c = res[1];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `池子 49.3 GiB：BF16 能放 ${a.toks.toLocaleString()} 个 token，FP8 ${c.toks.toLocaleString()} 个。每个请求 ${len} 个 token 时，并发从 ${a.b} 变成 ${c.b}。`
+        + '<br><span class="ai-faint">满载时 decode 主要在读 KV：KV 小一半，同样的时间能读两倍的请求，所以 TPOT 几乎不变，吞吐翻倍。代价是精度——INT4 以下误差明显，见正文。</span>';
+    }
+    lIn.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-kvquant]').forEach(init);
+</script>

@@ -1,0 +1,172 @@
+---
+// 在浏览器里从头训练一个 1→8→8→1 的 ReLU 网络，拟合带噪声的 sin(1.5x)（64 个样本）。
+// 读者可以：选优化器（SGD / Momentum / Adam）、学习率、batch 大小（1 / 8 / 64）、是否用“预热 + 余弦衰减”；
+//   “训练一步”看一个 step 里发生了什么；“▶ 训练”连续训练（每 60ms 跑一个 epoch），最多 400 个 epoch；“重置”回到同一个随机初始化。
+// 左图：数据点和当前拟合的曲线；右图：每个 epoch 结束时在全部数据上的损失（对数坐标）。
+// 数据、初始化都用固定种子，和文章里的 Python 代码同一套设定（数值不必逐位相同：随机数生成器不同）。
+interface Props { title?: string; caption?: string }
+const { title = '在浏览器里训练一个小网络', caption } = Astro.props;
+const LRS = [0.001, 0.003, 0.01, 0.03, 0.1, 0.3];
+---
+<figure class="ai-gt ai-tl" data-trainloop data-lrs={JSON.stringify(LRS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="opt">
+      <button data-v="sgd" aria-pressed="false">SGD</button><button data-v="momentum" aria-pressed="false">Momentum</button><button data-v="adam" aria-pressed="true">Adam</button>
+    </div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="bs">
+      <span class="ai-tl-k">batch</span><button data-v="1" aria-pressed="false">1</button><button data-v="8" aria-pressed="true">8</button><button data-v="64" aria-pressed="false">64（全部）</button>
+    </div>
+    <label class="ai-tl-lr"><span>学习率 η = <b data-lrv></b></span><input type="range" min="0" max={LRS.length - 1} step="1" value="2" data-lr /></label>
+    <label class="ai-al-chk"><input type="checkbox" data-sched />预热 20 个 epoch + 余弦衰减到 0（共 400 个 epoch）</label>
+  </div>
+  <div class="ai-tl-plots">
+    <svg class="ai-tl-svg" viewBox="0 0 300 200" data-fit role="img" aria-label="数据和拟合曲线"></svg>
+    <svg class="ai-tl-svg" viewBox="0 0 300 200" data-curve role="img" aria-label="损失曲线"></svg>
+  </div>
+  <div class="ai-gt-play">
+    <button class="ai-pill ai-pill--solid" data-act="play">▶ 训练</button>
+    <button class="ai-pill" data-act="step">训练一步</button>
+    <button class="ai-pill" data-act="reset">重置</button>
+    <span class="ai-ms-count" data-count></span>
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Opt = 'sgd' | 'momentum' | 'adam';
+  const fmt = (v: number, d = 4) => { if (!isFinite(v)) return '∞'; const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  // 可复现的随机数（mulberry32）和正态分布（Box–Muller）
+  const rng = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const normal = (r: () => number) => Math.sqrt(-2 * Math.log(1 - r())) * Math.cos(2 * Math.PI * r());
+  const H = 8, N = 64, EMAX = 400;
+
+  function init(fig: HTMLElement) {
+    const LRS: number[] = JSON.parse(fig.dataset.lrs!);
+    const fitSvg = fig.querySelector<SVGSVGElement>('[data-fit]')!, curveSvg = fig.querySelector<SVGSVGElement>('[data-curve]')!;
+    const eq = fig.querySelector<HTMLElement>('[data-eq]')!, countEl = fig.querySelector<HTMLElement>('[data-count]')!;
+    const lrIn = fig.querySelector<HTMLInputElement>('[data-lr]')!, sched = fig.querySelector<HTMLInputElement>('[data-sched]')!;
+    const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+    // 数据：x 在 [−3, 3] 上均匀取 64 个点，y = sin(1.5x) + 0.1 × 噪声
+    const dr = rng(2026);
+    const XS = Array.from({ length: N }, (_, i) => -3 + 6 * i / (N - 1));
+    const YS = XS.map((x) => Math.sin(1.5 * x) + 0.1 * normal(dr));
+    let opt: Opt = 'adam', bs = 8;
+    // 参数：W1 [1×H] b1 [H]  W2 [H×H] b2 [H]  W3 [H×1] b3 [1]，全部摊平成一个数组，方便优化器统一处理
+    const SIZES = [H, H, H * H, H, H, 1];
+    const NP = SIZES.reduce((a, b) => a + b, 0);
+    const OFF = SIZES.map((_, i) => SIZES.slice(0, i).reduce((a, b) => a + b, 0));
+    let P = new Float64Array(NP), M = new Float64Array(NP), V = new Float64Array(NP);
+    let step = 0, epoch = 0, cursor = 0, order: number[] = [], hist: number[] = [], timer = 0, lastBatch: number[] = [], lastLoss = NaN, lastPos = [0, 0];
+    let shuf = rng(7);
+
+    function reset() {
+      const r = rng(15);
+      P = new Float64Array(NP); M = new Float64Array(NP); V = new Float64Array(NP);
+      // He 初始化：权重 ~ N(0, 2 / 输入个数)，偏置为 0
+      for (let j = 0; j < H; j++) P[OFF[0] + j] = normal(r) * Math.sqrt(2 / 1);
+      for (let k = 0; k < H * H; k++) P[OFF[2] + k] = normal(r) * Math.sqrt(2 / H);
+      for (let k = 0; k < H; k++) P[OFF[4] + k] = normal(r) * Math.sqrt(2 / H);
+      step = 0; epoch = 0; cursor = 0; shuf = rng(7); order = newOrder(); hist = [fullLoss()]; lastBatch = []; lastLoss = NaN;
+    }
+    function newOrder() { const o = Array.from({ length: N }, (_, i) => i); for (let i = N - 1; i > 0; i--) { const j = Math.floor(shuf() * (i + 1)); [o[i], o[j]] = [o[j], o[i]]; } return o; }
+    const W1 = (j: number) => P[OFF[0] + j], B1 = (j: number) => P[OFF[1] + j], W2 = (i: number, j: number) => P[OFF[2] + i * H + j], B2 = (j: number) => P[OFF[3] + j], W3 = (j: number) => P[OFF[4] + j];
+    function fwd(x: number) {
+      const z1 = new Float64Array(H), h1 = new Float64Array(H), z2 = new Float64Array(H), h2 = new Float64Array(H);
+      for (let j = 0; j < H; j++) { z1[j] = W1(j) * x + B1(j); h1[j] = Math.max(0, z1[j]); }
+      let y = P[OFF[5]];
+      for (let j = 0; j < H; j++) { let s = B2(j); for (let i = 0; i < H; i++) s += h1[i] * W2(i, j); z2[j] = s; h2[j] = Math.max(0, s); y += h2[j] * W3(j); }
+      return { z1, h1, z2, h2, y };
+    }
+    const fullLoss = () => XS.reduce((s, x, i) => s + (fwd(x).y - YS[i]) ** 2, 0) / N;
+    const lrNow = () => {
+      const base = LRS[+lrIn.value];
+      if (!sched.checked) return base;
+      const warm = Math.min(1, (epoch + 1) / 20);
+      return base * warm * 0.5 * (1 + Math.cos(Math.PI * Math.min(epoch, EMAX) / EMAX));
+    };
+
+    // 一个训练步：取一批 → 前向 → 损失 → 反向 → 更新
+    function trainStep() {
+      const batch = order.slice(cursor, cursor + bs); cursor += bs;
+      const G = new Float64Array(NP);
+      let loss = 0;
+      for (const i of batch) {
+        const x = XS[i], f = fwd(x), e = f.y - YS[i];
+        loss += e * e;
+        const dy = 2 * e / batch.length;                 // ∂L/∂ŷ（损失是这一批的平均）
+        G[OFF[5]] += dy;
+        const dh2 = new Float64Array(H), dz2 = new Float64Array(H), dh1 = new Float64Array(H);
+        for (let j = 0; j < H; j++) { G[OFF[4] + j] += dy * f.h2[j]; dh2[j] = dy * W3(j); dz2[j] = f.z2[j] > 0 ? dh2[j] : 0; G[OFF[3] + j] += dz2[j]; }
+        for (let i = 0; i < H; i++) for (let j = 0; j < H; j++) { G[OFF[2] + i * H + j] += f.h1[i] * dz2[j]; dh1[i] += dz2[j] * W2(i, j); }
+        for (let i = 0; i < H; i++) { const dz1 = f.z1[i] > 0 ? dh1[i] : 0; G[OFF[0] + i] += dz1 * x; G[OFF[1] + i] += dz1; }
+      }
+      step++;
+      const lr = lrNow();
+      for (let k = 0; k < NP; k++) {
+        const g = G[k];
+        if (opt === 'sgd') P[k] -= lr * g;
+        else if (opt === 'momentum') { M[k] = 0.9 * M[k] + g; P[k] -= lr * M[k]; }
+        else { M[k] = 0.9 * M[k] + 0.1 * g; V[k] = 0.999 * V[k] + 0.001 * g * g; P[k] -= lr * (M[k] / (1 - 0.9 ** step)) / (Math.sqrt(V[k] / (1 - 0.999 ** step)) + 1e-8); }
+      }
+      lastBatch = batch; lastLoss = loss / batch.length; lastPos = [epoch + 1, Math.ceil(cursor / bs)];
+      if (!P.every(isFinite)) { stop(); return; }
+      if (cursor >= N) { cursor = 0; epoch++; order = newOrder(); hist.push(fullLoss()); }   // 一个 epoch 结束：重新洗牌，记一次全体损失
+    }
+    const runEpoch = () => { const e0 = epoch; while (epoch === e0 && epoch < EMAX && P.every(isFinite)) trainStep(); };
+
+    function draw() {
+      fig.querySelector('[data-lrv]')!.textContent = String(LRS[+lrIn.value]);
+      const diverged = !P.every(isFinite);
+      // 左图
+      const L = 26, R = 292, T = 10, B = 180, X = (x: number) => L + (x + 3) / 6 * (R - L), Y = (y: number) => B - (Math.max(-1.8, Math.min(1.8, y)) + 1.8) / 3.6 * (B - T);
+      let s = `<g class="ai-vp-axis"><line x1="${L}" y1="${Y(0)}" x2="${R}" y2="${Y(0)}"/></g><g class="ai-vp-tick"><text x="${L}" y="${B + 14}" text-anchor="middle">−3</text><text x="${R}" y="${B + 14}" text-anchor="middle">3</text><text x="${L - 4}" y="${Y(1) + 3}" text-anchor="end">1</text><text x="${L - 4}" y="${Y(-1) + 3}" text-anchor="end">−1</text></g>`;
+      const inB = new Set(lastBatch);
+      XS.forEach((x, i) => { s += `<circle class="ai-tl-pt${inB.has(i) ? ' is-b' : ''}" cx="${X(x)}" cy="${Y(YS[i])}" r="${inB.has(i) ? 3.4 : 2.2}"/>`; });
+      if (!diverged) { let d = ''; for (let k = 0; k <= 120; k++) { const x = -3 + 6 * k / 120; d += `${k ? 'L' : 'M'}${X(x).toFixed(1)} ${Y(fwd(x).y).toFixed(1)} `; } s += `<path class="ai-al-f" d="${d}"/>`; }
+      s += `<text class="ai-np-ptitle" x="${L + 4}" y="${T + 8}">数据（黑点）和当前的拟合（绿线）${lastBatch.length && lastBatch.length < N ? '，大点是这一步用的 batch' : ''}</text>`;
+      fitSvg.innerHTML = s;
+      // 右图：对数坐标的损失曲线
+      const lo = Math.log10(0.005), hi = Math.log10(2), CY = (v: number) => B - (Math.log10(Math.max(0.005, Math.min(2, v))) - lo) / (hi - lo) * (B - T), CX = (e: number) => L + e / EMAX * (R - L);
+      let c = `<g class="ai-vp-grid">`;
+      for (const v of [0.01, 0.1, 1]) c += `<line x1="${L}" y1="${CY(v)}" x2="${R}" y2="${CY(v)}"/>`;
+      c += `</g><g class="ai-vp-tick">`;
+      for (const v of [0.01, 0.1, 1]) c += `<text x="${L - 4}" y="${CY(v) + 3}" text-anchor="end">${v}</text>`;
+      c += `<text x="${L}" y="${B + 14}" text-anchor="middle">0</text><text x="${R}" y="${B + 14}" text-anchor="end">${EMAX} epoch</text></g>`;
+      c += `<line class="ai-al-zl" x1="${L}" y1="${CY(0.01)}" x2="${R}" y2="${CY(0.01)}"/>`;
+      if (hist.length > 1) c += `<path class="ai-al-f" d="${hist.map((v, e) => `${e ? 'L' : 'M'}${CX(e).toFixed(1)} ${CY(v).toFixed(1)}`).join(' ')}"/>`;
+      c += `<text class="ai-np-ptitle" x="${L + 4}" y="${T + 8}">全部数据上的损失（每个 epoch 记一次）</text>`;
+      curveSvg.innerHTML = c;
+      countEl.textContent = `epoch ${epoch} · step ${step} · 当前 η = ${fmt(lrNow(), 5)}`;
+      if (diverged) eq.innerHTML = '<b>发散了</b>：参数变成了无穷大。学习率太大，点“重置”后调小再试。';
+      else if (!lastBatch.length) eq.innerHTML = `随机初始化的网络，全部数据上的损失 = ${fmt(hist[0])}。点“训练一步”看一个 step 做了什么，或点“▶ 训练”连续训练。`;
+      else eq.innerHTML = `step ${step}（epoch ${lastPos[0]} 的第 ${lastPos[1]} 批，共 ${Math.ceil(N / bs)} 批）：`
+        + `① 取 ${lastBatch.length} 个样本${lastBatch.length <= 8 ? `（编号 ${lastBatch.join('、')}）` : ''} → ② 前向算出预测 → ③ 这一批的损失 = ${fmt(lastLoss)} → ④ 反向传播得到 ${NP} 个参数的梯度 → ⑤ ${opt === 'sgd' ? 'SGD' : opt === 'momentum' ? 'Momentum' : 'Adam'} 用 η = ${fmt(lrNow(), 5)} 更新参数`
+        + `<br><span class="ai-faint">全部数据上的损失：${fmt(fullLoss())}（虚线是噪声带来的下限，约 0.01）</span>`;
+    }
+    const stop = () => { clearInterval(timer); timer = 0; playBtn.textContent = '▶ 训练'; };
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('button');
+      if (!b) return;
+      const grp = b.parentElement?.dataset.group;
+      if (grp) {
+        b.parentElement!.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+        if (grp === 'opt') opt = b.dataset.v as Opt; else bs = Number(b.dataset.v);
+        stop(); reset(); draw(); return;
+      }
+      const a = b.dataset.act;
+      if (a === 'reset') { stop(); reset(); }
+      else if (a === 'step') { stop(); if (epoch < EMAX) trainStep(); }
+      else if (a === 'play') {
+        if (timer) { stop(); return; }
+        playBtn.textContent = '❚❚ 暂停';
+        timer = window.setInterval(() => { runEpoch(); draw(); if (epoch >= EMAX || !P.every(isFinite)) stop(); }, 60);
+      }
+      draw();
+    });
+    fig.addEventListener('input', (e) => { if (e.target === lrIn || e.target === sched) { stop(); reset(); draw(); } });
+    reset(); draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-trainloop]').forEach(init);
+</script>

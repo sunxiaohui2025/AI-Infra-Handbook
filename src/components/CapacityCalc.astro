@@ -1,0 +1,56 @@
+---
+// 容量计算器（模型与第 104 讲的代码相同）：Llama-3-8B，一个实例 = 一张 H100，实际效率 60%，租金 2.5 美元/小时（示例）。
+// 一个实例每秒能服务的请求 λ：prefill 每秒占掉 f = λ·输入·c 的时间，实际 TPOT = t(b) ÷ (1 − f)，同时 decode 的请求 b = λ·输出·TPOT（Little 定律）；
+// 在 TPOT ≤ 上限、KV ≤ 50 GB 的前提下取最大的 λ。需要的实例 = ⌈总请求率 ÷ (λ × 目标使用率)⌉。
+interface Props { title?: string; caption?: string }
+const { title = '要多少张卡', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cc" data-capacity>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>每秒 <b data-qv></b> 个请求</span><input type="range" min="0" max="7" step="1" value="2" data-q /></label>
+    <label class="ai-tl-lr"><span>输入 <b data-iv></b> token</span><input type="range" min="0" max="5" step="1" value="2" data-i /></label>
+    <label class="ai-tl-lr"><span>输出 <b data-ov></b> token</span><input type="range" min="0" max="4" step="1" value="2" data-o /></label>
+    <label class="ai-tl-lr"><span>TPOT 上限 <b data-sv></b> ms</span><input type="range" min="10" max="60" step="5" value="30" data-s /></label>
+    <label class="ai-tl-lr"><span>目标使用率 <b data-uv></b>%</span><input type="range" min="40" max="95" step="5" value="70" data-u /></label>
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const F = 989e12, BW = 3.35e12, EFF = 0.6, PRICE = 2.5, N = 8.03e9, NE = 525e6, L = 32, D = 4096, KV = 131072;
+  const QS = [10, 20, 50, 100, 200, 500, 1000, 2000], IS = [250, 500, 1000, 2000, 4000, 8000], OS = [100, 200, 300, 500, 1000];
+  const tpot = (b: number, ctx: number) => Math.max((2 * (N - NE) + 4 * L * D * ctx) * b / F, (N * 2 + KV * ctx * b) / BW) / EFF;
+  function plan(inp: number, out: number, slo: number) {
+    const ctx = inp + out / 2, c = 2 * (N - NE) / F / EFF;
+    let best: [number, number, number, number] | null = null;
+    for (let k = 1; k < 3000; k++) {
+      const lam = k * 0.1, f = lam * inp * c;
+      if (f >= 1) break;
+      let b = 1;
+      for (let i = 0; i < 50; i++) b = lam * out * tpot(b, ctx) / (1 - f);
+      const real = tpot(b, ctx) / (1 - f);
+      if (real > slo || KV * (inp + out) * b > 50e9) break;
+      best = [lam, b, real, f];
+    }
+    return best;
+  }
+  function init(fig: HTMLElement) {
+    const q = (k: string) => fig.querySelector<HTMLInputElement>(`[data-${k}]`)!;
+    const set = (k: string, v: string) => { fig.querySelector(`[data-${k}v]`)!.textContent = v; };
+    function draw() {
+      const qps = QS[Number(q('q').value)], inp = IS[Number(q('i').value)], out = OS[Number(q('o').value)], slo = Number(q('s').value) / 1000, u = Number(q('u').value) / 100;
+      set('q', String(qps)); set('i', String(inp)); set('o', String(out)); set('s', String(Math.round(slo * 1000))); set('u', String(Math.round(u * 100)));
+      const p = plan(inp, out, slo), eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+      if (!p) { eq.innerHTML = '这个 TPOT 上限太严：即使只有一个请求也达不到。'; return; }
+      const [lam, b, real, f] = p, n = Math.ceil(qps / (lam * u)), cost = n * PRICE / (qps * 3600) * 1e6;
+      eq.innerHTML = `一个实例最多每秒 <b>${lam.toFixed(1)}</b> 个请求：此时同时约 ${b.toFixed(0)} 个在 decode，prefill 占掉 ${(f * 100).toFixed(0)}% 的时间，实际 TPOT ${(real * 1e3).toFixed(1)} ms。`
+        + `<br>按 ${Math.round(u * 100)}% 使用率，每秒 ${qps} 个请求需要 <b>${n} 个实例</b>（${n} 张 H100），每小时约 ${(n * PRICE).toFixed(0)} 美元，每百万个请求约 ${cost.toFixed(0)} 美元。`
+        + '<br><span class="ai-faint">输入越长，prefill 占的时间越多、KV 越大；TPOT 上限越严，能同时 decode 的请求越少。两者都会让一个实例能服务的请求变少。</span>';
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-capacity]').forEach(init);
+</script>

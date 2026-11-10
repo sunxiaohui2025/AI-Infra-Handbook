@@ -1,0 +1,41 @@
+---
+// KV Cache 分层存储：读回来 vs 重新算（数字与第 101 讲的代码相同，带宽是示意的量级）。
+// 读回时间 = 前缀 token 数 × 每 token KV 字节 ÷ 这一层的带宽；重算时间 = token 数 × 2 × 激活参数 ÷ 算力（只算线性层）。
+// 读者可以：选模型、调前缀长度，看每一层存储的读回时间和重算时间的对比；分界带宽 = 每 token KV ÷ 每 token 重算时间。
+interface Props { title?: string; caption?: string }
+const { title = '从哪里读回来，比重算更快', caption } = Astro.props;
+const TIERS = [['本卡显存', 3350e9], ['同机其他卡（NVLink）', 450e9], ['CPU 内存（PCIe）', 50e9], ['别的机器（RDMA）', 50e9], ['本机 SSD', 10e9], ['远端存储', 3e9]];
+const MODELS = [['Llama-3-8B', 131072, 2 * 7.5e9 / 989e12], ['Llama-3.1-70B', 327680, 2 * 69.5e9 / 989e12], ['DeepSeek-V3', 61 * 576 * 2, 2 * 37e9 / 1979e12]];
+---
+<figure class="ai-gt ai-kt" data-kvtier data-t={JSON.stringify(TIERS)} data-m={JSON.stringify(MODELS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m">{MODELS.map((m, i) => <button data-v={i} aria-pressed={i === 0 ? 'true' : 'false'}>{m[0]}</button>)}</div>
+    <label class="ai-tl-lr"><span>前缀 <b data-nv></b> 个 token</span><input type="range" min="0" max="6" step="1" value="3" data-n /></label>
+  </div>
+  <div class="ai-kq-rows" data-rows></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const NS = [1000, 2000, 4000, 8000, 16000, 32000, 64000];
+  function init(fig: HTMLElement) {
+    const T: [string, number][] = JSON.parse(fig.dataset.t!), M: [string, number, number][] = JSON.parse(fig.dataset.m!); let mi = 0;
+    const nIn = fig.querySelector<HTMLInputElement>('[data-n]')!;
+    function draw() {
+      const n = NS[Number(nIn.value)], [name, kv, tt] = M[mi]; fig.querySelector('[data-nv]')!.textContent = n.toLocaleString();
+      const re = n * tt, loads = T.map(([nm, bw]) => [nm, n * kv / bw] as [string, number]), mx = Math.max(re, ...loads.map((x) => x[1]));
+      const fmt = (t: number) => (t >= 1 ? `${t.toFixed(2)} s` : `${(t * 1e3).toFixed(t < 0.01 ? 1 : 0)} ms`);
+      fig.querySelector<HTMLElement>('[data-rows]')!.innerHTML = loads.map(([nm, t]) => `<div class="ai-kq-row" style="grid-template-columns:150px 1fr 70px"><span>${nm}</span><span class="ai-kq-bar"><i style="width:${(t / mx) * 100}%;background:${t < re ? 'var(--accent)' : 'var(--key)'}"></i></span><span>${fmt(t)}</span></div>`).join('')
+        + `<div class="ai-kq-row" style="grid-template-columns:150px 1fr 70px"><b>重新 prefill</b><span class="ai-kq-bar"><i style="width:${(re / mx) * 100}%;background:var(--ink-3)"></i></span><b>${fmt(re)}</b></div>`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${name}：每 token KV ${(kv / 1024).toFixed(1)} KiB，重算每 token ${(tt * 1e6).toFixed(1)} μs。${n.toLocaleString()} 个 token 的 KV 共 ${(n * kv / 1e9).toFixed(2)} GB。`
+        + `<br>分界带宽 = ${(kv / 1024).toFixed(1)} KiB ÷ ${(tt * 1e6).toFixed(1)} μs ≈ <b>${(kv / tt / 1e9).toFixed(1)} GB/s</b>：比它快的存储（绿）读回来比重算划算，比它慢的（琥珀）不如重算。`
+        + '<br><span class="ai-faint">模型越大（每个 token 算得越久）、KV 越小（GQA、MLA），分界带宽越低，连较慢的存储都值得用。</span>';
+    }
+    nIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return; mi = Number(b.dataset.v); fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-kvtier]').forEach(init);
+</script>

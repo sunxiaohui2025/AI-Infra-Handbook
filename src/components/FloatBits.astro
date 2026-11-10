@@ -1,0 +1,61 @@
+---
+// 位级查看器（规则与第 10 讲相同）：同一个数在 FP32、FP16、BF16、FP8 E4M3、FP4 E2M1 下的比特、实际存下的值和误差。
+// 编码按“就近舍入（平局取偶）”；FP16、BF16 超出最大值变成 ∞，E4M3、E2M1 没有 ∞，这里饱和到最大值并标出。
+// 读者可以：输入任意数，或点预设（0.1、π、70000、1e-8 等）。
+interface Props { title?: string; caption?: string }
+const { title = '同一个数，不同的格式', caption } = Astro.props;
+---
+<figure class="ai-gt ai-fb" data-floatbits>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-bpe-lab">输入一个数<input data-x value="0.1" /></label>
+    <div class="ai-gt-pre ai-pc-sets"><button data-p="0.1">0.1</button><button data-p="3.14159265">π</button><button data-p="70000">70000</button><button data-p="1e-8">1e-8</button><button data-p="-2.5">−2.5</button><button data-p="448">448</button></div>
+  </div>
+  <div class="ai-fb-rows" data-rows></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  // 名字, 指数位, 尾数位, bias, 最大有限值, 是否有 ∞
+  const FMT: [string, number, number, number, number, boolean][] = [
+    ['FP32', 8, 23, 127, 3.4028234663852886e38, true], ['FP16', 5, 10, 15, 65504, true], ['BF16', 8, 7, 127, 3.3895313892515355e38, true],
+    ['FP8 E4M3', 4, 3, 7, 448, false], ['FP4 E2M1', 2, 1, 1, 6, false]];
+  const rne = (v: number) => { const f = Math.floor(v), d = v - f; return d > 0.5 ? f + 1 : d < 0.5 ? f : f % 2 === 0 ? f : f + 1; };
+  function enc(x: number, e: number, m: number, bias: number, maxv: number, inf: boolean) {
+    const sign = x < 0 || Object.is(x, -0) ? 1 : 0, a = Math.abs(x);
+    let q: number, note = '';
+    if (a === 0) q = 0;
+    else {
+      const minExp = 1 - bias, ex = Math.max(Math.floor(Math.log2(a)), minExp), step = 2 ** (ex - m);
+      q = rne(a / step) * step;
+      if (q > maxv) { if (inf) { q = Infinity; note = '溢出 → ∞'; } else { q = maxv; note = `溢出，饱和到 ${maxv}`; } }
+      else if (q === 0) note = '下溢 → 0';
+    }
+    let E: number, M: number;
+    if (q === Infinity) { E = 2 ** e - 1; M = 0; }
+    else if (q === 0) { E = 0; M = 0; }
+    else { const minExp = 1 - bias, ex = Math.floor(Math.log2(q)); if (ex < minExp) { E = 0; M = Math.round(q / 2 ** (minExp - m)); note = note || '次正规数'; } else { E = ex + bias; M = Math.round((q / 2 ** ex - 1) * 2 ** m); } }
+    const bits = [String(sign), E.toString(2).padStart(e, '0'), M.toString(2).padStart(m, '0')];
+    return { v: sign ? -q : q, bits, note, E, M };
+  }
+  function init(fig: HTMLElement) {
+    const xIn = fig.querySelector<HTMLInputElement>('[data-x]')!;
+    function draw() {
+      const x = Number(xIn.value);
+      if (!Number.isFinite(x)) { fig.querySelector<HTMLElement>('[data-eq]')!.textContent = '请输入一个有限的数。'; return; }
+      const rows = FMT.map(([n, e, m, bias, maxv, inf]) => {
+        const r = enc(x, e, m, bias, maxv, inf), err = Math.abs(r.v - x), rel = x !== 0 && Number.isFinite(r.v) ? err / Math.abs(x) : NaN;
+        const mShow = r.bits[2].length > 23 ? r.bits[2] : r.bits[2];
+        return `<div class="ai-fb-row"><b>${n}</b><span class="ai-fb-bits"><i class="s">${r.bits[0]}</i><i class="e">${r.bits[1]}</i><i class="m">${mShow}</i></span><span>${Number.isFinite(r.v) ? (Math.abs(r.v) >= 1e5 || (Math.abs(r.v) < 1e-4 && r.v !== 0) ? r.v.toExponential(6) : r.v.toPrecision(10).replace(/\.?0+$/, '')) : (r.v > 0 ? '∞' : '−∞')}</span><span class="ai-faint">${r.note || (Number.isNaN(rel) ? '' : `相对误差 ${(rel * 100).toPrecision(2)}%`)}</span></div>`;
+      });
+      fig.querySelector<HTMLElement>('[data-rows]')!.innerHTML = rows.join('');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `输入 ${x}。每行：<span class="ai-fb-bits"><i class="s">符号</i><i class="e">指数</i><i class="m">尾数</i></span>，实际存下的值，误差。`
+        + '<br><span class="ai-faint">值 = (−1)^符号 × (1 + 尾数/2^尾数位数) × 2^(指数 − bias)。尾数位越少，格点越稀、误差越大；指数位越少，能表示的范围越小，容易溢出或下溢。</span>';
+    }
+    xIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-p]'); if (!b) return; xIn.value = b.dataset.p!; draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-floatbits]').forEach(init);
+</script>

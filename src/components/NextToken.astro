@@ -1,0 +1,141 @@
+---
+// 下一个 token 的预测与自回归生成，用小语料上训练的 ToyLM（tinylm.json examples["22"]）：
+//   只看最后两个词：两个嵌入拼起来 → 线性层 + ReLU → 线性层 → 14 个词的打分 → softmax。句子开头用“。”补齐。
+//   mode="predict" ：点词拼前缀，看下一个词的概率排行，并和语料里数出来的频率对照。
+//   mode="generate"：一步一步生成；每步把选中的词接回输入。可选“贪心”或“采样”（温度可调，固定随机种子可复现）。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { mode?: 'predict' | 'generate'; title?: string; caption?: string }
+const { mode = 'predict', caption } = Astro.props;
+const { title = mode === 'predict' ? '给一个前缀，看下一个词的概率' : '一个词一个词地生成' } = Astro.props;
+const ex = tiny.examples['22'];
+const cfg = { vocab: ex.vocab, corpus: ex.corpus, E: ex.E, W1: ex.W1, b1: ex.b1, W2: ex.W2, b2: ex.b2 };
+---
+<figure class="ai-gt ai-nt" data-nexttok data-mode={mode} data-cfg={JSON.stringify(cfg)}>
+  <div class="ai-ms-title">{title}</div>
+  {mode === 'predict' ? (
+    <div class="ai-gt-pre ai-pc-sets" data-add></div>
+  ) : (
+    <div class="ai-nt-ctl">
+      <div class="ai-gt-pre ai-pc-sets" data-group="how"><button data-v="greedy" aria-pressed="true">贪心：每次选概率最大的</button><button data-v="sample" aria-pressed="false">采样：按概率随机抽</button></div>
+      <label class="ai-tl-lr"><span>温度 T = <b data-tv></b></span><input type="range" min="0.2" max="2" step="0.1" value="1" data-temp /></label>
+      <div class="ai-gt-pre ai-pc-sets" data-start></div>
+    </div>
+  )}
+  <div class="ai-nt-seq" data-seq></div>
+  <div class="ai-nt-body">
+    <div class="ai-nt-bars" data-bars></div>
+    {mode === 'predict' && <div class="ai-vp-read" data-read></div>}
+  </div>
+  {mode === 'generate' && (
+    <>
+      <div class="ai-gt-play">
+        <button class="ai-pill ai-pill--solid" data-act="step">生成一个词</button>
+        <button class="ai-pill" data-act="run">生成到句号</button>
+        <button class="ai-pill" data-act="reset">重来</button>
+        <span class="ai-ms-count" data-count></span>
+      </div>
+      <ol class="ai-nt-log" data-log></ol>
+    </>
+  )}
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  interface Cfg { vocab: string[]; corpus: [string, number][]; E: number[][]; W1: number[][]; b1: number[]; W2: number[][]; b2: number[] }
+  const fmt = (v: number, d = 3) => { const k = 10 ** d; v = Math.round(v * k) / k; return v < 0 ? '−' + -v : String(v); };
+  const rng = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+
+  function init(fig: HTMLElement) {
+    const C: Cfg = JSON.parse(fig.dataset.cfg!);
+    const V = C.vocab, isGen = fig.dataset.mode === 'generate';
+    const q = (s: string) => fig.querySelector<HTMLElement>(s)!;
+    // 模型：只看最后两个 token
+    function logits(a: number, b: number) {
+      const x = [...C.E[a], ...C.E[b]];
+      const h = C.b1.map((bj, j) => Math.max(0, x.reduce((s, xi, i) => s + xi * C.W1[i][j], bj)));
+      return C.b2.map((bk, k) => h.reduce((s, hj, j) => s + hj * C.W2[j][k], bk));
+    }
+    const softmax = (z: number[], T = 1) => { const m = Math.max(...z); const e = z.map((v) => Math.exp((v - m) / T)); const s = e.reduce((a, b) => a + b, 0); return e.map((v) => v / s); };
+    // 语料里的计数：同样的前两个词后面，各个词出现了几次
+    const counts = new Map<string, number[]>();
+    for (const [sent, n] of C.corpus) {
+      const ids = [0, 0, ...sent.split(' ').map((t) => V.indexOf(t)), 0];
+      for (let i = 2; i < ids.length; i++) { const k = ids[i - 2] + ',' + ids[i - 1]; if (!counts.has(k)) counts.set(k, V.map(() => 0)); counts.get(k)![ids[i]] += n; }
+    }
+    const ctxOf = (seq: number[]) => { const s = [0, 0, ...seq]; return [s[s.length - 2], s[s.length - 1]]; };
+    const chip = (id: number, cls = '') => `<span class="ai-bpe-tok${cls}">${V[id]}</span>`;
+
+    function bars(p: number[], mark: number, cnt: number[] | null, T?: number) {
+      const order = p.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).map((x) => x[1]);
+      const tot = cnt ? cnt.reduce((a, b) => a + b, 0) : 0;
+      return `<div class="ai-nt-head"><span>下一个词</span><span>模型给的概率${T && T !== 1 ? `（温度 ${T}）` : ''}</span>${cnt ? '<span>语料里的频率</span>' : ''}</div>`
+        + order.map((i) => `<div class="ai-nt-row${i === mark ? ' is-pick' : ''}${p[i] < 0.005 ? ' is-low' : ''}"><span class="ai-nt-w">${V[i]}</span><span class="ai-nt-bar"><i style="width:${(p[i] * 100).toFixed(1)}%"></i><b>${fmt(p[i])}</b></span>${cnt ? `<span class="ai-nt-c">${tot ? `${cnt[i]} / ${tot}` : '—'}</span>` : ''}</div>`).join('');
+    }
+
+    if (!isGen) {
+      let seq = [V.indexOf('我'), V.indexOf('吃')];
+      q('[data-add]').innerHTML = '<span class="ai-tl-k">点词接到前缀后面：</span>' + V.map((w, i) => `<button data-id="${i}">${w}</button>`).join('') + '<button data-clear>清空</button><button data-back>退一个</button>';
+      const draw = () => {
+        const [a, b] = ctxOf(seq), p = softmax(logits(a, b)), cnt = counts.get(a + ',' + b) ?? null;
+        const n = seq.length;
+        q('[data-seq]').innerHTML = '<span class="ai-tl-k">前缀：</span>' + (n ? seq.map((id, i) => chip(id, i >= n - 2 ? ' is-m' : ' is-dim')).join('') : '<span class="ai-faint">（空：从句子开头预测）</span>') + '<span class="ai-bpe-tok is-unk">？</span>';
+        q('[data-bars]').innerHTML = bars(p, -1, cnt);
+        const best = p.indexOf(Math.max(...p)), tot = cnt ? cnt.reduce((x, y) => x + y, 0) : 0;
+        q('[data-read]').innerHTML = `<div class="ai-vp-row"><span>模型看的</span><div>最后两个词：“${V[a]}”“${V[b]}”${n > 2 ? '，更早的词（变淡的）它看不到' : n < 2 ? '（不够两个，用句号“。”补在前面）' : ''}</div></div>`
+          + `<div class="ai-vp-row"><span>最可能</span><div>“${V[best]}”，概率 ${fmt(p[best])}</div></div>`
+          + `<div class="ai-vp-row ai-vp-hint">${tot ? `语料里“${V[a]} ${V[b]}”后面一共出现过 ${tot} 次，右列是各个词的次数。模型的概率和它几乎一样：训练让模型学会了这份语料的统计规律。` : `语料里从没出现过“${V[a]} ${V[b]}”这两个词连在一起，模型只能根据它学到的嵌入“猜”一个分布。`}</div>`;
+      };
+      fig.addEventListener('click', (e) => {
+        const t = e.target as HTMLElement, b = t.closest<HTMLElement>('[data-id]');
+        if (b) { if (seq.length < 10) seq.push(Number(b.dataset.id)); }
+        else if (t.closest('[data-clear]')) seq = [];
+        else if (t.closest('[data-back]')) seq.pop();
+        else return;
+        draw();
+      });
+      draw();
+      return;
+    }
+
+    // ---------- 生成模式 ----------
+    let seedN = 0, how: 'greedy' | 'sample' = 'greedy', start: number[] = [], seq: number[] = [], log: string[] = [], r = rng(42), lastP: number[] | null = null, lastPick = -1, done = false, nForward = 0;
+    const temp = q('[data-temp]') as HTMLInputElement;
+    const starts: [string, number[]][] = [['从头开始', []], ['我', [V.indexOf('我')]], ['小狗', [V.indexOf('小狗')]], ['你 学', [V.indexOf('你'), V.indexOf('学')]]];
+    q('[data-start]').innerHTML = '<span class="ai-tl-k">开头：</span>' + starts.map(([n], i) => `<button data-st="${i}" aria-pressed="${i === 0}">${n}</button>`).join('');
+    const reset = () => { seq = [...start]; log = []; r = rng(42 + seedN); lastP = null; lastPick = -1; done = false; nForward = 0; };
+    function genStep() {
+      if (done || seq.length >= 12) return;
+      const [a, b] = ctxOf(seq), T = parseFloat(temp.value);
+      const p = softmax(logits(a, b), how === 'greedy' ? 1 : T);
+      nForward++;
+      let pick = 0;
+      if (how === 'greedy') pick = p.indexOf(Math.max(...p));
+      else { let u = r(), c = 0; pick = p.length - 1; for (let i = 0; i < p.length; i++) { c += p[i]; if (u < c) { pick = i; break; } } }
+      seq.push(pick); lastP = p; lastPick = pick;
+      log.push(`看“${V[a]} ${V[b]}”→ ${how === 'greedy' ? '概率最大的' : '抽到'}“${V[pick]}”（概率 ${fmt(p[pick])}），接到末尾`);
+      if (pick === 0) done = true;
+    }
+    function draw() {
+      q('[data-tv]').textContent = temp.value;
+      q('[data-seq]').innerHTML = '<span class="ai-tl-k">已有：</span>' + (seq.length ? seq.map((id, i) => chip(id, i < start.length ? '' : i === seq.length - 1 && lastPick >= 0 ? ' is-new' : ' is-m')).join('') : '<span class="ai-faint">（空）</span>') + (done ? '' : '<span class="ai-bpe-tok is-unk">？</span>');
+      if (lastP) q('[data-bars]').innerHTML = bars(lastP, lastPick, null, how === 'sample' ? parseFloat(temp.value) : 1);
+      else { const [a, b] = ctxOf(seq); q('[data-bars]').innerHTML = bars(softmax(logits(a, b), how === 'sample' ? parseFloat(temp.value) : 1), -1, null, how === 'sample' ? parseFloat(temp.value) : 1); }
+      q('[data-log]').innerHTML = log.map((l) => `<li>${l}</li>`).join('');
+      q('[data-count]').textContent = done ? `生成了句号，结束。共做了 ${nForward} 次前向` : `已做 ${nForward} 次前向`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      const g = t.closest<HTMLElement>('[data-group="how"] [data-v]'), st = t.closest<HTMLElement>('[data-st]'), act = t.closest<HTMLElement>('[data-act]')?.dataset.act;
+      if (g) { how = g.dataset.v as 'greedy' | 'sample'; fig.querySelectorAll('[data-group="how"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === g ? 'true' : 'false')); reset(); }
+      else if (st) { start = starts[Number(st.dataset.st)][1]; fig.querySelectorAll('[data-st]').forEach((x) => x.setAttribute('aria-pressed', x === st ? 'true' : 'false')); reset(); }
+      else if (act === 'step') genStep();
+      else if (act === 'run') { while (!done && seq.length < 12) genStep(); }
+      else if (act === 'reset') { seedN++; reset(); }   // 每次“重来”换一组随机数
+      else return;
+      draw();
+    });
+    temp.addEventListener('input', () => { reset(); draw(); });
+    reset(); draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-nexttok]').forEach(init);
+</script>

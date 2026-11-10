@@ -1,0 +1,53 @@
+---
+// 三代模型逐项对照：GPT-2 XL（2019）、Llama-3-8B（2024）、DeepSeek-V3（2024 年底）。
+// 和左边一列不同的格子会标出来；点任意一行，下方展开这一项的变化和对应的讲。
+// 配置凭公开资料整理，写进文章前已在第 43 讲的代码里核对了 GPT-2 XL 和 Llama-3-8B 的参数量。
+interface Props { title?: string; caption?: string }
+const { title = '三代模型，逐项对照', caption } = Astro.props;
+const ROWS: { k: string; v: [string, string, string]; why: string; lec: number[] }[] = [
+  { k: '参数', v: ['15.6 亿', '80.3 亿', '6710 亿（每 token 激活约 370 亿）'], why: '规模涨了几百倍，但靠 MoE，每个 token 的计算只涨了几十倍。', lec: [35, 41] },
+  { k: '层数 / 宽度', v: ['48 层 / 1600', '32 层 / 4096', '61 层 / 7168'], why: '更宽比更深涨得多：宽度决定每层矩阵的大小，层数决定串行的步数。', lec: [32, 35] },
+  { k: '归一化', v: ['LayerNorm，Pre-Norm', 'RMSNorm，Pre-Norm', 'RMSNorm，Pre-Norm'], why: 'GPT-2 已经是 Pre-Norm；之后把 LayerNorm 换成了更省的 RMSNorm。', lec: [30, 36] },
+  { k: '位置', v: ['可学习位置嵌入，1024 个', 'RoPE，base 500000', 'RoPE（与 MLA 解耦的 64 维），长上下文扩展'], why: '从“加到输入上的绝对位置”换成“在注意力里旋转的相对位置”。', lec: [25, 37, 42] },
+  { k: '注意力', v: ['MHA，25 个头', 'GQA，32 个查询头 / 8 个 KV 头', 'MLA，128 个头，缓存 512 + 64 维'], why: '一路都在压 KV Cache：每 token 300 KiB → 128 KiB → 68.6 KiB。', lec: [28, 39, 40] },
+  { k: 'FFN', v: ['GELU，4 倍宽', 'SwiGLU，3.5 倍宽', 'MoE：1 个共享 + 256 个路由专家选 8 个（前 3 层稠密）'], why: '先换成门控结构，再拆成很多专家，让参数和计算脱钩。', lec: [31, 38, 41] },
+  { k: '线性层偏置', v: ['有', '没有', '没有'], why: '大模型里偏置几乎没用，去掉后实现更简单。', lec: [13] },
+  { k: '词表', v: ['50257', '128256', '129280'], why: '词表变大，同样的文字切出的 token 更少（第 21 讲）。', lec: [21] },
+  { k: '上下文', v: ['1024', '8192（3.1 版扩到 128K）', '128K'], why: 'RoPE 缩放、长文本训练、推理系统的配合。', lec: [42] },
+  { k: '输出层', v: ['与嵌入表共享', '独立', '独立'], why: '模型大了，多一份输出层的参数占比很小，不共享更灵活。', lec: [33] },
+  { k: '训练', v: ['FP32 / FP16', 'BF16', 'FP8 混合精度；多 token 预测（MTP）'], why: '精度越来越低，训练越来越省；DeepSeek-V3 还让模型一次多预测几个 token。', lec: [10, 20] },
+];
+const COLS = ['GPT-2 XL（2019）', 'Llama-3-8B（2024）', 'DeepSeek-V3（2024 年底）'];
+---
+<figure class="ai-gt ai-ac" data-archcmp>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-fp-tbl">
+    <table class="ai-vp-tbl ai-ac-tbl">
+      <thead><tr><th></th>{COLS.map((c) => <th>{c}</th>)}</tr></thead>
+      <tbody>
+        {ROWS.map((r, i) => (
+          <tr data-r={i} class={i === 4 ? 'is-focus' : ''}>
+            <td><b>{r.k}</b></td>
+            {r.v.map((v, j) => <td class={j > 0 && v !== r.v[j - 1] ? 'is-diff' : ''}>{v}</td>)}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+  <div class="ai-cg-eq" data-eq data-rows={JSON.stringify(ROWS)}></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+    const R = JSON.parse(eq.dataset.rows!);
+    const show = (i: number) => {
+      fig.querySelectorAll('[data-r]').forEach((tr) => tr.classList.toggle('is-focus', Number((tr as HTMLElement).dataset.r) === i));
+      eq.innerHTML = `<b>${R[i].k}</b>：${R[i].why}<br><span class="ai-faint">详见 ${R[i].lec.map((n: number) => `<a href="/l/${n}">第 ${n} 讲</a>`).join('、')}</span>`;
+    };
+    fig.addEventListener('click', (e) => { const tr = (e.target as HTMLElement).closest<HTMLElement>('[data-r]'); if (tr) show(Number(tr.dataset.r)); });
+    show(4);
+  }
+  document.querySelectorAll<HTMLElement>('[data-archcmp]').forEach(init);
+</script>

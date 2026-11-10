@@ -1,0 +1,74 @@
+---
+// Decode 阶段的注意力 kernel（与第 76 讲的代码相同）。
+// 上半部分：一个请求的 KV Cache 按块表散落在 16 个物理块里（每块 4 个 token，上下文 18 个），kernel 按逻辑块的顺序查块表、读物理块，
+//   一边读一边维护在线 softmax 的 m、l（第 75 讲）。可以切成 3 段并行读，各段算出自己的 (m, l, acc)，最后合并。
+// 下半部分：Llama-3-8B 一层的 decode 注意力，估算工作单元数和耗时：每个请求的每个 KV 头至少一个工作单元；
+//   单元少于 132 个（H100 的 SM 数）时，带宽按 单元数 / 132 打折（粗略模型）。可以每 512 个 token 切一段，增加并行度。
+interface Props { title?: string; caption?: string }
+const { title = '按块表读 KV，以及把上下文切开并行', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pd" data-pageddecode>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="p"><button data-v="1" aria-pressed="true">一个工作单元从头读到尾</button><button data-v="3" aria-pressed="false">切成 3 段并行读</button></div>
+    <label class="ai-tl-lr"><span>第 <b data-sv></b> 轮</span><input type="range" min="0" max="18" step="1" value="6" data-s /></label>
+  </div>
+  <div class="ai-tl-k">块表（逻辑块 → 物理块）：<span data-tab></span></div>
+  <div class="ai-bp-pool ai-pd-pool" data-pool></div>
+  <div class="ai-cg-eq" data-eq1></div>
+  <div class="ai-ms-title ai-pd-h2">真实规模：Llama-3-8B 一层，H100</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>批大小 = <b data-bv></b></span><input type="range" min="0" max="7" step="1" value="0" data-b /></label>
+    <label class="ai-tl-lr"><span>上下文 = <b data-cv></b></span><input type="range" min="0" max="7" step="1" value="5" data-c /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="sp"><button data-v="0" aria-pressed="false">不切</button><button data-v="1" aria-pressed="true">每 512 个 token 切一段</button></div>
+  </div>
+  <div class="ai-pd-sms" data-sms></div>
+  <div class="ai-cg-eq" data-eq2></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const B = 4, TABLE = [7, 2, 12, 5, 9], CTX = 18;
+  const BS = [1, 2, 4, 8, 16, 32, 64, 128], CS = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+  const segs = (n: number) => { const out: number[][] = []; let st = 0; for (let k = 0; k < n; k++) { const len = Math.floor(CTX / n) + (k < CTX % n ? 1 : 0); out.push(Array.from({ length: len }, (_, i) => st + i)); st += len; } return out; };
+  function init(fig: HTMLElement) {
+    let parts = 1, split = 1;
+    const q = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const sIn = q<HTMLInputElement>('[data-s]'), bIn = q<HTMLInputElement>('[data-b]'), cIn = q<HTMLInputElement>('[data-c]');
+    q<HTMLElement>('[data-tab]').innerHTML = TABLE.map((p, i) => `<code>${i}→${p}</code>`).join(' ');
+    function drawA() {
+      const S = segs(parts), rounds = Math.max(...S.map((s) => s.length)); sIn.max = String(rounds);
+      const T = Math.min(Number(sIn.value), rounds); sIn.value = String(T);
+      q('[data-sv]').textContent = `${T} / ${rounds}`;
+      const read: Record<number, number> = {}, now: number[] = [];
+      S.forEach((seg, k) => seg.slice(0, T).forEach((i, j) => { read[i] = k; if (j === T - 1) now.push(i); }));
+      let h = '';
+      for (let b = 0; b < 16; b++) {
+        const li = TABLE.indexOf(b);
+        const dots = Array.from({ length: B }, (_, o) => { const i = li * B + o; if (li < 0 || i >= CTX) return '<i></i>'; const cls = now.includes(i) ? 'is-now' : i in read ? `on p${read[i]}` : 'is-kv'; return `<i class="${cls}"></i>`; }).join('');
+        h += `<div class="ai-bp-blk${li >= 0 ? ' is-own' : ''}" style="--h:200"><small>${b}</small>${li >= 0 ? `<b>逻辑 ${li}</b>` : ''}<span class="ai-bp-fill ai-pd-fill">${dots}</span></div>`;
+      }
+      q<HTMLElement>('[data-pool]').innerHTML = h;
+      const desc = now.map((i) => `token ${i} → 块表[${i} ÷ ${B} = ${Math.floor(i / B)}] = 物理块 ${TABLE[Math.floor(i / B)]}，块内第 ${i % B} 个`).join('<br>');
+      q<HTMLElement>('[data-eq1]').innerHTML = (T ? `这一轮读：<br>${desc}` : '还没开始读。')
+        + `<br><span class="ai-faint">${parts === 1 ? `一个工作单元按顺序读完 ${CTX} 个 token，要 ${CTX} 轮。` : `3 段同时读，每段各自维护 m、l、acc，${rounds} 轮就读完；最后再用 e^(m − M) 把 3 段合并（和第 75 讲的在线 softmax 是同一个公式）。`}</span>`;
+    }
+    function drawB() {
+      const b = BS[Number(bIn.value)], c = CS[Number(cIn.value)];
+      q('[data-bv]').textContent = String(b); q('[data-cv]').textContent = c >= 1024 ? `${c / 1024}K` : String(c);
+      const bytes = b * c * 4096, units = b * 8 * (split ? Math.max(1, c / 512) : 1), busy = Math.min(132, units), t = bytes / (3.35e12 * busy / 132) * 1e6;
+      q<HTMLElement>('[data-sms]').innerHTML = Array.from({ length: 132 }, (_, i) => `<i class="${i < busy ? 'on' : ''}"></i>`).join('');
+      q<HTMLElement>('[data-eq2]').innerHTML = `要读的 KV：${b} × ${c} × 4096 字节 = ${(bytes / 2 ** 20).toFixed(0)} MiB。工作单元：${b} 个请求 × 8 个 KV 头${split ? ` × ${Math.max(1, c / 512)} 段` : ''} = ${units} 个，132 个 SM 里有 ${busy} 个在干活。`
+        + `<br>估算耗时 ≈ ${(bytes / 1e6).toFixed(0)} MB ÷ (3.35 TB/s × ${busy}/132) ≈ ${t.toFixed(0)} μs`
+        + '<br><span class="ai-faint">批小、上下文长时，不切就只有寥寥几个 SM 在读数据；切段以后所有 SM 一起读。批已经很大时，切不切差别不大。</span>';
+    }
+    fig.addEventListener('input', (e) => { if (e.target === sIn) drawA(); else drawB(); });
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      if (g.dataset.group === 'p') { parts = Number(bt.dataset.v); drawA(); } else { split = Number(bt.dataset.v); drawB(); }
+    });
+    drawA(); drawB();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pageddecode]').forEach(init);
+</script>

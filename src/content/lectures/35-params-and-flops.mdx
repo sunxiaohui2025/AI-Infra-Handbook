@@ -1,0 +1,190 @@
+---
+id: 35
+slug: params-and-flops
+title: 参数量与计算量
+chapter: 2
+part: 4
+problem: 一个模型有多少参数、算一次要多少 FLOPs
+prereqs: [3, 18, 32, 34]
+level: 主线
+minutes: 30
+demos: [ModelCalc]
+video: ""
+formula: '$N\approx L\cdot(2d^2 + 2d\cdot kv + 3d\cdot d_{ff}) + 2Vd$　推理每 token $\approx 2N + 4Lsd$　训练每 token $\approx 6N$'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import ModelCalc from '../../components/ModelCalc.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[3, 18, 32, 34]} />
+
+上一讲让一句话走完了 TinyLM 的全程。这一讲换一个角度，不看数字怎么流动，而是**算账**：一个模型到底有多少个参数？处理一个 token 要做多少次浮点运算？这两个数决定了一切工程问题：模型要占多少显存，推理有多快、多贵，训练要多少张卡、多少天。
+
+后面第三到五章的大部分内容，都建立在这一讲的几个公式之上，所以它标了重点。我们会从结构图出发，把参数一项项加出来，得到和官方完全一致的数字；再推出“推理每 token ≈ 2N、训练每 token ≈ 6N”这两个最常用的估算公式，并看看它们什么时候会失准。
+
+## 参数：一项项加出来
+
+参数全在线性层、嵌入表和归一化里。照着第 32 讲的结构图，逐项写出公式。记隐藏维度 d、层数 L、注意力头数 n<sub>h</sub>、KV 头数 n<sub>kv</sub>、FFN 中间维度 d<sub>ff</sub>、词表大小 V。
+
+**每层的注意力。***W*<sub>q</sub> 和 *W*<sub>o</sub> 都是 d × d。*W*<sub>k</sub>、*W*<sub>v</sub> 的输出宽度是 kv = (d / n<sub>h</sub>) × n<sub>kv</sub>：每个 KV 头和查询头一样宽，但只有 n<sub>kv</sub> 个（第 39 讲的 GQA；没有 GQA 时 n<sub>kv</sub> = n<sub>h</sub>，kv = d）。所以
+
+<div class="ai-formula">注意力 = 2d² + 2·d·kv</div>
+
+**每层的 FFN。**两个矩阵（ReLU 版本）是 2·d·d<sub>ff</sub>，三个矩阵（SwiGLU 版本，第 38 讲）是 3·d·d<sub>ff</sub>。
+
+**每层的归一化。**两个，每个 d 个参数（RMSNorm 只有 *γ*）。
+
+**入口和出口。**嵌入表 V·d，输出层 d·V（权重绑定时为 0），最后的归一化 d。
+
+合起来：
+
+<div class="ai-formula">N = V·d + L × (注意力 + FFN + 2d) + d + V·d</div>
+
+代入 Llama-3-8B（d = 4096，L = 32，n<sub>h</sub> = 32，n<sub>kv</sub> = 8，d<sub>ff</sub> = 14336，V = 128256，kv = 128 × 8 = 1024）：
+
+| 部分 | 算式 | 参数 |
+| --- | --- | --- |
+| 每层注意力 | 2 × 4096² + 2 × 4096 × 1024 | 41,943,040 |
+| 每层 FFN | 3 × 4096 × 14336 | 176,160,768 |
+| 每层合计（含 2 个归一化） | | 218,112,000 |
+| 嵌入表、输出层 | 各 128256 × 4096 | 各 525,336,576 |
+| 合计 | | 8,030,261,248 |
+
+和 Meta 公布的“8.03B”一个不差。同样的公式算 Llama-3-70B（d = 8192，L = 80，n<sub>h</sub> = 64，d<sub>ff</sub> = 28672），得到 70,553,706,496，也就是“70B”。
+
+从占比看，Llama-3-8B 的参数里 **FFN 占 70.2%，注意力占 16.7%，嵌入表和输出层占 13.1%**，归一化可以忽略。模型越大，嵌入和输出层的占比越小，FFN 和注意力的占比越大。
+
+## 计算量：每个参数一次乘加
+
+前向处理一个 token 要多少次浮点运算？第 3 讲说过，一次 [1, d<sub>in</sub>] × [d<sub>in</sub>, d<sub>out</sub>] 的矩阵乘法，要 d<sub>in</sub> × d<sub>out</sub> 次乘法和差不多同样多次加法，也就是 2 × d<sub>in</sub> × d<sub>out</sub> 次浮点运算（FLOPs）。换句话说：**对一个 token，每个权重参与一次乘、一次加，贡献 2 FLOPs。**
+
+模型里除了嵌入表（它只是查表，不做乘法），其余参数都在矩阵乘法里，所以：
+
+<div class="ai-formula">矩阵乘法部分 ≈ 2 × (N − V·d)</div>
+
+Llama-3-8B 是 2 × (80.3 亿 − 5.25 亿) ≈ 150 亿 FLOPs，即 15.01 GFLOPs。
+
+还有一部分不在参数里：注意力的打分 *QK*<sup>T</sup> 和加权求和 *AV*（第 26 讲）。一个 token 前面有 s 个 token 时，它的 q 要和 s 个 k 做点积，再给 s 个 v 加权，每层大约 2·s·d + 2·s·d = 4·s·d 次运算：
+
+<div class="ai-formula">每 token 前向 ≈ 2 × (N − V·d) + 4·L·s·d</div>
+
+第二项随上下文长度 s 增长。对 Llama-3-8B：
+
+| 上下文长度 s | 每 token 计算量 | 注意力打分的占比 |
+| --- | --- | --- |
+| 0 | 15.01 GFLOPs | 0% |
+| 1024 | 15.55 GFLOPs | 3.5% |
+| 8192 | 19.30 GFLOPs | 22.2% |
+| 131072 | 83.73 GFLOPs | 82.1% |
+
+上下文在几千以内时，注意力打分的计算可以忽略，每 token 的计算量基本就是 2N；上下文到了十几万，它就成了主角，每个 token 的计算量翻了 5 倍多。这就是长上下文贵的原因（第 42 讲）。
+
+<Note kind="point">推理每 token ≈ 2N FLOPs（每个参数一次乘加）；上下文很长时，还要加上注意力打分的 4·L·s·d。训练每 token ≈ 6N（前向 2N，反向 4N）。</Note>
+
+## 两个最常用的估算
+
+把细节略去，得到两个几乎所有人都在用的估算：
+
+- **推理（前向）每 token ≈ 2N FLOPs。**Llama-3-8B 约 16 GFLOPs。生成 1000 个 token，约 16 TFLOPs。
+- **训练每 token ≈ 6N FLOPs。**前向 2N，反向因为每个矩阵乘法变成两个，约 4N（第 18 讲）。Llama-3-8B 约 48 GFLOPs；第 20 讲用 6 × N × D 算出它在 15T token 上训练约需 7 × 10<sup>23</sup> FLOPs，就是这个公式。
+
+这两个公式忽略了嵌入表的那点差别，也忽略了注意力打分、归一化、softmax 等，所以只在上下文不太长时准确。但它们足够简单，可以心算，是估计成本时的第一步。
+
+## 自己算一算
+
+下面的计算器实现了这一讲的全部公式。选一个预设，或者直接改任何一个配置；下面调上下文长度、并发请求数和精度，看计算量和显存怎么变。
+
+<ModelCalc caption="图 35-1　模型计算器。默认是 Llama-3-8B，上下文 8192、16 个请求、BF16。试试：把上下文调到 131072，看注意力打分的占比；把精度改成 INT4，看权重显存；把 KV 头数改成 32（不用 GQA），看 KV Cache。" />
+
+几个值得做的实验：
+
+- **切换 TinyLM**：合计 304 个参数，和第 32 讲数的一样。
+- **把 KV 头数从 8 改成 32**：相当于不用 GQA。参数只多了一点（*W*<sub>k</sub>、*W*<sub>v</sub> 变宽），KV Cache 却变成了 4 倍。第 39 讲会专门讲这件事。
+- **把精度改成 INT4**：权重从 14.96 GiB（即 16.1 GB）降到 3.74 GiB（约 4 GB）。这是量化（第 11 篇）最直接的收益。计算器里的显存用 GiB（2<sup>30</sup> 字节），正文里常说的 GB 是 10<sup>9</sup> 字节，两者差约 7%。
+- **把并发请求数调大**：KV Cache 线性增长。默认的 16 个请求、每个 8192 token，KV Cache 是 16 GiB，已经和权重一样大了。
+
+## 用代码复现
+
+下面的代码用一个函数算出三个模型的参数（和计算器一致），打印 Llama-3-8B 的参数占比和不同上下文下的每 token 计算量，最后给出 2N、6N 的估算和显存。
+
+```python
+MODELS = {
+    "TinyLM":      dict(d=4,    L=2,  n_h=2,  n_kv=2, d_ff=8,     V=6,      gated=False, norm=0, tied=False),
+    "Llama-3-8B":  dict(d=4096, L=32, n_h=32, n_kv=8, d_ff=14336, V=128256, gated=True,  norm=1, tied=False),
+    "Llama-3-70B": dict(d=8192, L=80, n_h=64, n_kv=8, d_ff=28672, V=128256, gated=True,  norm=1, tied=False),
+}
+
+def params(m):
+    d, L, kv = m["d"], m["L"], m["d"] // m["n_h"] * m["n_kv"]       # kv：K、V 的宽度（GQA 时变窄）
+    attn = 2 * d * d + 2 * d * kv                                    # W_q、W_o 是 d×d；W_k、W_v 是 d×kv
+    ffn = (3 if m["gated"] else 2) * d * m["d_ff"]
+    norms = 2 * d * m["norm"]
+    emb, head = m["V"] * d, (0 if m["tied"] else m["V"] * d)
+    total = emb + L * (attn + ffn + norms) + d * m["norm"] + head
+    return dict(attn=attn, ffn=ffn, layer=attn + ffn + norms, emb=emb, head=head, total=total)
+
+def flops_per_token(m, s):
+    """前向处理一个 token（它前面有 s 个 token）：所有矩阵乘法 2 × 参数（嵌入查表不算），加上注意力的打分和加权 4·L·s·d。"""
+    p = params(m)
+    matmul = 2 * (p["total"] - p["emb"])
+    attn_score = 4 * m["L"] * s * m["d"]
+    return matmul, attn_score
+
+for name, m in MODELS.items():
+    p = params(m)
+    print(f"{name}：每层 注意力 {p['attn']:,} + FFN {p['ffn']:,}，共 {p['layer']:,}；嵌入 {p['emb']:,}，输出层 {p['head']:,}；合计 {p['total']:,}")
+
+m = MODELS["Llama-3-8B"]
+p = params(m)
+print(f"Llama-3-8B 参数占比：FFN {m['L'] * p['ffn'] / p['total']:.1%}，注意力 {m['L'] * p['attn'] / p['total']:.1%}，嵌入+输出层 {(p['emb'] + p['head']) / p['total']:.1%}")
+for s in [0, 1024, 8192, 131072]:
+    a, b = flops_per_token(m, s)
+    print(f"  上下文 {s:>6}：每 token {(a + b) / 1e9:6.2f} GFLOPs，其中注意力打分占 {b / (a + b):.1%}")
+
+# 估算：生成 / 训练
+N = p["total"]
+print(f"简便估算：推理每 token ≈ 2N = {2 * N / 1e9:.1f} GFLOPs；训练每 token ≈ 6N = {6 * N / 1e9:.1f} GFLOPs")
+kv = 2 * m["L"] * (m["d"] // m["n_h"] * m["n_kv"]) * 2
+print(f"BF16 权重 {N * 2 / 1e9:.1f} GB；KV Cache 每 token {kv // 1024} KiB，8192 token × 16 个请求 = {kv * 8192 * 16 / 2**30:.0f} GiB")
+```
+
+输出：
+
+```text
+TinyLM：每层 注意力 64 + FFN 64，共 128；嵌入 24，输出层 24；合计 304
+Llama-3-8B：每层 注意力 41,943,040 + FFN 176,160,768，共 218,112,000；嵌入 525,336,576，输出层 525,336,576；合计 8,030,261,248
+Llama-3-70B：每层 注意力 150,994,944 + FFN 704,643,072，共 855,654,400；嵌入 1,050,673,152，输出层 1,050,673,152；合计 70,553,706,496
+Llama-3-8B 参数占比：FFN 70.2%，注意力 16.7%，嵌入+输出层 13.1%
+  上下文      0：每 token  15.01 GFLOPs，其中注意力打分占 0.0%
+  上下文   1024：每 token  15.55 GFLOPs，其中注意力打分占 3.5%
+  上下文   8192：每 token  19.30 GFLOPs，其中注意力打分占 22.2%
+  上下文 131072：每 token  83.73 GFLOPs，其中注意力打分占 82.1%
+简便估算：推理每 token ≈ 2N = 16.1 GFLOPs；训练每 token ≈ 6N = 48.2 GFLOPs
+BF16 权重 16.1 GB；KV Cache 每 token 128 KiB，8192 token × 16 个请求 = 16 GiB
+```
+
+前三行是三个模型的参数：TinyLM 304，Llama-3-8B 8,030,261,248，Llama-3-70B 70,553,706,496。接着是 Llama-3-8B 的参数占比和四种上下文长度下的每 token 计算量，和上面的表一致。最后两行是 2N、6N 的估算和显存。
+
+## 到了大模型里：这些数决定了什么
+
+有了这一讲的账，可以回答很多实际问题的“数量级”：
+
+**一张卡放得下吗？**Llama-3-8B 的 BF16 权重是 16.1 GB，一张 80 GB 的 H100 放得下，还剩六十多 GB 给 KV Cache。Llama-3-70B 是 141 GB，一张卡放不下，至少要两张，或者量化到 INT4（约 35 GB）。
+
+**推理最快能多快？**第 24 讲说过，每生成一个 token 都要把全部权重读一遍。单个请求时，速度的上限是“显存带宽 / 权重字节数”：H100 约 3.35 TB/s，Llama-3-8B 每秒最多约 209 个 token。此时 GPU 的算力几乎闲着：209 × 16 GFLOPs ≈ 3.4 TFLOPS，只是 H100 峰值的零头。把很多请求凑成一批，同一次权重读取服务更多的 token，算力才会被用起来。第 54 讲的 Roofline 模型，会用“每读一个字节做多少次运算”把这件事讲透。
+
+**训练要多久？**6 × N × D 除以集群的有效算力。第 20 讲算过，Llama-3-8B 在 15T token 上，按 40% 利用率约需 50 万 H100 小时。
+
+**一个 token 多少钱？**第 64 讲会把 2N、显存带宽和 GPU 的租金放在一起，算出每百万 token 的推理成本。
+
+## 容易混淆的地方
+
+1. **FLOPs 和 FLOPS 不一样。**FLOPs（小写 s）是运算的**次数**，一个工作量；FLOPS（大写 S）是**每秒**的运算次数，一个速度。“这次推理要 16 GFLOPs”“这张卡有 989 TFLOPS”。
+2. **2N 里的“2”来自乘加。**一次乘加算两次浮点运算。有的资料按乘加次数（MACs）统计，数字会差一半。
+3. **参数量相同，计算量不一定相同。**第 41 讲的 MoE 模型，参数很多（DeepSeek-V3 约 6710 亿），但每个 token 只用其中一部分（约 370 亿），计算量按“激活参数”算，2N 里的 N 要用激活的那部分。
+
+## 回顾
+
+模型的参数可以照着结构一项项加出来：每层注意力 2d² + 2d·kv，每层 FFN 3·d·d<sub>ff</sub>（SwiGLU），加上嵌入表和输出层各 V·d。Llama-3-8B 算出来是 8,030,261,248 个，FFN 占七成。计算量的规律是：每个参与矩阵乘法的参数，对每个 token 贡献 2 FLOPs，所以推理每 token ≈ 2N，训练每 token ≈ 6N；上下文很长时，还要加上随 s 线性增长的注意力打分，在 13 万的上下文下它占了八成。这几个数决定了显存、速度、训练时间和成本，是后面三章的出发点。
+
+到这里，第 4 篇“Transformer 核心”结束了，我们用 TinyLM 完整地走通了原始 Transformer。今天的大模型在这个骨架上做了一系列改进，比如把归一化挪到子层之前、换成更简单的 RMSNorm。为什么要这样改？第 5 篇的第一讲：**Pre-Norm 与 RMSNorm**。

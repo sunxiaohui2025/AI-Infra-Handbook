@@ -1,0 +1,50 @@
+---
+// 张量并行度与延迟、每卡吞吐（公式与第 98 讲的代码相同）：一步 ≈ max(计算 / 989 TFLOPS, (权重 + KV) / 3.35 TB/s) ÷ t + 每层 2 次 All-Reduce。
+// All-Reduce 走 NVLink（α 3 μs，β 450 GB/s），取一步到位和 Ring 中较快的。每卡显存超过 72 GB 标为放不下。
+// 读者可以：选模型，调批大小和上下文长度，看 TP = 1、2、4、8 时的 TPOT（柱子）和每张卡的吞吐（折线）。
+interface Props { title?: string; caption?: string }
+const { title = '卡越多越快吗', caption } = Astro.props;
+const MODELS = [['Llama-3-8B', 8.03e9, 0.53e9, 32, 4096, 131072], ['Llama-3.1-70B', 70.6e9, 1.05e9, 80, 8192, 327680]];
+---
+<figure class="ai-gt ai-tc" data-tpcurve data-m={JSON.stringify(MODELS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m">{MODELS.map((m, i) => <button data-v={i} aria-pressed={i === 1 ? 'true' : 'false'}>{m[0]}</button>)}</div>
+    <label class="ai-tl-lr"><span>批大小 b = <b data-bv></b></span><input type="range" min="0" max="8" step="1" value="6" data-b /></label>
+    <label class="ai-tl-lr"><span>上下文 <b data-cv></b></span><input type="range" min="0" max="4" step="1" value="2" data-c /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const F = 989e12, BW = 3.35e12, A = 3e-6, BETA = 450e9, BS = [1, 2, 4, 8, 16, 32, 64, 128, 256], CS = [512, 1024, 2048, 4096, 8192];
+  const ar = (m: number, t: number) => Math.min(A + (t - 1) * m / BETA, 2 * (t - 1) * (A + m / t / BETA));
+  function init(fig: HTMLElement) {
+    const M: [string, number, number, number, number, number][] = JSON.parse(fig.dataset.m!); let mi = 1;
+    const bIn = fig.querySelector<HTMLInputElement>('[data-b]')!, cIn = fig.querySelector<HTMLInputElement>('[data-c]')!;
+    function draw() {
+      const b = BS[Number(bIn.value)], ctx = CS[Number(cIn.value)]; fig.querySelector('[data-bv]')!.textContent = String(b); fig.querySelector('[data-cv]')!.textContent = String(ctx);
+      const [, N, NE, L, d, kv] = M[mi];
+      const rows = [1, 2, 4, 8].map((t) => { const comp = Math.max((2 * (N - NE) + 4 * L * d * ctx) * b / t / F, (N * 2 + kv * ctx * b) / t / BW), comm = t === 1 ? 0 : 2 * L * ar(b * d * 2, t), T = comp + comm, mem = (N * 2 + kv * ctx * b) / t; return { t, comp, comm, T, per: b / T / t, fit: mem < 72e9, mem }; });
+      const mxT = Math.max(...rows.map((r) => r.T)), mxP = Math.max(...rows.map((r) => r.per));
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 190"><text class="ai-np-ptitle" x="40" y="12">柱：TPOT（深 = 读写/计算，浅 = 通信）　折线：每张卡的吞吐</text>';
+      const X = (i: number) => 90 + i * 130, Y = (v: number) => 160 - (v / mxT) * 130, YP = (v: number) => 160 - (v / mxP) * 130;
+      rows.forEach((r, i) => {
+        s += `<rect class="ai-tc-comp${r.fit ? '' : ' is-nofit'}" x="${X(i) - 25}" y="${Y(r.comp)}" width="50" height="${160 - Y(r.comp)}"/><rect class="ai-tc-comm" x="${X(i) - 25}" y="${Y(r.T)}" width="50" height="${Y(r.comp) - Y(r.T)}"/>`;
+        s += `<text class="ai-al-gl" x="${X(i)}" y="${Y(r.T) - 4}" text-anchor="middle">${(r.T * 1e3).toFixed(1)} ms${r.fit ? '' : '（放不下）'}</text><text class="ai-al-gl" x="${X(i)}" y="176" text-anchor="middle">TP = ${r.t}</text>`;
+      });
+      s += `<polyline class="ai-bc-line c-key" points="${rows.map((r, i) => `${X(i)},${YP(r.per)}`).join(' ')}"/>` + rows.map((r, i) => `<circle class="ai-bc-dot" cx="${X(i)}" cy="${YP(r.per)}" r="3.5"/><text class="ai-al-gl" x="${X(i) + 8}" y="${YP(r.per) + 12}">${Math.round(r.per).toLocaleString()}</text>`).join('');
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const r1 = rows.find((r) => r.fit) ?? rows[3], r8 = rows[3];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `从 TP = ${r1.t} 到 TP = 8：TPOT ${(r1.T * 1e3).toFixed(1)} → ${(r8.T * 1e3).toFixed(1)} ms（快了 ${(r1.T / r8.T).toFixed(1)} 倍，卡多了 ${8 / r1.t} 倍）；每张卡的吞吐 ${Math.round(r1.per).toLocaleString()} → ${Math.round(r8.per).toLocaleString()} token/s。`
+        + `<br>TP = 8 时通信占 ${Math.round(r8.comm / r8.T * 100)}%，每张卡显存（权重 + KV）${(r8.mem / 1e9).toFixed(1)} GB。`
+        + '<br><span class="ai-faint">TP 用更多的卡换更低的延迟：权重和计算按比例分摊，但每层的通信不随卡数减少，所以卡越多，每张卡的效率越低。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => { const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return; mi = Number(bt.dataset.v); fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false')); draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-tpcurve]').forEach(init);
+</script>

@@ -1,0 +1,73 @@
+---
+// RoPE：把 q、k 按各自的位置旋转，点积只取决于两者的位置差。
+// q、k 取第 3 讲结果 C 的第 4 行和第 1 行（4 维 = 2 对）。第 1 对每个位置转 θ₀ = 1 弧度，第 2 对转 θ₁ = 10000^(−2/4) = 0.01 弧度。
+// 左图：第 1 对维度所在的平面，浅色是旋转前，深色是 q 转 m 次、k 转 n 次之后。
+// 右图：整个 4 维点积随位置差 m − n 的变化。拖 m、n，或点“两个一起 +1”：位置差不变，点积不变。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { title?: string; caption?: string }
+const { title = '旋转 q 和 k：点积只看相对距离', caption } = Astro.props;
+const C = tiny.examples['03'].C;
+---
+<figure class="ai-gt ai-rope" data-rope data-q={JSON.stringify(C[3])} data-k={JSON.stringify(C[0])}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>q 的位置 m = <b data-v="m"></b></span><input type="range" min="0" max="20" step="1" value="3" data-s="m" /></label>
+    <label class="ai-tl-lr"><span>k 的位置 n = <b data-v="n"></b></span><input type="range" min="0" max="20" step="1" value="1" data-s="n" /></label>
+    <div class="ai-gt-pre ai-pc-sets"><button data-both="1">两个一起 +1</button><button data-both="-1">两个一起 −1</button></div>
+  </div>
+  <div class="ai-tl-plots">
+    <svg class="ai-tl-svg" viewBox="0 0 260 260" data-plane role="img" aria-label="第 1 对维度的平面"></svg>
+    <svg class="ai-tl-svg" viewBox="0 0 300 200" data-curve role="img" aria-label="点积随位置差变化"></svg>
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmt = (v: number, d = 4) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const TH = [1, 0.01];
+  const rot = (x: number[], p: number) => { const o = [...x]; for (let i = 0; i < 2; i++) { const a = p * TH[i], c = Math.cos(a), s = Math.sin(a), x1 = x[2 * i], x2 = x[2 * i + 1]; o[2 * i] = x1 * c - x2 * s; o[2 * i + 1] = x1 * s + x2 * c; } return o; };
+  const dot = (a: number[], b: number[]) => a.reduce((s, v, i) => s + v * b[i], 0);
+  function init(fig: HTMLElement) {
+    const q: number[] = JSON.parse(fig.dataset.q!), k: number[] = JSON.parse(fig.dataset.k!);
+    const sm = fig.querySelector<HTMLInputElement>('[data-s="m"]')!, sn = fig.querySelector<HTMLInputElement>('[data-s="n"]')!;
+    function draw() {
+      const m = Number(sm.value), n = Number(sn.value);
+      fig.querySelector('[data-v="m"]')!.textContent = String(m);
+      fig.querySelector('[data-v="n"]')!.textContent = String(n);
+      const qm = rot(q, m), kn = rot(k, n);
+      // 平面
+      const S = 85 / 0.5, cx = 130, cy = 130;
+      const P = (x: number, y: number) => [cx + x * S, cy - y * S];
+      const arrow = (x: number, y: number, cls: string, lab: string) => { const [a, b] = P(x, y); return `<line class="${cls}" x1="${cx}" y1="${cy}" x2="${a}" y2="${b}"/><circle class="${cls}-tip" cx="${a}" cy="${b}" r="3.5"/><text class="ai-rope-lab ${cls}-t" x="${a + (x >= 0 ? 6 : -6)}" y="${b - 6}" text-anchor="${x >= 0 ? 'start' : 'end'}">${lab}</text>`; };
+      let s = `<g class="ai-vp-grid"><circle cx="${cx}" cy="${cy}" r="${S * Math.hypot(q[0], q[1])}" fill="none"/><circle cx="${cx}" cy="${cy}" r="${S * Math.hypot(k[0], k[1])}" fill="none"/><line x1="10" y1="${cy}" x2="250" y2="${cy}"/><line x1="${cx}" y1="10" x2="${cx}" y2="250"/></g>`;
+      s += arrow(q[0], q[1], 'ai-rope-q0', 'q') + arrow(k[0], k[1], 'ai-rope-k0', 'k');
+      s += arrow(qm[0], qm[1], 'ai-rope-q', `q 转 ${m} 次`) + arrow(kn[0], kn[1], 'ai-rope-k', `k 转 ${n} 次`);
+      s += `<text class="ai-np-ptitle" x="8" y="14">第 1、2 维的平面（每个位置转 1 弧度）</text>`;
+      fig.querySelector('[data-plane]')!.innerHTML = s;
+      // 点积 vs 位置差
+      const ds = Array.from({ length: 41 }, (_, i) => i - 20), vals = ds.map((d) => dot(rot(q, d), k));
+      const L = 34, R = 292, T = 22, B = 176, mx = Math.max(...vals.map(Math.abs)) * 1.15;
+      const X = (d: number) => L + (d + 20) / 40 * (R - L), Y = (v: number) => (T + B) / 2 - v / mx * (B - T) / 2;
+      let c = `<text class="ai-np-ptitle" x="${L}" y="12">整个 4 维点积 vs 位置差 m − n</text><line class="ai-np-sep" x1="${L}" y1="${Y(0)}" x2="${R}" y2="${Y(0)}"/>`;
+      c += `<path class="ai-al-f" d="${ds.map((d, i) => `${i ? 'L' : 'M'}${X(d).toFixed(1)} ${Y(vals[i]).toFixed(1)}`).join(' ')}"/>`;
+      const cur = dot(qm, kn);
+      c += `<circle class="ai-np-dot" cx="${X(m - n)}" cy="${Y(cur)}" r="5"/><g class="ai-vp-tick"><text x="${L}" y="${B + 14}" text-anchor="middle">−20</text><text x="${X(0)}" y="${B + 14}" text-anchor="middle">0</text><text x="${R}" y="${B + 14}" text-anchor="middle">20</text><text x="${L - 4}" y="${Y(0) + 3}" text-anchor="end">0</text></g>`;
+      fig.querySelector('[data-curve]')!.innerHTML = c;
+      const p1 = qm[0] * kn[0] + qm[1] * kn[1], p2 = qm[2] * kn[2] + qm[3] * kn[3];
+      fig.querySelector('[data-eq]')!.innerHTML = `q 转到位置 ${m}：(${qm.map((v) => fmt(v)).join(', ')})；k 转到位置 ${n}：(${kn.map((v) => fmt(v)).join(', ')})`
+        + `<br>点积 = 第 1 对 ${fmt(p1)} + 第 2 对 ${fmt(p2)} = <b>${fmt(cur)}</b>，位置差 m − n = ${m - n}`
+        + `<br><span class="ai-faint">两个向量各转了 ${m} 和 ${n} 次，它们之间的夹角只变了 ${m - n} 次的量。点“两个一起 +1”，两支箭头一起转，点积不变。</span>`;
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-both]');
+      if (!b) return;
+      const d = Number(b.dataset.both), m = Number(sm.value) + d, n = Number(sn.value) + d;
+      if (m < 0 || n < 0 || m > 20 || n > 20) return;
+      sm.value = String(m); sn.value = String(n); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-rope]').forEach(init);
+</script>

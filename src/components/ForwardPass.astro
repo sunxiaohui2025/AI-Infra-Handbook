@@ -1,0 +1,95 @@
+---
+// TinyLM 完整前向的逐站查看（tinylm.json examples["34"]，所有数字由 tinylm.py 算出）。
+// 输入“我 爱 学 AI”，2 层 Post-Norm Transformer：嵌入 + 位置编码 → [注意力 → 残差 → LayerNorm → FFN → 残差 → LayerNorm] × 2 → lm_head → softmax。
+//   focus：'all' 全部 24 站（第 34 讲）；'ln' 残差 + LayerNorm（第 30 讲）；'ffn' 前馈网络（第 31 讲）；'output' 输出层（第 33 讲）。
+// 读者可以：点左边的站（或“上一站 / 下一站”）；点表格的某一行选一个词，下方写出这一站对这个词做了什么、形状怎么变。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { focus?: 'all' | 'ln' | 'ffn' | 'output'; start?: string; title?: string; caption?: string }
+const { focus = 'all', caption } = Astro.props;
+const FOCUS: Record<string, string[]> = {
+  ln: ['L1attn', 'L1res1', 'L1ln1'],
+  ffn: ['L1ln1', 'L1up', 'L1relu', 'L1down', 'L1res2'],
+  output: ['L2ln2', 'logits', 'probs'],
+};
+const ex = tiny.examples['34'];
+const steps = focus === 'all' ? ex.steps : ex.steps.filter((s) => FOCUS[focus].includes(s.key));
+const { start = focus === 'all' ? 'embed' : focus === 'ln' ? 'L1ln1' : focus === 'ffn' ? 'L1up' : 'probs' } = Astro.props;
+const { title = { all: 'TinyLM 完整前向：一站一站往下走', ln: '残差相加，再做 LayerNorm', ffn: '前馈网络：升维 → ReLU → 降维', output: '输出层：最后的向量变成词表上的概率' }[focus] } = Astro.props;
+const all = Object.fromEntries(ex.steps.map((s) => [s.key, s.v]));
+---
+<figure class="ai-gt ai-fp" data-fwd data-cfg={JSON.stringify({ tokens: ex.tokens, vocab: ex.vocab, steps: steps.map((s) => ({ key: s.key, name: s.name })), all, start })}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-fp-body">
+    <ol class="ai-fp-list" data-list></ol>
+    <div class="ai-fp-main">
+      <div class="ai-fp-head" data-head></div>
+      <div class="ai-fp-tbl" data-tbl></div>
+      <div class="ai-cg-eq ai-att-eq" data-eq></div>
+      <div class="ai-gt-play"><button class="ai-pill" data-go="-1">← 上一站</button><button class="ai-pill ai-pill--solid" data-go="1">下一站 →</button></div>
+    </div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type M = number[][];
+  const fmt = (v: number, d = 3) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const vec = (r: number[], d = 3) => '(' + r.map((v) => fmt(v, d)).join(', ') + ')';
+  function init(fig: HTMLElement) {
+    const C = JSON.parse(fig.dataset.cfg!);
+    const T: string[] = C.tokens, VOC: string[] = C.vocab, A: Record<string, M> = C.all;
+    const keys: string[] = C.steps.map((s: { key: string }) => s.key);
+    let cur = Math.max(0, keys.indexOf(C.start)), row = T.length - 1;
+    const q = (s: string) => fig.querySelector<HTMLElement>(s)!;
+    const prevKey = (k: string) => { const order = Object.keys(A); return order[order.indexOf(k) - 1]; };
+    const layer = (k: string) => (k.startsWith('L') ? k.slice(0, 2) : '');
+    const colHead = (k: string): string[] => {
+      const n = A[k][0].length;
+      if (k.endsWith('qkv')) return ['q₁', 'q₂', 'q₃', 'q₄', 'k₁', 'k₂', 'k₃', 'k₄', 'v₁', 'v₂', 'v₃', 'v₄'];
+      if (k.endsWith('attnw')) return [...T.map((t) => '头1·' + t), ...T.map((t) => '头2·' + t)];
+      if (k === 'logits' || k === 'probs') return VOC.map(esc);
+      return Array.from({ length: n }, (_, j) => String(j + 1));
+    };
+    function detail(k: string): string {
+      const r = A[k][row], t = T[row], L = layer(k), n = r.length;
+      if (k === 'embed') return `“${t}”查嵌入表，取出它那一行（第 22 讲）：${vec(r, 2)}。形状 [4 个词, 4 维]。`;
+      if (k === 'pos') return `加上第 ${row} 个位置的正弦编码（第 25 讲）：${vec(A.embed[row], 2)} + ${vec(r.map((v, j) => v - A.embed[row][j]))} = ${vec(r)}。`;
+      if (k.endsWith('qkv')) return `“${t}”的 q = ${vec(r.slice(0, 4))}，k = ${vec(r.slice(4, 8))}，v = ${vec(r.slice(8))}。三个 [4, 4] 的矩阵乘法（第 26 讲），这里并排放在一起，前 2 维给头 1，后 2 维给头 2（第 28 讲）。`;
+      if (k.endsWith('attnw')) return `“${t}”在头 1 里分给 ${T.map((x, j) => `${x} ${fmt(r[j])}`).join('、')}；在头 2 里分给 ${T.map((x, j) => `${x} ${fmt(r[4 + j])}`).join('、')}。因果掩码让它看不到后面的词（第 27 讲），右上角都是 0。`;
+      if (k.endsWith('attn')) return `两个头的输出拼起来乘 W_o（第 28 讲），“${t}”得到 ${vec(r)}。这是它从上下文收集来的信息，形状仍是 [4, 4]。`;
+      if (k.endsWith('res1') || k.endsWith('res2')) {
+        const a = k.endsWith('res1') ? A[prevKey(L + 'qkv')] : A[L + 'ln1'], b = k.endsWith('res1') ? A[L + 'attn'] : A[L + 'down'];
+        return `残差连接（第 29 讲）：把这一步的输入原样加回来。“${t}”：${vec(a[row])} + ${vec(b[row])} = ${vec(r)}。`;
+      }
+      if (k.endsWith('ln1') || k.endsWith('ln2')) {
+        const x = A[prevKey(k)][row], mu = x.reduce((s, v) => s + v, 0) / n, va = x.reduce((s, v) => s + (v - mu) ** 2, 0) / n, sd = Math.sqrt(va + 1e-5);
+        return `LayerNorm（第 30 讲），对“${t}”这一行：<br>① 均值 μ = (${x.map((v) => fmt(v)).join(' + ')}) / ${n} = ${fmt(mu, 4)}<br>② 减去均值：${vec(x.map((v) => v - mu))}<br>③ 方差 = 这 ${n} 个数平方的平均 = ${fmt(va, 4)}，标准差 √(方差 + 0.00001) = ${fmt(sd, 4)}<br>④ 除以标准差：${vec(r)}　→ 均值 0、方差 1`;
+      }
+      if (k.endsWith('up')) return `升维（第 31 讲）：“${t}”的 4 维向量乘 W_1（4 × 8），得到 8 个数 ${vec(r, 2)}。形状 [4, 4] → [4, 8]。`;
+      if (k.endsWith('relu')) { const neg = A[L + 'up'][row].filter((v) => v < 0).length; return `ReLU（第 14 讲）：8 个数里有 ${neg} 个是负数，被截成 0；剩下的原样保留：${vec(r, 2)}。`; }
+      if (k.endsWith('down')) return `降维：8 个数乘 W_2（8 × 4），回到 4 维 ${vec(r)}。形状 [4, 8] → [4, 4]，和输入一样，才能和输入相加。`;
+      if (k === 'logits') return `输出层（第 33 讲）：“${t}”最后的 4 维向量乘 lm_head（4 × 6），给词表里 6 个词各打一个分：${VOC.map((w, j) => `${esc(w)} ${fmt(r[j], 2)}`).join('、')}。形状 [4, 4] → [4, 6]。`;
+      if (k === 'probs') { const best = r.indexOf(Math.max(...r)); return `softmax（第 6 讲）：每一行变成加起来是 1 的概率。“${t}”后面最可能是“${esc(VOC[best])}”（${fmt(r[best])}）。${row === T.length - 1 ? '推理时只用最后一行：这就是模型对“我 爱 学 AI”之后下一个词的预测。' : `训练时这一行用来预测第 ${row + 2} 个词（第 23 讲）。`} TinyLM 没训练过，所以预测没有意义。`; }
+      return '';
+    }
+    function draw() {
+      const k = keys[cur], M = A[k], cols = colHead(k);
+      q('[data-list]').innerHTML = C.steps.map((s: { key: string; name: string }, i: number) => `<li class="${i === cur ? 'is-cur' : ''}" data-i="${i}">${s.name}</li>`).join('');
+      q('[data-head]').innerHTML = `<b>${C.steps[cur].name}</b><span class="ai-faint">　形状 [${M.length}, ${M[0].length}]</span>`;
+      const max = Math.max(...M.flat().map(Math.abs), 1e-9);
+      q('[data-tbl]').innerHTML = `<table class="ai-emb-tbl ai-fp-m"><thead><tr><th></th>${cols.map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${M.map((r, i) => `<tr data-row="${i}" class="${i === row ? 'is-sel' : ''}"><th>${T[i]}</th>${r.map((v) => `<td style="--a:${(Math.abs(v) / max).toFixed(2)}" class="${v < 0 ? 'is-neg' : ''}">${fmt(v, 2)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+      q('[data-eq]').innerHTML = detail(k);
+      (fig.querySelector('[data-go="-1"]') as HTMLButtonElement).disabled = cur === 0;
+      (fig.querySelector('[data-go="1"]') as HTMLButtonElement).disabled = cur === keys.length - 1;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      const li = t.closest<HTMLElement>('[data-i]'), tr = t.closest<HTMLElement>('[data-row]'), go = t.closest<HTMLElement>('[data-go]');
+      if (li) cur = Number(li.dataset.i); else if (tr) row = Number(tr.dataset.row); else if (go) cur = Math.max(0, Math.min(keys.length - 1, cur + Number(go.dataset.go))); else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-fwd]').forEach(init);
+</script>

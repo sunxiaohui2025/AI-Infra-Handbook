@@ -1,0 +1,70 @@
+---
+// 离群通道对权重量化误差的影响（缩小的例子，与第 81 讲代码的思路相同，数据用固定种子在浏览器里生成）。
+// 一个线性层 y = x·W（16 个输入通道 → 16 个输出），64 个校准 token；第 5 号输入通道的激活放大 k 倍（离群通道）。
+// RTN：每个输出通道一个 scale，直接四舍五入。AWQ：输入通道 j 的权重先乘 s_j = (平均|x_j|)^α 再量化，激活除以 s_j，搜索 α。
+// 每根柱子是一个输入通道对输出误差的“贡献”≈ 平均|x_j| × 这一行权重的平均量化误差。读者可以：调离群倍数 k、位宽，切换 RTN / AWQ。
+interface Props { title?: string; caption?: string }
+const { title = '离群通道：权重误差在哪里最要紧', caption } = Astro.props;
+---
+<figure class="ai-gt ai-oq" data-outlierq>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>离群通道放大 k = <b data-kv></b> 倍</span><input type="range" min="1" max="50" step="1" value="20" data-k /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="b"><span class="ai-tl-k">位宽：</span><button data-v="3" aria-pressed="false">3 bit</button><button data-v="4" aria-pressed="true">4 bit</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="rtn" aria-pressed="true">RTN（直接取整）</button><button data-v="awq" aria-pressed="false">AWQ（先按激活缩放）</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const D = 16, T = 64, OUT = 5;
+  function gauss(seed: number) { let s = seed; const u = () => { s = (s * 1103515245 + 12345) % 2147483648; return (s + 0.5) / 2147483648; }; return () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u()); }
+  const g = gauss(7);
+  const W0 = Array.from({ length: D }, () => Array.from({ length: D }, () => g() * 0.05));
+  const X0 = Array.from({ length: T }, () => Array.from({ length: D }, () => g()));
+  const mm = (X: number[][], W: number[][]) => X.map((r) => W[0].map((_, k) => r.reduce((a, v, j) => a + v * W[j][k], 0)));
+  function rtn(W: number[][], bits: number) {
+    const qm = 2 ** (bits - 1) - 1, s = W[0].map((_, k) => Math.max(...W.map((r) => Math.abs(r[k]))) / qm);
+    return W.map((r) => r.map((v, k) => Math.max(-qm, Math.min(qm, Math.round(v / s[k]))) * s[k]));
+  }
+  function init(fig: HTMLElement) {
+    let bits = 4, mode = 'rtn';
+    const kIn = fig.querySelector<HTMLInputElement>('[data-k]')!;
+    function draw() {
+      const k = Number(kIn.value); fig.querySelector('[data-kv]')!.textContent = String(k);
+      const X = X0.map((r) => r.map((v, j) => (j === OUT ? v * k : v))), Y = mm(X, W0);
+      const nrm = (A: number[][]) => Math.sqrt(A.reduce((a, r) => a + r.reduce((b, v) => b + v * v, 0), 0));
+      const err = (Wq: number[][]) => { const Yq = mm(X, Wq); return nrm(Y.map((r, i) => r.map((v, j) => v - Yq[i][j]))) / nrm(Y); };
+      const am = Array.from({ length: D }, (_, j) => X.reduce((a, r) => a + Math.abs(r[j]), 0) / T);
+      const Wr = rtn(W0, bits);
+      let best = { e: Infinity, a: 0, Wq: Wr };
+      for (let a = 0; a <= 1.0001; a += 0.1) {
+        const s = am.map((v) => v ** a), Wq = rtn(W0.map((r, j) => r.map((v) => v * s[j])), bits).map((r, j) => r.map((v) => v / s[j]));
+        const e = err(Wq); if (e < best.e) best = { e, a, Wq };
+      }
+      const Wq = mode === 'rtn' ? Wr : best.Wq;
+      const rowErr = W0.map((r, j) => r.reduce((a, v, c) => a + Math.abs(v - Wq[j][c]), 0) / D), contrib = rowErr.map((v, j) => v * am[j]);
+      const mxA = Math.max(...am), mxC = Math.max(...contrib) || 1, bw = 560 / D;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 210"><text class="ai-np-ptitle" x="20" y="12">每个输入通道的平均 |激活|</text><text class="ai-np-ptitle" x="20" y="112">这一行权重的量化误差 × 平均 |激活|（对输出误差的贡献）</text>';
+      am.forEach((v, j) => {
+        const h = (v / mxA) * 70, h2 = (contrib[j] / mxC) * 70;
+        s += `<rect class="ai-oq-a${j === OUT ? ' is-out' : ''}" x="${30 + j * bw}" y="${90 - h}" width="${bw - 4}" height="${h}"/>`;
+        s += `<rect class="ai-oq-c${j === OUT ? ' is-out' : ''}" x="${30 + j * bw}" y="${190 - h2}" width="${bw - 4}" height="${h2}"/><text class="ai-al-gl" x="${30 + j * bw + bw / 2 - 2}" y="204" text-anchor="middle">${j}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `输出相对误差：RTN ${(err(Wr) * 100).toFixed(2)}%，AWQ（α = ${best.a.toFixed(1)}）${(best.e * 100).toFixed(2)}%。`
+        + `<br>离群通道 ${OUT} 那一行的权重平均误差：${(rowErr[OUT]).toFixed(5)}；其他行平均：${(rowErr.filter((_, j) => j !== OUT).reduce((a, b) => a + b, 0) / (D - 1)).toFixed(5)}。`
+        + `<br><span class="ai-faint">${mode === 'rtn' ? 'RTN 对每一行一视同仁，可离群通道的激活大 k 倍，它那一行的同样误差被放大 k 倍，成了输出误差的主要来源。' : 'AWQ 把离群通道那一行的权重放大后再量化，它的相对误差变小了（代价是其他行稍差一点），总的输出误差下降。'}</span>`;
+    }
+    kIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const gr = b.closest<HTMLElement>('[data-group]')!; gr.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      if (gr.dataset.group === 'b') bits = Number(b.dataset.v); else mode = b.dataset.v!; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-outlierq]').forEach(init);
+</script>

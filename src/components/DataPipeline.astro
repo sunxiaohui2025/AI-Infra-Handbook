@@ -1,0 +1,64 @@
+---
+// 数据清洗流水线（示意）：9 篇“网页”依次经过完全去重、近似去重、长度过滤、乱码过滤、重复片段过滤，最后按语言分桶。
+// 规则和阈值与第 45 讲的代码一致：近似去重用 3 字片段的 Jaccard 相似度 > 0.7；长度 < 15 个字符；符号占比 > 30%；重复片段 > 30%。
+// 读者可以：点上面的阶段，看到这一步为止每篇文档的命运；点一篇文档看它被丢弃（或保留）的原因。
+interface Props { title?: string; caption?: string }
+const { title = '一批网页，怎么洗成训练数据', caption } = Astro.props;
+const DOCS = [
+  '猫是一种常见的家养动物，喜欢吃鱼，也喜欢晒太阳。很多家庭都养猫。',
+  '猫是一种常见的家养动物，喜欢吃鱼，也喜欢晒太阳。很多家庭都养猫。',
+  '猫是一种常见的家养动物，爱吃鱼，也喜欢晒太阳。很多家庭都养猫。',
+  '点击这里！！！免费领取！！！点击这里！！！免费领取！！！点击这里！！！',
+  '首页 | 登录 | 注册',
+  'Transformer 由注意力和前馈网络组成，每层都有残差连接和归一化。',
+  '@@#$%^&*()_+{}|:<>?@@#$%^&*()_+{}|:<>?',
+  '梯度下降沿着损失下降最快的方向更新参数，学习率决定每一步走多远。',
+  'The cat is a common domestic animal that likes fish and sunshine.',
+];
+---
+<figure class="ai-gt ai-dp" data-pipeline data-docs={JSON.stringify(DOCS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-dp-stages" data-stages></div>
+  <ol class="ai-dp-list" data-list></ol>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const STAGES = ['原始网页', '完全去重', '近似去重', '长度过滤', '乱码过滤', '重复片段过滤', '按语言分桶'];
+  const shingles = (t: string, k = 3) => { const a = Array.from(t), s = new Set<string>(); for (let i = 0; i + k <= a.length; i++) s.add(a.slice(i, i + k).join('')); return s; };
+  const jac = (a: Set<string>, b: Set<string>) => { let n = 0; a.forEach((x) => { if (b.has(x)) n++; }); return n / (a.size + b.size - n); };
+  function init(fig: HTMLElement) {
+    const D: string[] = JSON.parse(fig.dataset.docs!);
+    // 算出每篇文档在哪一步被丢、为什么（和 Python 代码同样的顺序和规则）
+    const fate: { stage: number; why: string }[] = [], keptSh: Set<string>[] = [], seen = new Set<string>();
+    D.forEach((t) => {
+      const len = Array.from(t).length;
+      if (seen.has(t)) { fate.push({ stage: 1, why: '和前面某篇一字不差' }); return; }
+      seen.add(t);
+      const sh = shingles(t), sim = Math.max(0, ...keptSh.map((s) => jac(sh, s)));
+      if (sim > 0.7) { fate.push({ stage: 2, why: `和已保留的文档相似度 ${sim.toFixed(2)}，几乎重复` }); return; }
+      if (len < 15) { fate.push({ stage: 3, why: `只有 ${len} 个字符，太短` }); return; }
+      const sym = (t.match(/[^\p{L}\p{N}_\s，。、；：？！,.\-]/gu) || []).length / len;
+      if (sym > 0.3) { fate.push({ stage: 4, why: `符号占 ${Math.round(sym * 100)}%，像乱码` }); return; }
+      const rep = 1 - shingles(t).size / Math.max(1, len - 2);
+      if (rep > 0.3) { fate.push({ stage: 5, why: `重复片段占 ${Math.round(rep * 100)}%，像广告或模板` }); return; }
+      keptSh.push(sh);
+      fate.push({ stage: 99, why: /[一-鿿]/.test(t) ? '保留，放进中文桶' : '保留，放进其他语言的桶' });
+    });
+    let stage = STAGES.length - 1, sel = 0;
+    function draw() {
+      fig.querySelector<HTMLElement>('[data-stages]')!.innerHTML = STAGES.map((s, i) => `<button class="${i === stage ? 'is-sel' : ''}" data-st="${i}">${i ? '→ ' : ''}${s}<small>${fate.filter((f) => f.stage > i).length} 篇</small></button>`).join('');
+      fig.querySelector<HTMLElement>('[data-list]')!.innerHTML = D.map((t, i) => { const f = fate[i], out = f.stage <= stage; return `<li class="${out ? 'is-out' : ''}${i === sel ? ' is-sel' : ''}" data-doc="${i}"><span>${t.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span>${out ? `<small>第 ${f.stage} 步丢弃</small>` : ''}</li>`; }).join('');
+      const f = fate[sel];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `文档 ${sel + 1}：${f.stage === 99 ? f.why : `在“${STAGES[f.stage]}”这一步被丢弃：${f.why}`}。<br><span class="ai-faint">到“${STAGES[stage]}”为止，还剩 ${fate.filter((x) => x.stage > stage).length} / ${D.length} 篇。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, st = t.closest<HTMLElement>('[data-st]'), d = t.closest<HTMLElement>('[data-doc]');
+      if (st) stage = Number(st.dataset.st); else if (d) sel = Number(d.dataset.doc); else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pipeline]').forEach(init);
+</script>

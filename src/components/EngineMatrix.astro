@@ -1,0 +1,46 @@
+---
+// 主流推理引擎的定位对照（第 119 讲）。内容是定性的，来自各项目的公开文档和本篇读过的源码，不是测出来的性能排名；项目更新很快，以官方文档为准。
+// 读者可以：选一个部署场景，看哪些引擎适合（强调色）、为什么。
+interface Props { title?: string; caption?: string }
+const { title = '按场景看引擎', caption } = Astro.props;
+---
+<figure class="ai-gt ai-em" data-enginematrix>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="s"></div>
+  <table class="ai-sm-arr" data-tbl></table>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const ENG = [
+    { n: 'vLLM', lang: 'Python + CUDA/Triton kernel', hw: 'NVIDIA、AMD、Intel、TPU，昇腾等靠插件', fit: '通用的在线服务；模型支持最全', note: '统一 token 预算调度、分页 KV、异步调度；KV connector 接 PD 分离' },
+    { n: 'SGLang', lang: 'Python + CUDA/Triton kernel', hw: 'NVIDIA、AMD，昇腾等', fit: '前缀复用多的负载（多轮、Agent、结构化输出）；DeepSeek 类 MoE 大规模部署', note: 'RadixAttention、零开销调度、约束解码；DP 注意力 + 专家并行' },
+    { n: 'TensorRT-LLM', lang: 'C++ 运行时 + Python（PyTorch 后端）', hw: '只有 NVIDIA', fit: '在 NVIDIA 新卡上压榨性能，FP8 / FP4 低精度', note: 'NVIDIA 官方的 kernel 和低精度支持最早到位；部署链路较重' },
+    { n: 'LMDeploy', lang: 'C++（TurboMind）+ PyTorch 引擎', hw: 'NVIDIA；PyTorch 引擎支持昇腾等', fit: '4 位权重量化、KV 量化下的高吞吐', note: 'TurboMind 的 W4A16 kernel；书生（InternLM）系列支持好' },
+    { n: 'llama.cpp', lang: 'C/C++，GGUF 格式', hw: 'CPU、Apple Metal、CUDA、Vulkan 等几乎一切', fit: '本地、端侧、单用户或低并发', note: '多种 k-quant 量化；Ollama、LM Studio 等以它为内核' },
+    { n: 'MLC-LLM', lang: 'TVM 编译', hw: '手机、浏览器（WebGPU）、各类 GPU', fit: '要编译到特殊平台（移动端、网页）', note: '用编译器为每种硬件生成 kernel' },
+  ];
+  const SC = [
+    { k: '在线服务（数据中心 GPU）', on: ['vLLM', 'SGLang', 'TensorRT-LLM', 'LMDeploy'], why: '要 continuous batching、分页 KV、前缀缓存、OpenAI 兼容接口、多卡并行。四个都具备；vLLM 和 SGLang 社区最大、模型最新；只用 NVIDIA 新卡、追求极致时看 TensorRT-LLM。' },
+    { k: '共享前缀多（多轮、Agent）', on: ['SGLang', 'vLLM'], why: '前缀缓存的命中率决定 TTFT 和成本。SGLang 的基数树逐 token 命中，缓存感知的调度可选；vLLM 的块哈希前缀缓存默认打开，配合缓存感知的路由（第 102 讲）。' },
+    { k: '大规模 MoE（DeepSeek 类）', on: ['SGLang', 'vLLM', 'TensorRT-LLM'], why: '要专家并行、DP 注意力、DeepEP 这类 All-to-All 通信库、EPLB 负载均衡、双微批重叠和 PD 分离。这三个都有公开的大规模部署方案。' },
+    { k: '显存紧、要 4 位量化', on: ['LMDeploy', 'vLLM', 'llama.cpp'], why: '4 位权重量化要有专门的 kernel 才能变快（第 111 讲的教训）。LMDeploy 的 TurboMind、vLLM 的 Marlin 等 kernel、llama.cpp 的 k-quant 都是为此写的。' },
+    { k: '本地 / 端侧 / Mac', on: ['llama.cpp', 'MLC-LLM'], why: '没有数据中心 GPU，并发很低，关心的是能跑起来、占内存少、单请求延迟低。llama.cpp 覆盖的硬件最广；要进手机或浏览器看 MLC-LLM。' },
+    { k: '国产加速卡', on: ['vLLM', 'SGLang', 'LMDeploy'], why: '各家硬件厂商通常为 vLLM、SGLang 提供插件或分支（如 vllm-ascend），LMDeploy 的 PyTorch 引擎也支持昇腾。具体看厂商的支持列表。' },
+  ];
+  function init(fig: HTMLElement) {
+    let k = 0;
+    fig.querySelector<HTMLElement>('[data-group]')!.innerHTML = SC.map((s, i) => `<button data-v="${i}">${s.k}</button>`).join('');
+    function draw() {
+      const on = new Set(SC[k].on);
+      fig.querySelectorAll('[data-v]').forEach((b) => b.setAttribute('aria-pressed', String(+(b as HTMLElement).dataset.v! === k)));
+      fig.querySelector<HTMLElement>('[data-tbl]')!.innerHTML = '<tr><th>引擎</th><th>实现</th><th>硬件</th><th>最适合</th><th>特点</th></tr>' +
+        ENG.map((e) => `<tr class="${on.has(e.n) ? 'is-on' : 'is-off'}"><th>${e.n}</th><td>${e.lang}</td><td>${e.hw}</td><td>${e.fit}</td><td>${e.note}</td></tr>`).join('');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = SC[k].why;
+    }
+    fig.addEventListener('click', (e) => { const b = (e.target as Element).closest<HTMLElement>('[data-v]'); if (b) { k = +b.dataset.v!; draw(); } });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-enginematrix]').forEach(init);
+</script>

@@ -1,0 +1,77 @@
+---
+// 低精度浮点格式（与第 83 讲的代码相同的规则）。
+// 上半部分：选格式，点每一位翻转 0/1，看它表示的值：正规数 (−1)^S × (1 + M/2^m) × 2^(E − bias)，E = 0 时是次正规数 (−1)^S × (M/2^m) × 2^(1 − bias)。
+//   数轴（对数坐标）画出这种格式能表示的全部正数，INT 格式作对照。
+// 下半部分：16 个数用 FP4 E2M1 量化，整体一个 scale 与每 8 个一组各一个 scale 的对比。
+interface Props { title?: string; caption?: string }
+const { title = '8 位、4 位的浮点数长什么样', caption } = Astro.props;
+const FMT = { e4m3: [4, 3, 7], e5m2: [5, 2, 15], e2m1: [2, 1, 1] };
+---
+<figure class="ai-gt ai-fp" data-fpformats data-fmt={JSON.stringify(FMT)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="f"><button data-v="e4m3" aria-pressed="true">FP8 E4M3</button><button data-v="e5m2" aria-pressed="false">FP8 E5M2</button><button data-v="e2m1" aria-pressed="false">FP4 E2M1</button></div>
+  <div class="ai-fp-bits" data-bits></div>
+  <div data-line></div>
+  <div class="ai-cg-eq" data-eq></div>
+  <div class="ai-ms-title ai-pd-h2">分组缩放：16 个数量化成 FP4</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="g"><button data-v="16" aria-pressed="true">16 个共用一个 scale</button><button data-v="8" aria-pressed="false">每 8 个一组</button></div>
+  <div class="ai-qs-tab" data-blk></div>
+  <div class="ai-cg-eq" data-eq2></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const XS = [0.03, -0.12, 0.07, 2.4, -0.04, 0.18, -0.09, 0.02, 0.11, -0.06, 0.14, -0.21, 0.05, 0.09, -0.15, 0.08];
+  function values(e: number, m: number, bias: number, ieee: boolean) {
+    const v = new Set<number>();
+    for (let E = 0; E < 2 ** e; E++) for (let M = 0; M < 2 ** m; M++) {
+      if (ieee && E === 2 ** e - 1) continue;
+      if (!ieee && e > 2 && E === 2 ** e - 1 && M === 2 ** m - 1) continue;
+      v.add(E === 0 ? (M / 2 ** m) * 2 ** (1 - bias) : (1 + M / 2 ** m) * 2 ** (E - bias));
+    }
+    return [...v].sort((a, b) => a - b);
+  }
+  function init(fig: HTMLElement) {
+    const F: Record<string, number[]> = JSON.parse(fig.dataset.fmt!);
+    let fmt = 'e4m3', G = 16, bits: number[] = [0, 0, 1, 1, 1, 1, 0, 0];
+    function draw() {
+      const [e, m, bias] = F[fmt], ieee = fmt === 'e5m2', n = 1 + e + m;
+      if (bits.length !== n) bits = fmt === 'e2m1' ? [0, 1, 0, 1] : fmt === 'e5m2' ? [0, 0, 1, 1, 1, 1, 0, 0] : [0, 0, 1, 1, 1, 1, 0, 0];
+      const S = bits[0], E = parseInt(bits.slice(1, 1 + e).join(''), 2), M = parseInt(bits.slice(1 + e).join(''), 2);
+      let val: number, how: string;
+      if (ieee && E === 2 ** e - 1) { val = NaN; how = M ? 'NaN' : (S ? '−∞' : '+∞'); }
+      else if (!ieee && e > 2 && E === 2 ** e - 1 && M === 2 ** m - 1) { val = NaN; how = 'NaN（E4M3 只把全 1 留作 NaN，没有无穷大）'; }
+      else if (E === 0) { val = (S ? -1 : 1) * (M / 2 ** m) * 2 ** (1 - bias); how = `E = 0，次正规数：${S ? '−' : ''}(${M}/${2 ** m}) × 2^(1 − ${bias}) = ${val}`; }
+      else { val = (S ? -1 : 1) * (1 + M / 2 ** m) * 2 ** (E - bias); how = `${S ? '−' : ''}(1 + ${M}/${2 ** m}) × 2^(${E} − ${bias}) = ${val}`; }
+      fig.querySelector<HTMLElement>('[data-bits]')!.innerHTML = bits.map((b, i) => `<button class="ai-fp-bit ${i === 0 ? 's' : i <= e ? 'e' : 'm'}" data-bit="${i}">${b}</button>`).join('')
+        + `<span class="ai-faint">　符号 1 位 · 指数 ${e} 位 · 尾数 ${m} 位（点一位翻转）</span>`;
+      const vs = values(e, m, bias, ieee).filter((v) => v > 0), lo = Math.log2(vs[0]) - 0.5, hi = Math.log2(vs[vs.length - 1]) + 0.5, X = (v: number) => 20 + ((Math.log2(v) - lo) / (hi - lo)) * 560;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 600 54"><line class="ai-bc-ax" x1="20" x2="580" y1="22" y2="22"/>`;
+      vs.forEach((v) => { s += `<line class="ai-qs-grid" x1="${X(v)}" x2="${X(v)}" y1="14" y2="30"/>`; });
+      if (Number.isFinite(val) && val > 0) s += `<circle class="ai-qs-xh" cx="${X(val)}" cy="22" r="4"/>`;
+      for (let p = Math.ceil(lo); p <= hi; p += Math.max(1, Math.round((hi - lo) / 8))) s += `<text class="ai-al-gl" x="${X(2 ** p)}" y="46" text-anchor="middle">2^${p}</text>`;
+      fig.querySelector<HTMLElement>('[data-line]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${how}<br>能表示 ${vs.length + 1} 个非负值，最大 ${vs[vs.length - 1]}，最小的正数 ${vs[0]}。`
+        + '<br><span class="ai-faint">数轴是对数坐标：每个 2 的幂之间格点数一样多，所以格点的“相对”间隔处处差不多——小数附近格点密，大数附近格点疏。整数格式则是等间隔的。</span>';
+      // 分组缩放
+      const grid = values(2, 1, 1, false), gmax = 6, rows: string[] = [];
+      let errSum = 0, sumSq = 0; const scales: number[] = [], qs: number[] = [], xhs: number[] = [];
+      for (let g0 = 0; g0 < 16; g0 += G) {
+        const xs = XS.slice(g0, g0 + G), sc = Math.max(...xs.map(Math.abs)) / gmax; scales.push(sc);
+        xs.forEach((x, k) => { const r = Math.abs(x / sc), q = grid.reduce((a, b) => (Math.abs(b - r) < Math.abs(a - r) ? b : a)) * Math.sign(x); qs.push(q); xhs.push(q * sc); if (g0 + k !== 3) { errSum += (x - q * sc) ** 2; sumSq += x * x; } });
+      }
+      const zeros = qs.filter((q) => q === 0).length;
+      fig.querySelector<HTMLElement>('[data-blk]')!.innerHTML = `<table><tr><th>x</th>${XS.map((x) => `<td>${x}</td>`).join('')}</tr><tr><th>x ÷ scale → FP4</th>${qs.map((q) => `<td><b>${q}</b></td>`).join('')}</tr><tr><th>x̂</th>${xhs.map((v) => `<td>${v.toFixed(3)}</td>`).join('')}</tr></table>`;
+      fig.querySelector<HTMLElement>('[data-eq2]')!.innerHTML = `scale = 组内最大 |x| ÷ 6：${scales.map((v) => v.toFixed(4)).join('，')}。除离群值以外的 15 个数，相对误差 ${(Math.sqrt(errSum / sumSq) * 100).toFixed(1)}%，有 ${zeros} 个被量化成了 0。`
+        + `<br><span class="ai-faint">第 4 个数 2.4 是离群值。${G === 16 ? '整体一个 scale 时，它把 scale 撑到 0.4，其余的数除以 scale 后都不到 0.6，只能变成 0 或 ±0.5。' : '分组后，离群值只影响第一组；第二组的 scale 小得多，数都保住了。FP4 只有 8 个非负值，必须配合很小的分组才能用。'}</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, b = t.closest<HTMLElement>('[data-group] [data-v]'), bit = t.closest<HTMLElement>('[data-bit]');
+      if (b) { const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); if (g.dataset.group === 'f') { fmt = b.dataset.v!; bits = []; } else G = Number(b.dataset.v); }
+      else if (bit) { const i = Number(bit.dataset.bit); bits[i] = 1 - bits[i]; } else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-fpformats]').forEach(init);
+</script>

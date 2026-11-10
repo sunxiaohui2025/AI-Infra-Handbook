@@ -1,0 +1,88 @@
+---
+// 模型计算器：输入 Transformer 的配置，逐项算出参数量、每 token 的计算量和显存。
+// 公式（与第 35 讲的代码一致）：
+//   每层注意力 = 2d² + 2·d·kv（kv = d / n_h × n_kv，GQA 时变窄）；每层 FFN = (门控 ? 3 : 2)·d·d_ff；每层归一化 = 2d（RMSNorm 只有 γ）
+//   合计 = V·d（嵌入）+ L × 每层 + d（最后的归一化）+ V·d（输出层，权重绑定时为 0）
+//   每 token 前向 FLOPs = 2 ×（合计 − 嵌入）+ 4·L·s·d（s 是这个 token 前面的上下文长度）
+//   KV Cache 每 token = 2 · L · kv · 每个数的字节数
+// 读者可以：点预设（TinyLM / Llama-3-8B / Llama-3-70B），或直接改每个数；调上下文长度、并发请求数和精度。
+interface Props { preset?: 'tiny' | 'l8' | 'l70'; title?: string; caption?: string }
+const { preset = 'l8', title = '模型计算器：参数、计算量、显存', caption } = Astro.props;
+const PRESETS = {
+  tiny: { name: 'TinyLM', d: 4, L: 2, n_h: 2, n_kv: 2, d_ff: 8, V: 6, gated: 0, norm: 0, tied: 0 },
+  l8: { name: 'Llama-3-8B', d: 4096, L: 32, n_h: 32, n_kv: 8, d_ff: 14336, V: 128256, gated: 1, norm: 1, tied: 0 },
+  l70: { name: 'Llama-3-70B', d: 8192, L: 80, n_h: 64, n_kv: 8, d_ff: 28672, V: 128256, gated: 1, norm: 1, tied: 0 },
+};
+const FIELDS: [string, string][] = [['d', '隐藏维度 d'], ['L', '层数 L'], ['n_h', '注意力头数'], ['n_kv', 'KV 头数'], ['d_ff', 'FFN 中间维度'], ['V', '词表大小 V']];
+---
+<figure class="ai-gt ai-mc" data-modelcalc data-presets={JSON.stringify(PRESETS)} data-preset={preset}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="pre">{Object.entries(PRESETS).map(([k, v]) => <button data-v={k} aria-pressed={k === preset ? 'true' : 'false'}>{v.name}</button>)}</div>
+  <div class="ai-mc-in">
+    {FIELDS.map(([k, n]) => <label><span>{n}</span><input type="number" min="1" data-f={k} /></label>)}
+    <label class="ai-al-chk"><input type="checkbox" data-f="gated" />门控 FFN（3 个矩阵）</label>
+    <label class="ai-al-chk"><input type="checkbox" data-f="norm" />归一化有参数</label>
+    <label class="ai-al-chk"><input type="checkbox" data-f="tied" />输出层和嵌入共享</label>
+  </div>
+  <div class="ai-mc-in ai-mc-run">
+    <label><span>上下文长度 s</span><select data-r="s">{[0, 1024, 4096, 8192, 32768, 131072].map((v) => <option value={v} selected={v === 8192}>{v}</option>)}</select></label>
+    <label><span>并发请求数</span><input type="number" min="1" value="16" data-r="b" /></label>
+    <label><span>精度</span><select data-r="bytes"><option value="2" selected>BF16（2 字节）</option><option value="1">FP8（1 字节）</option><option value="0.5">INT4（0.5 字节）</option></select></label>
+  </div>
+  <div class="ai-mc-out" data-out></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmt = (n: number) => (n >= 1e12 ? (n / 1e12).toFixed(2) + ' T' : n >= 1e9 ? (n / 1e9).toFixed(2) + ' G' : n >= 1e6 ? (n / 1e6).toFixed(2) + ' M' : n >= 1e3 ? (n / 1e3).toFixed(1) + ' K' : String(Math.round(n * 100) / 100));
+  const bytes = (n: number) => (n >= 2 ** 30 ? (n / 2 ** 30).toFixed(2) + ' GiB' : n >= 2 ** 20 ? (n / 2 ** 20).toFixed(1) + ' MiB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KiB' : n + ' B');
+  const full = (n: number) => Math.round(n).toLocaleString('en-US');
+  function init(fig: HTMLElement) {
+    const PRE = JSON.parse(fig.dataset.presets!);
+    const f = (k: string) => fig.querySelector<HTMLInputElement>(`[data-f="${k}"]`)!;
+    const r = (k: string) => fig.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-r="${k}"]`)!;
+    const load = (k: string) => { const p = PRE[k]; ['d', 'L', 'n_h', 'n_kv', 'd_ff', 'V'].forEach((x) => { f(x).value = p[x]; }); ['gated', 'norm', 'tied'].forEach((x) => { f(x).checked = !!p[x]; }); };
+    function draw() {
+      const g = (k: string) => Math.max(1, Number(f(k).value) || 1);
+      const d = g('d'), L = g('L'), n_h = g('n_h'), n_kv = Math.min(g('n_kv'), n_h), d_ff = g('d_ff'), V = g('V');
+      const gated = f('gated').checked, norm = f('norm').checked, tied = f('tied').checked;
+      const s = Number(r('s').value), b = Math.max(1, Number(r('b').value) || 1), by = Number(r('bytes').value);
+      const kv = (d / n_h) * n_kv;
+      const attn = 2 * d * d + 2 * d * kv, ffn = (gated ? 3 : 2) * d * d_ff, norms = norm ? 2 * d : 0;
+      const layer = attn + ffn + norms, emb = V * d, head = tied ? 0 : V * d, fnorm = norm ? d : 0;
+      const total = emb + L * layer + fnorm + head;
+      const rows: [string, number, string][] = [
+        ['嵌入表', emb, `V × d = ${full(V)} × ${full(d)}`],
+        ['注意力（全部层）', L * attn, `L × (2d² + 2·d·kv)，kv = d / ${n_h} × ${n_kv} = ${full(kv)}`],
+        ['FFN（全部层）', L * ffn, `L × ${gated ? 3 : 2} × d × d_ff`],
+        ['归一化（全部）', L * norms + fnorm, norm ? 'L × 2d + d' : '没有可训练参数'],
+        ['输出层', head, tied ? '与嵌入表共享，不另算' : 'd × V'],
+      ];
+      const matmul = 2 * (total - emb), att = 4 * L * s * d, tok = matmul + att;
+      const prefill = s * matmul + 2 * L * s * s * d;
+      const kvTok = 2 * L * kv * by;
+      let h = `<table class="ai-vp-tbl ai-mc-tbl"><thead><tr><th>部分</th><th>参数</th><th>占比</th><th>怎么算</th></tr></thead><tbody>`;
+      for (const [n, v, how] of rows) h += `<tr><td>${n}</td><td>${fmt(v)}</td><td><span class="ai-mc-bar"><i style="width:${(v / total * 100).toFixed(1)}%"></i></span>${(v / total * 100).toFixed(1)}%</td><td class="ai-faint">${how}</td></tr>`;
+      h += `<tr class="is-focus"><td><b>合计</b></td><td><b>${fmt(total)}</b></td><td></td><td>${full(total)} 个</td></tr></tbody></table>`;
+      h += `<div class="ai-mc-cards">`
+        + `<div><span>每 token 前向（上下文 ${full(s)}）</span><b>${fmt(tok)}FLOPs</b><small>矩阵乘法 2 × ${fmt(total - emb)} = ${fmt(matmul)}，注意力打分 4·L·s·d = ${fmt(att)}（占 ${(att / tok * 100).toFixed(1)}%）</small></div>`
+        + `<div><span>处理一段 ${full(s)} 个 token 的提示</span><b>${fmt(prefill)}FLOPs</b><small>s × 矩阵乘法 + 因果注意力 2·L·s²·d</small></div>`
+        + `<div><span>训练每 token</span><b>≈ ${fmt(6 * total)}FLOPs</b><small>6N：前向 2N + 反向 4N（第 18 讲）</small></div>`
+        + `<div><span>权重显存</span><b>${bytes(total * by)}</b><small>${full(total)} × ${by} 字节</small></div>`
+        + `<div><span>KV Cache</span><b>${bytes(kvTok * s * b)}</b><small>每 token 2·L·kv·${by} = ${bytes(kvTok)}，× ${full(s)} token × ${b} 个请求</small></div>`
+        + `</div>`;
+      fig.querySelector<HTMLElement>('[data-out]')!.innerHTML = h;
+    }
+    fig.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-group="pre"] [data-v]');
+      if (!btn) return;
+      load(btn.dataset.v!);
+      fig.querySelectorAll('[data-group="pre"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'));
+      draw();
+    });
+    fig.addEventListener('input', (e) => { if ((e.target as HTMLElement).dataset.f) fig.querySelectorAll('[data-group="pre"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', 'false')); draw(); });
+    fig.addEventListener('change', draw);
+    load(fig.dataset.preset!); draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-modelcalc]').forEach(init);
+</script>

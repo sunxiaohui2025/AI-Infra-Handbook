@@ -1,0 +1,58 @@
+---
+// 缓存在忙的实例上，还是发给空闲实例取回或重算（公式与第 102 讲第二段代码相同）。Qwen3-8B，8192 token 前缀 + 256 个新 token，A100 按 156 TFLOP/s。
+//   首 token = max(GPU 排队 Q, 状态就绪 R) + 剩余计算 C；远端取回 R = 查找 10 ms + 1.125 GiB ÷ 远端带宽 + 1.125 GiB ÷ 25 GB/s（PCIe），两段串行
+//   A：本地命中，C = 30.9 ms；B 重算：C = 888 ms；B 取回：C = 30.9 ms
+// 读者可以：调 A、B 的排队时间和远端链路带宽，看三条路径谁先出首 token，以及 B 取回追平 A 需要的带宽。
+interface Props { title?: string; caption?: string }
+const { title = '有缓存但在排队，还是空闲但没缓存', caption } = Astro.props;
+---
+<figure class="ai-gt ai-rtl" data-routetl>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>A（有缓存）排队 <b data-av></b> ms</span><input type="range" min="0" max="500" step="10" value="250" data-a /></label>
+    <label class="ai-tl-lr"><span>B（无缓存）排队 <b data-bv></b> ms</span><input type="range" min="0" max="200" step="10" value="20" data-b /></label>
+    <label class="ai-tl-lr"><span>B 的远端链路 <b data-nv></b> GB/s</span><input type="range" min="0" max="5" step="1" value="1" data-n /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const V = 8192 * 144 * 1024, NETS = [1.25e9, 6.25e9, 12.5e9, 25e9, 50e9, 100e9];
+  const pre = (n: number, ctx: number) => (2 * 6.95e9 * n + 4 * 32 * 128 * 36 * (ctx ** 2 - (ctx - n) ** 2) / 2) / 156e12;
+  const FULL = pre(8448, 8448), HIT = pre(256, 8448), LOOK = 0.010, PCIE = V / 25e9;
+  function init(fig: HTMLElement) {
+    const q = (s: string) => fig.querySelector<HTMLInputElement>(s)!;
+    function draw() {
+      const Qa = Number(q('[data-a]').value) / 1e3, Qb = Number(q('[data-b]').value) / 1e3, net = NETS[Number(q('[data-n]').value)];
+      fig.querySelector('[data-av]')!.textContent = String(Qa * 1e3); fig.querySelector('[data-bv]')!.textContent = String(Qb * 1e3); fig.querySelector('[data-nv]')!.textContent = String(net / 1e9);
+      const R = LOOK + V / net + PCIE;
+      type Seg = [string, number, number];
+      const rows: [string, Seg[], number][] = [
+        ['A：本地命中', [['q', 0, Qa], ['c', Qa, Qa + HIT]], Qa + HIT],
+        ['B：直接重算', [['q', 0, Qb], ['c', Qb, Qb + FULL]], Qb + FULL],
+        ['B：远端取回', [['q', 0, Qb], ['f', 0, LOOK + V / net], ['p', LOOK + V / net, R], ['c', Math.max(Qb, R), Math.max(Qb, R) + HIT]], Math.max(Qb, R) + HIT],
+      ];
+      const best = Math.min(...rows.map((r) => r[2])), mx = Math.max(...rows.map((r) => r[2])), sx = 440 / mx, x0 = 110;
+      const cls: Record<string, string> = { q: 'ai-rtl-q', c: 'ai-sn-b', f: 'ai-sn-a', p: 'ai-eps-cp' };
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 190">';
+      [['q', '排队'], ['f', '远端读取'], ['p', '主机内存 → GPU'], ['c', '计算']].forEach(([k, n], i) => (s += `<rect class="${cls[k]}" x="${110 + i * 110}" y="6" width="12" height="10"/><text class="ai-al-gl" x="${126 + i * 110}" y="15">${n}</text>`));
+      rows.forEach(([name, segs, end], k) => {
+        const y = 32 + k * 50;
+        s += `<text class="ai-al-gl" x="${x0 - 6}" y="${y + 18}" text-anchor="end">${name}</text>`;
+        segs.forEach(([c, a, b]) => { const yy = c === 'f' || c === 'p' ? y + 22 : y; s += `<rect class="${cls[c]}" x="${x0 + a * sx}" y="${yy}" width="${Math.max((b - a) * sx, 0.5)}" height="${c === 'f' || c === 'p' ? 10 : 18}"/>`; });
+        s += `<text class="ai-al-gl" x="${x0 + end * sx + 4}" y="${y + 14}">${(end * 1e3).toFixed(0)} ms${end === best ? '  ← 最早' : ''}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const budget = Qa - LOOK - PCIE, need = budget > 0 ? V / budget : Infinity;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `首 token = max(排队 Q, 状态就绪 R) + 剩余计算 C。B 取回：R = 10 + ${(V / net * 1e3).toFixed(1)} + ${(PCIE * 1e3).toFixed(1)} = ${(R * 1e3).toFixed(1)} ms，与 B 的排队同时进行。`
+        + (isFinite(need) ? `B 取回要比 A 先出首 token，远端链路至少要 1.125 GiB ÷ (A 的排队 − 10 − ${(PCIE * 1e3).toFixed(1)}) ms ≈ <b>${(need / 1e9).toFixed(2)} GB/s</b>。` : 'A 几乎不用排队，B 怎么取回都赶不上。')
+        + '<br><span class="ai-faint">只看“谁有缓存”会把请求送去排长队；只看“谁空闲”会白白重算 888 ms。路由要比较的是预计的完成时间。</span>';
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-routetl]').forEach(init);
+</script>

@@ -1,0 +1,157 @@
+---
+id: 96
+slug: expert-parallel
+title: 专家并行与 All-to-All
+chapter: 4
+part: 12
+problem: MoE 的专家怎么分布、token 怎么分发
+prereqs: [41, 89, 91, 93]
+level: 主线
+minutes: 35
+demos: [EPDispatch]
+video: ""
+formula: '专家分到各张卡上；每个 MoE 层两次 All-to-All：分发（token 发到专家所在的卡）和合并（结果发回原来的卡加权求和）。最忙的卡决定这一层的速度'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EPDispatch from '../../components/EPDispatch.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[41, 89, 91, 93]} />
+
+第 41 讲的 MoE（混合专家）让每个 token 只经过少数几个专家：DeepSeek-V3 每层有 256 个路由专家，每个 token 选 8 个。总参数 6710 亿，每个 token 只用到约 370 亿。
+
+计算量小了，可**参数一个也没少**。一层 256 个专家，每个专家约 4400 万参数，一层就是 113 亿；58 个 MoE 层，加起来六千多亿。这么多专家怎么放？如果用张量并行，把每个专家都切成几份，每个专家本来就很小，切开后的矩阵乘法更小，GPU 根本跑不满。
+
+更自然的办法是**专家并行**（expert parallelism，EP）：**把不同的专家放在不同的卡上**，每张卡放完整的几个专家。这一讲看 token 怎么找到自己的专家，用的正是第 89 讲的 All-to-All，以及专家并行特有的难题：负载不均衡。
+
+## 专家分到各张卡上
+
+举一个小例子：4 张卡，8 个专家，卡 g 放专家 2g 和 2g + 1。注意力层和其他部分照常（比如每张卡用数据并行各处理自己的一批 token）。每张卡上有 8 个 token，每个 token 由路由器（第 41 讲）选出 top-2 个专家。
+
+问题是，卡 0 上的某个 token 可能选了专家 5 和专家 6，它们在卡 2 和卡 3 上。token 得过去找专家。
+
+一个 MoE 层的流程是：
+
+1. **路由**：每张卡对自己的 token 算路由打分，选出每个 token 的 top-k 个专家。
+2. **分发**（dispatch）：每张卡把每个 token 的副本发到它选中的专家所在的卡。卡 i 发给卡 j 的是一批**不同的** token，每对卡之间都可能有数据，这正是 **All-to-All**。
+3. **专家计算**：每张卡用自己的专家，处理收到的所有 token。
+4. **合并**（combine）：再做一次 All-to-All，把结果发回 token 原来的卡，按门控权重加起来。
+
+代码模拟了这个过程，验证两次 All-to-All 之后的结果和不分布式时完全一样。它还打出了**分发矩阵**：第 i 行第 j 列是卡 i 发给卡 j 的 token 副本数。
+
+## 负载不均衡
+
+路由是模型自己学的，并不保证均匀。例子里路由器偏爱专家 0 和 1，各专家收到的 token 数是 18、17、7、7、4、5、5、1。专家 0、1 都在卡 0 上，卡 0 一共要处理 **35** 个副本，而平均每张卡只有 **16** 个。
+
+这在专家并行里是个大问题：第 2 次 All-to-All 要等所有卡都算完，**最忙的那张卡决定了这一层的速度**。卡 0 的工作量是平均的两倍多，其他卡算完就只能等。第 41 讲的负载均衡损失、DeepSeek-V3 的无辅助损失均衡（调整路由偏置），在训练时就是为了让专家的负载尽量均匀。
+
+下面的演示可以调 top-k 和路由的偏斜程度，看每个 token 去了哪里、分发矩阵和每张卡的负载。
+
+<EPDispatch caption="图 96-1　专家并行的分发。每个 token 旁的彩色数字是它选中的专家；分发矩阵是每对卡之间要传的 token 副本数（对角线留在本卡）。路由越偏斜，越多 token 挤到同一张卡上，所有卡都要等它。" />
+
+<Note kind="point">专家并行把不同的专家放到不同的卡上，每个 MoE 层用两次 All-to-All：分发把 token 副本发到专家所在的卡，合并把结果送回原来的卡加权求和。每对卡之间传的数据都不一样，量取决于路由；最忙的卡决定整层的速度，所以负载均衡至关重要。</Note>
+
+## 通信要多少
+
+每张卡每层要发出的数据量 ≈ token 数 × top-k × 隐藏维度 × 每个数的字节数（留在本卡的不用发）。估算 DeepSeek-V3 的 decode：每张卡 128 个 token，top-8，d = 7168，分发用 FP8（1 字节），合并用 BF16（2 字节）：
+
+- 每层分发约 **7.3 MB**，合并约 **14.7 MB**；
+- 如果几乎都要跨机、走 50 GB/s 的网卡，每层约 0.44 ms，58 个 MoE 层约 **26 ms**。
+
+这对 decode 来说是很重的负担（一步往往只有几十毫秒的预算）。所以 MoE 的推理系统在通信上下了大功夫：
+
+- **限制跨机的范围。**DeepSeek-V3 训练时规定每个 token 最多发往 4 个节点，减少跨机流量。
+- **先走机内，再走机间。**跨机的数据先在本机内用 NVLink 汇集，再用网卡统一发出，让每个数据只跨一次机。
+- **计算和通信重叠。**把一批 token 切成两半，一半在做 All-to-All 的时候，另一半在做注意力或专家计算。
+- **专门的通信库。**DeepSeek 开源的 DeepEP 为 MoE 的分发、合并写了专门的 kernel，decode 用低延迟的版本，prefill 用高吞吐的版本。
+
+## DeepSeek-V3 是怎么部署的
+
+DeepSeek-V3 的技术报告给出了它的推理部署：prefill 的最小单元是 4 台机器、32 张卡，专家部分用 EP32；decode 的最小单元是 40 台机器、**320 张卡**，用 EP320，几乎每张卡只放一个专家。
+
+为什么 decode 要用这么多卡？decode 每步每张卡只有少量 token，专家的矩阵乘法很小，卡在读权重上（第 60 讲）。专家分得越散，每张卡要读的专家权重越少；同时，同一时刻在系统里运行的 token 越多，每个专家收到的 token 越多，算术强度越高。用大量的卡、每卡一个专家，正是在这两者之间找到平衡。
+
+为了应对负载不均衡，系统还会**复制热门专家**：统计一段时间里各专家的负载，把最忙的专家多复制几份放到别的卡上，分摊它的 token（冗余专家）。
+
+## 到了大模型里
+
+**推理引擎的支持。**vLLM、SGLang 都支持专家并行（比如 `--enable-expert-parallel`），并集成了 DeepEP 等通信库，可以把注意力部分的数据并行和专家部分的专家并行组合起来（常叫作“DP 注意力 + EP”）。
+
+**专家并行适合大规模的高速互联。**All-to-All 让每对卡都要通信，对网络的要求比 All-Reduce 更苛刻。GB200 NVL72 这样 72 张卡共享 NVLink 的超节点，让一整个 EP 组的 All-to-All 都走高速链路，对 MoE 模型的推理特别有利（第 57、97 讲）。
+
+**和张量并行比较。**稠密模型用张量并行，每层两次 All-Reduce；MoE 模型的专家部分用专家并行，每层两次 All-to-All。专家并行不拆矩阵，每个专家的计算保持完整，GPU 更容易跑满；代价是负载不均衡和更复杂的通信。
+
+## 用代码复现
+
+下面的代码模拟 4 张卡、8 个专家、top-2 的专家并行：路由、第 1 次 All-to-All 分发（打出分发矩阵）、各卡的专家计算、第 2 次 All-to-All 合并，验证结果与不分布式的计算一致，并统计每个专家的负载；最后估算 DeepSeek-V3 decode 时每层的通信量和专家的规模。
+
+```python
+import numpy as np
+rng = np.random.default_rng(1)
+
+# 1. 4 张卡，8 个专家（卡 g 放专家 2g、2g+1），每张卡上有 8 个 token，每个 token 选 top-2 个专家
+G, E, T, k, d = 4, 8, 8, 2, 6
+x = rng.standard_normal((G, T, d))                       # 每张卡上的 token
+logits = rng.standard_normal((G, T, E)) + np.array([1.0, 0.8, 0, 0, 0, 0, 0, -0.5])   # 路由偏爱前两个专家
+top = np.argsort(-logits, -1)[..., :k]                   # 每个 token 选的专家
+gate = np.take_along_axis(np.exp(logits), top, -1); gate /= gate.sum(-1, keepdims=True)
+W = rng.standard_normal((E, d, d)) * 0.3                 # 每个专家是一个小线性层（示意）
+home = lambda e: e // 2                                  # 专家 e 在哪张卡上
+
+# 不分布式的参考结果
+ref = np.einsum("gtk,gtkd->gtd", gate, np.einsum("gtd,gtkde->gtke", x, W[top]))
+
+# 第 1 次 All-to-All（分发）：卡 g 把每个 token 的副本发到它选中专家所在的卡
+send = np.zeros((G, G), int); inbox = [[] for _ in range(G)]
+for g in range(G):
+    for t in range(T):
+        for j in range(k):
+            e = top[g, t, j]; send[g, home(e)] += 1; inbox[home(e)].append((g, t, j, e))
+print("分发矩阵（第 i 行第 j 列 = 卡 i 发给卡 j 的 token 副本数）：")
+for g in range(G): print("  卡", g, send[g].tolist())
+load = np.bincount(top.ravel(), minlength=E)
+print("每个专家收到的 token 数：", load.tolist(), f"；最忙的卡 {send.sum(0).max()} 个，平均 {send.sum(0).mean():.0f} 个")
+
+# 各卡上的专家算完，第 2 次 All-to-All（合并）：结果发回 token 原来的卡，按门控权重加起来
+out = np.zeros_like(x)
+for dst in range(G):
+    for g, t, j, e in inbox[dst]:
+        out[g, t] += gate[g, t, j] * (x[g, t] @ W[e])
+print("两次 All-to-All 之后的结果 = 不分布式的结果：", np.allclose(out, ref))
+
+# 2. DeepSeek-V3 decode 的通信量（估算）：每张卡 128 个 token，top-8，d = 7168；分发用 FP8（1 字节），合并用 BF16（2 字节）
+B, K, D, L_moe = 128, 8, 7168, 58
+disp, comb = B * K * D * 1, B * K * D * 2
+t_layer = (disp + comb) / 50e9                            # 假设几乎都要跨机，走 50 GB/s 的网卡
+print(f"每层每卡：分发 {disp / 1e6:.1f} MB，合并 {comb / 1e6:.1f} MB；按 50 GB/s 约 {t_layer * 1e3:.2f} ms；58 个 MoE 层共 {t_layer * L_moe * 1e3:.0f} ms")
+expert = 3 * D * 2048                                     # 一个专家：gate、up、down 三个矩阵（中间维度 2048）
+print(f"一个专家 {expert / 1e6:.0f}M 参数；一层 256 个专家 {256 * expert / 1e9:.1f}B；分到 32 张卡，每卡每层 8 个专家")
+```
+
+输出：
+
+```text
+分发矩阵（第 i 行第 j 列 = 卡 i 发给卡 j 的 token 副本数）：
+  卡 0 [8, 2, 4, 2]
+  卡 1 [7, 4, 4, 1]
+  卡 2 [13, 2, 1, 0]
+  卡 3 [7, 6, 0, 3]
+每个专家收到的 token 数： [18, 17, 7, 7, 4, 5, 5, 1] ；最忙的卡 35 个，平均 16 个
+两次 All-to-All 之后的结果 = 不分布式的结果： True
+每层每卡：分发 7.3 MB，合并 14.7 MB；按 50 GB/s 约 0.44 ms；58 个 MoE 层共 26 ms
+一个专家 44M 参数；一层 256 个专家 11.3B；分到 32 张卡，每卡每层 8 个专家
+```
+
+前五行是分发矩阵：卡 2 发给卡 0 的最多（13 个），因为路由偏爱卡 0 上的专家 0、1。接着是各专家的负载：最忙的卡 35 个，平均 16 个。然后是正确性验证。最后两行是 DeepSeek-V3 的规模：每层分发 7.3 MB、合并 14.7 MB，58 层约 26 ms；一个专家 44M 参数，一层 11.3B。
+
+## 容易混淆的地方
+
+1. **专家并行只切 MoE 层。**注意力、嵌入等部分还要用别的方式切（数据并行、张量并行），所以专家并行几乎总是和别的并行方式组合在一起。
+2. **All-to-All 的数据量取决于路由。**它不像 All-Reduce 那样固定；同一个模型、同样的批大小，换一批输入，各卡之间的流量就不同。
+3. **负载均衡不只是训练的事。**训练时的均衡策略让平均负载均匀，但推理时某一批输入仍可能集中在少数专家上；推理系统还要靠冗余专家等手段应对。
+
+## 回顾
+
+MoE 每个 token 只用少数专家，但参数一个也不少，DeepSeek-V3 一层 256 个专家就有 113 亿参数。专家并行把不同的专家放到不同的卡上，每个 MoE 层两次 All-to-All：分发把 token 副本发到专家所在的卡，合并把结果送回加权求和。路由不均匀时，最忙的卡决定整层的速度：4 卡、8 专家的例子里，最忙的卡 35 个副本，平均只有 16 个。DeepSeek-V3 decode 每卡 128 个 token 时，每层分发 7.3 MB、合并 14.7 MB，推理系统靠限制跨机、分层传输、计算通信重叠和专门的通信库（DeepEP）来应对；它的 decode 用 320 张卡、EP320 部署，并复制热门专家。
+
+到这里，我们有了五种并行方式：数据、张量、流水、上下文、专家。真实的系统要把它们组合起来，放到具体的硬件上：哪种并行放在 NVLink 上，哪种放在网络上？下一讲：**并行策略与拓扑映射**。

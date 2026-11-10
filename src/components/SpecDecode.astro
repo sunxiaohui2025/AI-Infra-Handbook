@@ -1,0 +1,61 @@
+---
+// 投机解码的草稿-验证过程（公式与第 85 讲的代码相同）。
+// 每一轮：小模型依次猜 k 个 token（每个被接受的概率 α，用固定种子的随机数决定）；大模型一次前向验证 k+1 个位置，
+// 从第一个被拒绝的位置截断，并在那里给出自己的 token（全部接受时，额外多给 1 个）。所以一轮产出 1 到 k+1 个 token。
+// 期望每轮产出 E = (1 − α^(k+1)) / (1 − α)；一轮的耗时 = 1 + k·c（以大模型一步为单位），加速比 = E / (1 + k·c)。
+// 读者可以：调 α、k、c，看前 8 轮的草稿与验证，以及加速比随 k 的曲线。
+interface Props { title?: string; caption?: string }
+const { title = '小模型先猜，大模型一次验证', caption } = Astro.props;
+---
+<figure class="ai-gt ai-sd" data-specdecode>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>接受率 α = <b data-av></b></span><input type="range" min="0.3" max="0.95" step="0.05" value="0.8" data-a /></label>
+    <label class="ai-tl-lr"><span>每轮猜 k = <b data-kv></b> 个</span><input type="range" min="1" max="8" step="1" value="4" data-k /></label>
+    <label class="ai-tl-lr"><span>小模型一步 = 大模型的 <b data-cv></b></span><input type="range" min="0.01" max="0.3" step="0.01" value="0.05" data-c /></label>
+  </div>
+  <div class="ai-sd-rounds" data-rounds></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const TEXT = Array.from('投机解码先让小模型猜几个词，再让大模型一次把它们都验证一遍，猜对的直接留下，猜错的从那里改正，大模型每走一步就能多出好几个词。');
+  const E = (a: number, k: number) => (1 - a ** (k + 1)) / (1 - a);
+  function init(fig: HTMLElement) {
+    const [aIn, kIn, cIn] = ['a', 'k', 'c'].map((x) => fig.querySelector<HTMLInputElement>(`[data-${x}]`)!);
+    function draw() {
+      const a = Number(aIn.value), k = Number(kIn.value), c = Number(cIn.value);
+      fig.querySelector('[data-av]')!.textContent = a.toFixed(2); fig.querySelector('[data-kv]')!.textContent = String(k); fig.querySelector('[data-cv]')!.textContent = `${Math.round(c * 100)}%`;
+      let seed = 2024; const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+      let pos = 0, html = '', produced = 0;
+      for (let r = 0; r < 8 && pos < TEXT.length; r++) {
+        let cells = '', ok = 0, rejected = false;
+        for (let j = 0; j < k; j++) {
+          const ch = TEXT[pos + j] ?? '';
+          if (rejected) { cells += '<span class="ai-sd-t is-skip">·</span>'; continue; }
+          if (rnd() < a) { cells += `<span class="ai-sd-t is-ok">${ch}</span>`; ok++; }
+          else { cells += '<span class="ai-sd-t is-bad">✗</span>'; rejected = true; }
+        }
+        const fix = TEXT[pos + ok] ?? '';
+        cells += `<span class="ai-sd-t is-fix">${fix}</span>`;
+        pos += ok + 1; produced += ok + 1;
+        html += `<div class="ai-sd-row"><span class="ai-tl-k">第 ${r + 1} 轮</span>${cells}<small class="ai-faint">+${ok + 1}</small></div>`;
+      }
+      fig.querySelector<HTMLElement>('[data-rounds]')!.innerHTML = html + `<div class="ai-sd-out">已生成：${TEXT.slice(0, pos).join('')}</div>`;
+      const sp = Array.from({ length: 12 }, (_, i) => E(a, i + 1) / (1 + (i + 1) * c)), mx = Math.max(...sp, 1.5), best = sp.indexOf(Math.max(...sp)) + 1;
+      const X = (i: number) => 50 + (i / 11) * 520, Y = (v: number) => 110 - (v / mx) * 95;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 600 130"><text class="ai-np-ptitle" x="50" y="10">加速比随 k 的变化（k = 1 … 12）</text><line class="ai-bc-ax" x1="50" x2="570" y1="110" y2="110"/><line class="ai-bc-grid" x1="50" x2="570" y1="${Y(1)}" y2="${Y(1)}"/><text class="ai-al-gl" x="44" y="${Y(1) + 3}" text-anchor="end">1×</text>`;
+      s += `<polyline class="ai-bc-line c-acc" points="${sp.map((v, i) => `${X(i)},${Y(v)}`).join(' ')}"/>`;
+      sp.forEach((v, i) => { s += `<circle class="${i + 1 === k ? 'ai-bc-dot' : 'ai-sd-dot'}" cx="${X(i)}" cy="${Y(v)}" r="${i + 1 === k ? 4.5 : 2.5}"/><text class="ai-al-gl" x="${X(i)}" y="124" text-anchor="middle">${i + 1}</text>`; });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `每轮期望产出 E = (1 − ${a.toFixed(2)}^${k + 1}) / (1 − ${a.toFixed(2)}) = ${E(a, k).toFixed(2)} 个；一轮耗时 = 1 + ${k} × ${c.toFixed(2)} = ${(1 + k * c).toFixed(2)} 个大模型步`
+        + `<br>加速比 = ${E(a, k).toFixed(2)} ÷ ${(1 + k * c).toFixed(2)} = <b>${sp[k - 1].toFixed(2)}×</b>（这组参数下最好的 k = ${best}，${sp[best - 1].toFixed(2)}×）。上面 8 轮实际产出 ${produced} 个，平均 ${(produced / 8).toFixed(2)} 个/轮。`
+        + '<br><span class="ai-faint">绿色：小模型猜对、被接受；红色 ✗：第一个猜错的位置，后面的（灰点）全部作废；蓝色：大模型在这个位置自己给出的 token——所以每轮至少前进 1 个。</span>';
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-specdecode]').forEach(init);
+</script>

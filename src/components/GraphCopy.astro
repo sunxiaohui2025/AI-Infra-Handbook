@@ -1,0 +1,52 @@
+---
+// CUDA Graph 的收益与输入复制的代价（公式与第 79 讲第二段代码相同）。
+//   普通执行：GPU 等主机逐个提交 W μs + 计算 C μs
+//   图重放：图重放与元数据准备 P μs + 把新输入复制到图记录的地址（读一遍写一遍：2X ÷ 显存带宽）+ 计算 C μs
+//   临界输入大小：2X ÷ B = W − P
+// 读者可以：调输入大小、GPU 计算时间、主机等待时间和显存带宽，看两种方式谁快，以及临界输入大小。
+interface Props { title?: string; caption?: string }
+const { title = '图重放省下的时间，会不会被输入复制吃掉', caption } = Astro.props;
+---
+<figure class="ai-gt ai-gcp" data-graphcopy>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>输入 [<b data-rv></b>, 4096] BF16</span><input type="range" min="0" max="5" step="1" value="1" data-r /></label>
+    <label class="ai-tl-lr"><span>GPU 等主机 <b data-wv></b> μs</span><input type="range" min="5" max="60" step="1" value="20" data-w /></label>
+    <label class="ai-tl-lr"><span>GPU 计算 <b data-cv></b> μs</span><input type="range" min="5" max="60" step="1" value="20" data-c /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="b"><span class="ai-tl-k">显存带宽：</span><button data-v="1792" aria-pressed="true">1792 GB/s（RTX PRO 6000）</button><button data-v="3350" aria-pressed="false">3350 GB/s（H100）</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const ROWS = [128, 256, 512, 1024, 2048, 4096], PREP = 5;
+  function init(fig: HTMLElement) {
+    let B = 1792e9;
+    const q = (s: string) => Number(fig.querySelector<HTMLInputElement>(s)!.value);
+    function draw() {
+      const rows = ROWS[q('[data-r]')], W = q('[data-w]'), C = q('[data-c]'), X = rows * 4096 * 2, cp = 2 * X / B * 1e6;
+      fig.querySelector('[data-rv]')!.textContent = String(rows); fig.querySelector('[data-wv]')!.textContent = String(W); fig.querySelector('[data-cv]')!.textContent = String(C);
+      const norm = W + C, graph = PREP + cp + C, mx = Math.max(norm, graph), sx = 440 / mx, x0 = 120;
+      const bar = (y: number, segs: [string, number, string][]) => { let x = x0, o = ''; segs.forEach(([c, v, t]) => { o += `<rect class="${c}" x="${x}" y="${y}" width="${Math.max(v * sx, 0.5)}" height="22"/>`; if (v * sx > 40) o += `<text class="ai-eps-in" x="${x + v * sx / 2}" y="${y + 15}" text-anchor="middle">${t} ${v.toFixed(1)}</text>`; x += v * sx; }); return o; };
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 110">';
+      s += `<text class="ai-al-gl" x="${x0 - 6}" y="40" text-anchor="end">普通提交</text>` + bar(25, [['ai-rtl-q', W, '等主机'], ['ai-sn-b', C, '计算']]) + `<text class="ai-al-gl" x="${x0 + norm * sx + 4}" y="40">${norm.toFixed(1)} μs</text>`;
+      s += `<text class="ai-al-gl" x="${x0 - 6}" y="80" text-anchor="end">图重放</text>` + bar(65, [['ai-sn-a', PREP, '准备'], ['ai-eps-cp', cp, '复制'], ['ai-sn-b', C, '计算']]) + `<text class="ai-al-gl" x="${x0 + graph * sx + 4}" y="80">${graph.toFixed(1)} μs</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const crit = (W - PREP) * 1e-6 * B / 2;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `输入 ${(X / 2 ** 20).toFixed(1)} MiB，复制读写 ${(2 * X / 2 ** 20).toFixed(1)} MiB ÷ ${(B / 1e9).toFixed(0)} GB/s = ${cp.toFixed(1)} μs。图重放省下 ${W} − ${PREP} = ${W - PREP} μs 的主机等待，${graph < norm ? `净省 <b>${(norm - graph).toFixed(1)} μs</b>` : `<b>反而多花 ${(graph - norm).toFixed(1)} μs</b>`}。`
+        + `临界输入：2X ÷ B = ${W - PREP} μs → X = <b>${(crit / 2 ** 20).toFixed(1)} MiB</b>。`
+        + '<br><span class="ai-faint">让上游算子直接写进图的固定输入缓冲，就不用这次复制；或者从输入张量较小的位置开始捕获。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      B = Number(bt.dataset.v) * 1e9; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-graphcopy]').forEach(init);
+</script>

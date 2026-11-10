@@ -1,0 +1,70 @@
+---
+// 流水并行的甘特图（调度规则与第 94 讲的代码相同）：p 段（每段一张卡），m 个微批次；前向耗时 1（蓝），反向耗时 2（琥珀）。
+// GPipe：每张卡先做完所有前向，再做所有反向；1F1B：第 s 段先做 p−s−1 个前向热身，然后一前一后交替。
+// 一个任务要等依赖算完（前向等上一段的同一微批次，反向等下一段的同一微批次）。灰色是空等的“气泡”。
+// 读者可以：调段数、微批次数，切换调度，看总时长、气泡占比和第 0 段最多同时存几份激活。
+interface Props { title?: string; caption?: string }
+const { title = '流水线里的气泡', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pp" data-pipegantt>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>段数 p = <b data-pv></b></span><input type="range" min="2" max="8" step="1" value="4" data-p /></label>
+    <label class="ai-tl-lr"><span>微批次 m = <b data-mv></b></span><input type="range" min="1" max="16" step="1" value="8" data-m /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="s"><button data-v="GPipe" aria-pressed="false">GPipe</button><button data-v="1F1B" aria-pressed="true">1F1B</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Task = [string, number];
+  function order(s: number, p: number, m: number, sched: string): Task[] {
+    if (sched === 'GPipe') return [...Array.from({ length: m }, (_, i) => ['F', i] as Task), ...Array.from({ length: m }, (_, i) => ['B', i] as Task)];
+    const warm = Math.min(p - s - 1, m), seq: Task[] = Array.from({ length: warm }, (_, i) => ['F', i] as Task); let f = warm, b = 0;
+    while (b < m) { if (f < m) { seq.push(['F', f]); f++; } seq.push(['B', b]); b++; }
+    return seq;
+  }
+  function simulate(p: number, m: number, sched: string) {
+    const end = new Map<string, number>(), free = Array(p).fill(0), peak = Array(p).fill(0), seqs = Array.from({ length: p }, (_, s) => order(s, p, m, sched)), pos = Array(p).fill(0);
+    const bars: { s: number; k: string; i: number; t0: number; t1: number }[] = [];
+    let guard = 0;
+    while (seqs.some((q, s) => pos[s] < q.length) && guard++ < 10000) {
+      for (let s = 0; s < p; s++) {
+        if (pos[s] === seqs[s].length) continue;
+        const [k, i] = seqs[s][pos[s]];
+        const dep = k === 'F' && s > 0 ? `F${s - 1}_${i}` : k === 'B' && s < p - 1 ? `B${s + 1}_${i}` : k === 'B' ? `F${s}_${i}` : null;
+        if (dep && !end.has(dep)) continue;
+        const t0 = Math.max(free[s], dep ? end.get(dep)! : 0), t1 = t0 + (k === 'F' ? 1 : 2);
+        end.set(`${k}${s}_${i}`, t1); free[s] = t1; pos[s]++; bars.push({ s, k, i, t0, t1 });
+        const done = seqs[s].slice(0, pos[s]), nf = done.filter((x) => x[0] === 'F').length; peak[s] = Math.max(peak[s], nf - (done.length - nf));
+      }
+    }
+    const T = Math.max(...free);
+    return { bars, T, bubble: 1 - (3 * m) / T, peak: peak[0] };
+  }
+  function init(fig: HTMLElement) {
+    let sched = '1F1B';
+    const pIn = fig.querySelector<HTMLInputElement>('[data-p]')!, mIn = fig.querySelector<HTMLInputElement>('[data-m]')!;
+    function draw() {
+      const p = Number(pIn.value), m = Number(mIn.value); fig.querySelector('[data-pv]')!.textContent = String(p); fig.querySelector('[data-mv]')!.textContent = String(m);
+      const r = simulate(p, m, sched), X0 = 50, W = 540, sx = W / r.T, rh = Math.min(26, 200 / p);
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 600 ${p * rh + 24}">`;
+      for (let st = 0; st < p; st++) s += `<text class="ai-al-gl" x="${X0 - 6}" y="${st * rh + rh * 0.65}" text-anchor="end">卡 ${st}</text><rect class="ai-bg-idle" x="${X0}" y="${st * rh + 2}" width="${W}" height="${rh - 4}"/>`;
+      for (const b of r.bars) s += `<g><title>${b.k === 'F' ? '前向' : '反向'}，微批次 ${b.i}</title><rect class="${b.k === 'F' ? 'ai-pp-f' : 'ai-pp-b'}" x="${X0 + b.t0 * sx + 0.5}" y="${b.s * rh + 2}" width="${(b.t1 - b.t0) * sx - 1}" height="${rh - 4}"/>${sx > 9 ? `<text class="ai-bg-lab" x="${X0 + b.t0 * sx + 2}" y="${b.s * rh + rh * 0.65}">${b.i}</text>` : ''}</g>`;
+      s += `<text class="ai-al-gl" x="${X0}" y="${p * rh + 16}">时间 0 → ${r.T}（前向一段 = 1，反向 = 2）</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `总时长 ${r.T}，每张卡真正在算 3m = ${3 * m}，气泡占 ${(r.bubble * 100).toFixed(1)}%（公式 (p−1)/(m+p−1) = ${((p - 1) / (m + p - 1) * 100).toFixed(1)}%）。`
+        + `<br>卡 0 最多同时存着 ${r.peak} 个微批次的激活（${sched === 'GPipe' ? 'GPipe 要存 m 份' : '1F1B 最多 p 份'}）。`
+        + '<br><span class="ai-faint">灰色是空等的气泡：开头后面的卡在等前面的卡送来数据，结尾前面的卡在等后面的卡送回梯度。微批次越多，气泡占比越小。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      sched = b.dataset.v!; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pipegantt]').forEach(init);
+</script>

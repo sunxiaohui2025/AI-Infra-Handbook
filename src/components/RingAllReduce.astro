@@ -1,0 +1,53 @@
+---
+// Ring All-Reduce 分步演示（与第 90 讲的代码完全相同）：4 张卡连成环 0→1→2→3→0，数据切成 4 块。
+// 第 1–3 步 Reduce-Scatter：卡 i 把第 (i − s) 块发给下一张卡，对方加到自己那一块上；第 4–6 步 All-Gather：卡 i 把已算完的第 (i + 1 − s) 块发给下一张卡，对方覆盖。
+// 读者可以：拖动步数或播放；琥珀色是这一步正在发出的块，深色是已经是最终结果（四张卡之和）的块。
+interface Props { title?: string; caption?: string }
+const { title = 'Ring All-Reduce：每一步，每张卡都在发、都在收', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ra" data-ringar>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>第 <b data-sv></b> 步</span><input type="range" min="0" max="6" step="1" value="1" data-s /></label>
+    <div class="ai-gt-pre ai-pc-sets"><button data-act="play">▶ 播放</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const P = 4, FINAL = [60, 64, 68, 72];
+  function states() {
+    const buf = [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((j) => 10 * r + j)), out: { buf: number[][]; send: [number, number][] }[] = [{ buf: buf.map((b) => [...b]), send: [] }];
+    for (let s = 0; s < P - 1; s++) { const m = [0, 1, 2, 3].map((i) => [i, (((i - s) % P) + P) % P, 0]); m.forEach((x) => (x[2] = buf[x[0]][x[1]])); m.forEach(([i, c, v]) => (buf[(i + 1) % P][c] += v)); out.push({ buf: buf.map((b) => [...b]), send: m.map(([i, c]) => [i, c]) }); }
+    for (let s = 0; s < P - 1; s++) { const m = [0, 1, 2, 3].map((i) => [i, (((i + 1 - s) % P) + P) % P, 0]); m.forEach((x) => (x[2] = buf[x[0]][x[1]])); m.forEach(([i, c, v]) => (buf[(i + 1) % P][c] = v)); out.push({ buf: buf.map((b) => [...b]), send: m.map(([i, c]) => [i, c]) }); }
+    return out;
+  }
+  const ST = states();
+  function init(fig: HTMLElement) {
+    const sIn = fig.querySelector<HTMLInputElement>('[data-s]')!; let timer = 0;
+    const pos = [[300, 30], [520, 120], [300, 210], [80, 120]];
+    function draw() {
+      const s = Number(sIn.value), cur = ST[s];
+      fig.querySelector('[data-sv]')!.textContent = `${s} / 6`;
+      let svg = '<svg class="ai-tl-svg" viewBox="0 0 600 250"><defs><marker id="ra-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" class="ai-ra-head"/></marker></defs>';
+      for (let i = 0; i < P; i++) { const [x1, y1] = pos[i], [x2, y2] = pos[(i + 1) % P], dx = x2 - x1, dy = y2 - y1, L = Math.hypot(dx, dy); svg += `<line class="ai-ra-link${cur.send.length ? ' is-on' : ''}" x1="${x1 + dx / L * 70}" y1="${y1 + dy / L * 32}" x2="${x2 - dx / L * 70}" y2="${y2 - dy / L * 32}" marker-end="url(#ra-arr)"/>`; }
+      for (let r = 0; r < P; r++) {
+        const [cx, cy] = pos[r], sendC = cur.send.find(([i]) => i === r)?.[1];
+        svg += `<rect class="ai-ra-gpu" x="${cx - 70}" y="${cy - 22}" width="140" height="44" rx="6"/><text class="ai-al-gl" x="${cx - 66}" y="${cy - 26}">卡 ${r}</text>`;
+        cur.buf[r].forEach((v, j) => { const fin = v === FINAL[j]; svg += `<rect class="ai-ra-c${fin ? ' is-fin' : ''}${s > 0 && j === sendC ? ' is-send' : ''}" x="${cx - 64 + j * 32}" y="${cy - 14}" width="30" height="28" rx="3"/><text class="ai-ra-t${fin ? ' is-fin' : ''}" x="${cx - 49 + j * 32}" y="${cy + 5}" text-anchor="middle">${v}</text>`; });
+      }
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = svg + '</svg>';
+      const phase = s === 0 ? '初始：卡 r 的数据是 [10r, …, 10r+3]。' : s <= 3 ? `Reduce-Scatter 第 ${s} 步：每张卡把一块（琥珀色）发给下一张卡，对方把它加到自己的同一块上。` : `All-Gather 第 ${s - 3} 步：每张卡把一块已经算完的（深色）发给下一张卡，对方直接覆盖。`;
+      const fin = cur.buf.flat().filter((v, k) => v === FINAL[k % 4]).length;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${phase}<br>${s === 3 ? '此刻每张卡恰好有一块是最终结果——这就是 Reduce-Scatter 的结果。' : s === 6 ? '每张卡都有了完整的 [60, 64, 68, 72]：All-Reduce 完成。' : `已是最终结果的块：${fin} / 16。`}`
+        + `<br><span class="ai-faint">每一步，4 条链路同时在传，每张卡发 1 块（n/4）。一共 2(p − 1) = 6 步，每张卡共发 1.5n，和卡数几乎无关。</span>`;
+    }
+    const stop = () => { clearInterval(timer); timer = 0; };
+    sIn.addEventListener('input', () => { stop(); draw(); });
+    fig.addEventListener('click', (e) => { if (!(e.target as HTMLElement).closest('[data-act]')) return; stop(); sIn.value = '0'; draw(); timer = window.setInterval(() => { const v = Number(sIn.value) + 1; if (v > 6) { stop(); return; } sIn.value = String(v); draw(); }, 900); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-ringar]').forEach(init);
+</script>

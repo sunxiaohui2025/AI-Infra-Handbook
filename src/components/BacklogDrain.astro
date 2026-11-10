@@ -1,0 +1,55 @@
+---
+// 启动（或故障恢复）期间的积压怎么消退（连续流量模型，公式与第 104 讲第二段代码相同）。
+//   启动 Ts 秒内服务停摆，积压以 λ 增长到 λ·Ts；就绪后以 (μ − λ) 减少，排空时间 λ·Ts/(μ − λ)；μ ≤ λ 时一直增长
+//   默认数字取第 100 讲的 8 卡异构集群：λ = 3.5 请求/s，PD 分离 4.55、共置 + 理想分块捎带 4.17、共置 3.02 请求/s
+// 读者可以：调到达率、启动时间、效率折扣和排空期限，看三种部署的积压曲线、排空时刻和满足期限所需的最低服务率。
+interface Props { title?: string; caption?: string }
+const { title = '启动 10 秒，积压要多久才消退', caption } = Astro.props;
+---
+<figure class="ai-gt ai-bld" data-backlog>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>到达 <b data-lv></b> 请求/s</span><input type="range" min="2" max="4.4" step="0.1" value="3.5" data-l /></label>
+    <label class="ai-tl-lr"><span>启动 <b data-tv></b> s</span><input type="range" min="2" max="60" step="1" value="10" data-t /></label>
+    <label class="ai-tl-lr"><span>实际效率 <b data-ev></b>%</span><input type="range" min="70" max="110" step="5" value="100" data-e /></label>
+    <label class="ai-tl-lr"><span>排空期限 第 <b data-dv></b> s</span><input type="range" min="20" max="120" step="5" value="60" data-d /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const PLANS: [string, number, string][] = [['PD 分离', 4.55, 'c-acc'], ['共置 + 理想分块', 4.17, 'c-key'], ['共置', 3.02, 'c-ink']];
+  function init(fig: HTMLElement) {
+    const q = (s: string) => Number(fig.querySelector<HTMLInputElement>(s)!.value);
+    function draw() {
+      const lam = q('[data-l]'), Ts = q('[data-t]'), eff = q('[data-e]') / 100, dl = q('[data-d]');
+      fig.querySelector('[data-lv]')!.textContent = lam.toFixed(1); fig.querySelector('[data-tv]')!.textContent = String(Ts);
+      fig.querySelector('[data-ev]')!.textContent = String(Math.round(eff * 100)); fig.querySelector('[data-dv]')!.textContent = String(dl);
+      const T = 140, peak = lam * Ts, x0 = 60, w = 540, h = 170, y0 = 200;
+      const ymax = Math.max(peak * 1.6, 10), X = (t: number) => x0 + t / T * w, Y = (b: number) => y0 - Math.min(b, ymax) / ymax * h;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 640 240"><line class="ai-eps-80" x1="${X(dl)}" y1="${y0 - h}" x2="${X(dl)}" y2="${y0}"/><text class="ai-al-gl" x="${X(dl) + 3}" y="${y0 - h + 10}">期限</text>`;
+      s += `<line class="ai-sa-ln" x1="${x0}" y1="${y0}" x2="${x0 + w}" y2="${y0}"/>`;
+      for (let t = 0; t <= T; t += 20) s += `<text class="ai-al-gl" x="${X(t)}" y="${y0 + 14}" text-anchor="middle">${t} s</text>`;
+      s += `<text class="ai-al-gl" x="${x0 - 4}" y="${Y(peak) + 4}" text-anchor="end">${peak.toFixed(0)}</text><text class="ai-np-ptitle" x="10" y="16">积压的请求数</text>`;
+      const lines: string[] = [];
+      PLANS.forEach(([name, mu0, cl], k) => {
+        const mu = mu0 * eff, pts: string[] = [`${X(0)},${Y(0)}`, `${X(Ts)},${Y(peak)}`];
+        let msg: string;
+        if (mu > lam) { const end = Ts + peak / (mu - lam); pts.push(`${X(Math.min(end, T))},${Y(end <= T ? 0 : peak - (mu - lam) * (T - Ts))}`); if (end < T) pts.push(`${X(T)},${Y(0)}`); msg = `第 ${end.toFixed(1)} s 排空${end <= dl ? '' : '（超期）'}`; }
+        else { pts.push(`${X(T)},${Y(peak + (lam - mu) * (T - Ts))}`); msg = '一直增长'; }
+        s += `<polyline class="ai-bc-line ${cl}" points="${pts.join(' ')}"/><text class="ai-al-gl" x="${x0 + w - 4}" y="${y0 - h + 12 + k * 14}" text-anchor="end">${name} ${mu.toFixed(2)} 请求/s：${msg}</text>`;
+        lines.push(`${name} ${mu.toFixed(2)}：${msg}`);
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const need = dl > Ts ? lam + peak / (dl - Ts) : Infinity;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `启动 ${Ts} s 积压 λ·T_s = ${peak.toFixed(1)} 个；排空时间 = λ·T_s ÷ (μ − λ)。要在第 ${dl} s 前排空，μ ≥ λ + λ·T_s ÷ (期限 − T_s) = <b>${isFinite(need) ? need.toFixed(2) : '∞'} 请求/s</b>。`
+        + '<br><span class="ai-faint">排空的速度是服务率减去到达率的“余量”，不是服务率本身。余量只有 8% 时，效率稍差一点就会超期。</span>';
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-backlog]').forEach(init);
+</script>

@@ -1,0 +1,100 @@
+---
+// 推理引擎的进程结构和一个请求的路径（第 16 篇共用）：engine="vllm"（vLLM V1，提交 821851e）或 "sglang"（提交 48da6bd）。
+// 虚线框是进程，实线框是进程里的模块。按步骤播放：每一步高亮参与的模块，下方说明这一步发生了什么、在哪个文件。
+// 读者可以：上一步 / 下一步，或直接点某一步；点模块看说明。
+interface Props { engine: 'vllm' | 'sglang'; title?: string; caption?: string }
+const { engine, title, caption } = Astro.props;
+---
+<figure class="ai-gt ai-ea" data-engineprocs={engine}>
+  <div class="ai-ms-title">{title ?? (engine === 'vllm' ? 'vLLM V1：一个请求经过的三个进程' : 'SGLang：一个请求经过的三个进程')}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-steps></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type B = { id: string; x: number; y: number; w: number; h: number; label: string; info: string; group?: boolean };
+  type S = { t: string; on: string[]; body: string };
+  const D: Record<string, { boxes: B[]; steps: S[] }> = {
+    vllm: {
+      boxes: [
+        { id: 'p1', x: 10, y: 10, w: 280, h: 300, group: true, label: 'API 服务器进程（AsyncLLM）', info: '前端进程：HTTP 服务、分词和反分词都在这里，和 GPU 计算所在的进程分开，Python 的开销不会挡住 GPU。' },
+        { id: 'http', x: 26, y: 44, w: 248, h: 40, label: 'OpenAI 兼容接口（FastAPI）', info: '<code>vllm/entrypoints/openai/</code>：/v1/chat/completions 等接口，流式返回。离线用 <code>LLM</code> 类时没有这一层。' },
+        { id: 'inproc', x: 26, y: 100, w: 248, h: 40, label: 'InputProcessor：分词、校验', info: '<code>v1/engine/input_processor.py</code>：套对话模板、分词、处理多模态输入、检查采样参数，打包成 EngineCoreRequest。' },
+        { id: 'client', x: 26, y: 156, w: 248, h: 40, label: 'EngineCoreClient：ZMQ 收发', info: '<code>v1/engine/core_client.py</code>：用 ZMQ 把请求发给 EngineCore 进程（msgpack 序列化），另一个套接字收输出。' },
+        { id: 'outproc', x: 26, y: 212, w: 248, h: 40, label: 'OutputProcessor：反分词、停止', info: '<code>v1/engine/output_processor.py</code>：增量反分词、检查停止字符串、统计指标，把结果交给每个请求的输出流。' },
+        { id: 'p2', x: 310, y: 10, w: 280, h: 300, group: true, label: 'EngineCore 进程', info: '引擎核心：一个死循环，收请求 → 调度 → 让 worker 执行 → 根据结果更新状态 → 发输出。收发在两个后台线程里做。' },
+        { id: 'inq', x: 326, y: 44, w: 248, h: 40, label: '输入线程：ZMQ 收、msgpack 解码', info: '<code>v1/engine/core.py</code> 的 <code>process_input_sockets</code>：在后台线程里收消息、解码，放进输入队列，主循环不用等网络。' },
+        { id: 'sched', x: 326, y: 100, w: 248, h: 56, label: 'Scheduler + KVCacheManager', info: '<code>v1/core/sched/scheduler.py</code>：统一的 token 预算调度，没有 prefill / decode 阶段之分；<code>v1/core/kv_cache_manager.py</code>、<code>block_pool.py</code>：分页 KV 和前缀缓存。' },
+        { id: 'busy', x: 326, y: 172, w: 248, h: 40, label: 'busy loop：schedule → execute → update', info: '<code>EngineCore.step()</code>：调度出 SchedulerOutput，交给执行器（非阻塞），等结果，<code>update_from_output</code> 生成每个请求的输出。' },
+        { id: 'outq', x: 326, y: 228, w: 248, h: 40, label: '输出线程：序列化、ZMQ 发', info: '<code>process_output_sockets</code>：把 EngineCoreOutputs 编码后发回前端进程。' },
+        { id: 'p3', x: 610, y: 10, w: 280, h: 300, group: true, label: 'Worker 进程 × 卡数', info: '每张卡一个 worker 进程。张量并行时它们收到同一份 SchedulerOutput，一起执行一步。' },
+        { id: 'exec', x: 626, y: 44, w: 248, h: 40, label: 'Executor：广播 SchedulerOutput', info: '<code>v1/executor/multiproc_executor.py</code>：把这一步的调度结果通过共享内存的消息队列广播给所有 worker。' },
+        { id: 'runner', x: 626, y: 100, w: 248, h: 40, label: 'GPUModelRunner：持久 batch', info: '<code>v1/worker/gpu/model_runner.py</code>：worker 里缓存着每个请求的状态，SchedulerOutput 只带增量；据此更新 batch、拼输入张量。' },
+        { id: 'attn', x: 626, y: 156, w: 248, h: 40, label: '注意力后端（FlashAttention 等）', info: '<code>v1/attention/backends/</code>：FlashAttention、FlashInfer、Triton、MLA 等几十个后端，同一个接口：变长查询 + 块表。' },
+        { id: 'graph', x: 626, y: 212, w: 248, h: 40, label: 'torch.compile + CUDA Graph', info: '模型用 torch.compile 编译，再按 batch 的 token 数分档录 CUDA Graph（含混合 prefill / decode 的“分段图”）。' },
+        { id: 'sampler', x: 626, y: 260, w: 248, h: 36, label: '采样、投机解码的验证', info: '在 GPU 上批量采样（温度、top-k/p、惩罚项），投机解码用拒绝采样验证草稿。' },
+      ],
+      steps: [
+        { t: '1 收请求', on: ['http', 'inproc'], body: 'HTTP 请求到达 API 服务器。InputProcessor 套对话模板、分词，检查参数，打包成 <code>EngineCoreRequest</code>。' },
+        { t: '2 发给核心', on: ['client', 'inq'], body: 'EngineCoreClient 用 ZMQ 把请求发给 EngineCore 进程，输入线程收下、解码，放进输入队列。前端立刻可以去处理下一个 HTTP 请求。' },
+        { t: '3 调度', on: ['busy', 'sched'], body: '主循环取出新请求交给调度器。<code>schedule()</code> 在 token 预算内给每个请求分配这一步要算的 token 数（新请求查前缀缓存、按块分配 KV），生成 <code>SchedulerOutput</code>。' },
+        { t: '4 广播', on: ['exec', 'runner'], body: '执行器把 SchedulerOutput 广播给每张卡的 worker。它只带“新请求的完整信息 + 老请求的增量”，worker 更新自己缓存的持久 batch，拼出输入张量和注意力元数据。' },
+        { t: '5 前向', on: ['attn', 'graph', 'sampler'], body: '模型前向：命中档位时重放 CUDA Graph；注意力后端按块表读 KV；最后在 GPU 上采样，投机解码时验证草稿。rank 0 把采样结果返回。' },
+        { t: '6 更新', on: ['busy', 'sched'], body: '<code>update_from_output()</code>：把新 token 接到请求后面，推进 num_computed_tokens，检查结束条件，释放结束请求的块，组装每个请求这一步的输出。打开异步调度时，下一步的调度和这一步的执行是重叠的。' },
+        { t: '7 返回', on: ['outq', 'client', 'outproc', 'http'], body: '输出线程把结果发回前端。OutputProcessor 增量反分词、检查停止字符串，HTTP 层把新的文本片段流式推给客户端。' },
+      ],
+    },
+    sglang: {
+      boxes: [
+        { id: 'p1', x: 10, y: 10, w: 280, h: 300, group: true, label: '主进程：TokenizerManager', info: 'HTTP 服务和分词在主进程里。' },
+        { id: 'http', x: 26, y: 44, w: 248, h: 40, label: 'HTTP 服务（OpenAI 兼容 / 原生）', info: '<code>srt/entrypoints/</code>：OpenAI 兼容接口，以及 SGLang 前端语言用的原生接口。' },
+        { id: 'tok', x: 26, y: 100, w: 248, h: 40, label: 'TokenizerManager：分词', info: '<code>srt/managers/tokenizer_manager.py</code>：分词、多模态预处理，经 ZMQ 发给调度器；为每个请求维护一个等待结果的事件。' },
+        { id: 'wait', x: 26, y: 156, w: 248, h: 40, label: '等结果、流式返回', info: '收到反分词进程发回的文本片段，交给对应请求的 HTTP 流。' },
+        { id: 'p2', x: 310, y: 10, w: 280, h: 300, group: true, label: 'Scheduler 进程 × 卡数', info: '每张卡一个调度器进程，调度器和执行模型的 TpModelWorker 在同一个进程里。rank 0 收请求，广播给其余 rank，各 rank 的调度结果相同。' },
+        { id: 'recv', x: 326, y: 44, w: 248, h: 40, label: 'ingest_requests：收、广播', info: '<code>scheduler_components/request_receiver.py</code>：rank 0 从 ZMQ 收请求，用 <code>broadcast_pyobj</code> 发给其他 rank。' },
+        { id: 'policy', x: 326, y: 100, w: 120, h: 48, label: 'SchedulePolicy', info: '<code>schedule_policy.py</code>：等待队列的排序策略：fcfs（先来先到，这个提交的默认）、lpm（最长前缀匹配优先）等。' },
+        { id: 'radix', x: 454, y: 100, w: 120, h: 48, label: 'RadixCache', info: '<code>mem_cache/radix_cache.py</code>：前缀缓存是一棵基数树，节点存一段 token 和它们的 KV 槽位。' },
+        { id: 'loop', x: 326, y: 164, w: 248, h: 40, label: 'event_loop_overlap', info: '<code>scheduler.py</code>：发射这一步之后，再处理上一步的结果，CPU 的调度和 GPU 的计算重叠（“零开销调度”）。' },
+        { id: 'tp', x: 326, y: 220, w: 248, h: 40, label: 'TpModelWorker → ModelRunner', info: '<code>tp_worker.py</code>、<code>model_executor/</code>：拼 ForwardBatch、跑模型（CUDA Graph）、采样；约束解码的 bitmask 在采样前加到打分上。' },
+        { id: 'p3', x: 610, y: 10, w: 280, h: 300, group: true, label: 'DetokenizerManager 进程', info: '单独的反分词进程。' },
+        { id: 'detok', x: 626, y: 44, w: 248, h: 40, label: '增量反分词', info: '<code>detokenizer_manager.py</code>：把每个请求新增的 token 增量地变成文本，处理多字节字符被切开的情况，发回主进程。' },
+      ],
+      steps: [
+        { t: '1 收请求', on: ['http', 'tok'], body: 'HTTP 请求到达，TokenizerManager 分词，打包成 <code>TokenizedGenerateReqInput</code>。' },
+        { t: '2 进调度器', on: ['tok', 'recv'], body: '经 ZMQ 发到 rank 0 的调度器进程，<code>ingest_requests</code> 收下，广播给其余 rank，放进等待队列。' },
+        { t: '3 排序、匹配', on: ['policy', 'radix'], body: '组 prefill batch 前，先对等待队列里的每个请求在基数树里做最长前缀匹配，按策略排序（比如 lpm：命中前缀越长越先；默认的 fcfs 只匹配不排序），再在 token 预算和 KV 空间内依次放进来。' },
+        { t: '4 发射', on: ['loop', 'tp'], body: '<code>run_batch</code> 把这一批交给 TpModelWorker 在 GPU 上执行。重叠模式下这一调用不等 GPU 算完就返回，结果放进队列。' },
+        { t: '5 处理上一步', on: ['loop', 'radix'], body: '趁 GPU 在算这一步，CPU 处理上一步的结果：追加 token、检查结束、把算完的 KV 插入基数树、释放结束的请求。下一轮循环再调度新的一步。' },
+        { t: '6 反分词、返回', on: ['detok', 'wait', 'http'], body: '调度器把新 token 发给反分词进程，增量变成文本，再发回主进程，流式推给客户端。' },
+      ],
+    },
+  };
+  function init(fig: HTMLElement) {
+    const d = D[fig.dataset.engineprocs!];
+    let k = 0, pick: string | null = null;
+    fig.querySelector<HTMLElement>('[data-steps]')!.innerHTML = d.steps.map((s, i) => `<button data-k="${i}">${s.t}</button>`).join('') + '<button data-n="1">下一步 →</button>';
+    function draw() {
+      const on = new Set(d.steps[k].on);
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 900 320">';
+      for (const b of d.boxes) {
+        const cls = `ai-ea-m${b.group ? ' is-group' : ''}${on.has(b.id) ? ' is-new' : ''}${pick === b.id ? ' is-pick' : ''}`;
+        const ty = b.group ? b.y + 20 : b.y + b.h / 2 + 4, tx = b.group ? b.x + 12 : b.x + b.w / 2;
+        s += `<g class="${cls}" data-b="${b.id}"><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="6"/><text x="${tx}" y="${ty}" text-anchor="${b.group ? 'start' : 'middle'}">${b.label}</text></g>`;
+      }
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelectorAll<HTMLElement>('[data-k]').forEach((x) => x.setAttribute('aria-pressed', String(+x.dataset.k! === k)));
+      const b = pick ? d.boxes.find((x) => x.id === pick) : null;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>第 ${d.steps[k].t}</b>：${d.steps[k].body}` + (b ? `<br><span class="ai-faint"><b>${b.label}</b>：${b.info}</span>` : '<br><span class="ai-faint">点模块看它在哪个文件。</span>');
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bk = t.closest<HTMLElement>('[data-k]'); if (bk) { k = +bk.dataset.k!; draw(); return; }
+      if (t.closest('[data-n]')) { k = (k + 1) % d.steps.length; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-b]'); if (g) { pick = g.dataset.b!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-engineprocs]').forEach(init);
+</script>

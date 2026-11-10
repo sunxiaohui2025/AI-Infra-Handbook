@@ -1,0 +1,80 @@
+---
+// 正弦位置编码：PE(p, 2i) = sin(p / 10000^(2i/d))，PE(p, 2i+1) = cos(p / 10000^(2i/d))。
+// 左边热力图：每一行是一个位置（0…63），每一列是一维；绿色为正、琥珀色为负。
+// 读者可以：拖滑块或点热力图选一个位置 p；切换维度 d。右边画出：p 这一行的向量（前 16 维的取值），
+//   以及它和其他每个位置的编码的点积（相似度）随距离怎么变。
+interface Props { d?: number; title?: string; caption?: string }
+const { d = 64, title = '正弦位置编码：每个位置一个向量', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pe" data-posenc data-d={d}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="d"><span class="ai-tl-k">维度 d</span>{[4, 16, 64].map((v) => <button data-v={v} aria-pressed={v === d ? 'true' : 'false'}>{v}</button>)}</div>
+    <label class="ai-tl-lr"><span>位置 p = <b data-pv></b></span><input type="range" min="0" max="63" step="1" value="5" data-p /></label>
+  </div>
+  <div class="ai-pe-body">
+    <div><div class="ai-mlp-pt">64 个位置 × d 维（点一行选位置）</div><canvas class="ai-pe-cv" width="256" height="256" data-cv></canvas></div>
+    <div class="ai-pe-side">
+      <svg class="ai-tl-svg" viewBox="0 0 300 130" data-vec role="img" aria-label="这个位置的编码向量"></svg>
+      <svg class="ai-tl-svg" viewBox="0 0 300 130" data-sim role="img" aria-label="和其他位置的点积"></svg>
+    </div>
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmt = (v: number, k = 3) => { const m = 10 ** k; v = Math.round(v * m) / m; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const pe = (p: number, d: number) => Array.from({ length: d }, (_, j) => { const i = Math.floor(j / 2), w = p / 10000 ** (2 * i / d); return j % 2 ? Math.cos(w) : Math.sin(w); });
+  function init(fig: HTMLElement) {
+    let d = Number(fig.dataset.d);
+    const pIn = fig.querySelector<HTMLInputElement>('[data-p]')!, cv = fig.querySelector<HTMLCanvasElement>('[data-cv]')!;
+    const css = getComputedStyle(fig), col = (n: string) => css.getPropertyValue(n).trim() || '#888';
+    const hex = (h: string) => { const m = h.replace('#', ''); const n = parseInt(m.length === 3 ? m.split('').map((c) => c + c).join('') : m, 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+    function draw() {
+      const p = Number(pIn.value);
+      fig.querySelector('[data-pv]')!.textContent = String(p);
+      // 热力图
+      const ctx = cv.getContext('2d')!, W = cv.width, H = cv.height, cw = W / d, ch = H / 64;
+      const pos = hex(col('--accent')), neg = hex(col('--key')), bg = hex(col('--surface'));
+      for (let r = 0; r < 64; r++) {
+        const v = pe(r, d);
+        for (let j = 0; j < d; j++) {
+          const a = Math.abs(v[j]), c = v[j] >= 0 ? pos : neg;
+          ctx.fillStyle = `rgb(${c.map((x, k) => Math.round(bg[k] + (x - bg[k]) * a)).join(',')})`;
+          ctx.fillRect(j * cw, r * ch, Math.ceil(cw), Math.ceil(ch));
+        }
+      }
+      ctx.strokeStyle = col('--ink'); ctx.lineWidth = 1.5; ctx.strokeRect(0.75, p * ch + 0.75, W - 1.5, ch - 1.5);
+      // 这一行的向量（最多画前 16 维）
+      const v = pe(p, d), n = Math.min(16, d), L = 24, R = 292, T = 16, B = 112, bw = (R - L) / n;
+      const Y = (x: number) => (T + B) / 2 - x * (B - T) / 2;
+      let s = `<text class="ai-np-ptitle" x="${L}" y="11">位置 ${p} 的编码，前 ${n} 维（共 ${d} 维）</text><line class="ai-np-sep" x1="${L}" y1="${Y(0)}" x2="${R}" y2="${Y(0)}"/>`;
+      for (let j = 0; j < n; j++) s += `<rect class="${v[j] >= 0 ? 'ai-pe-pos' : 'ai-pe-neg'}" x="${L + j * bw + 2}" y="${Math.min(Y(v[j]), Y(0))}" width="${bw - 4}" height="${Math.abs(Y(v[j]) - Y(0))}"/>`;
+      s += `<g class="ai-vp-tick"><text x="${L - 4}" y="${Y(1) + 3}" text-anchor="end">1</text><text x="${L - 4}" y="${Y(-1) + 3}" text-anchor="end">−1</text><text x="${L + bw / 2}" y="126" text-anchor="middle">0</text><text x="${L + (n - 0.5) * bw}" y="126" text-anchor="middle">${n - 1}</text></g>`;
+      fig.querySelector('[data-vec]')!.innerHTML = s;
+      // 和其他位置的点积
+      const sims = Array.from({ length: 64 }, (_, q) => pe(q, d).reduce((a, x, j) => a + x * v[j], 0));
+      const X2 = (q: number) => L + q / 63 * (R - L), Y2 = (x: number) => B - (x + d / 2) / (1.5 * d) * (B - T);
+      let t = `<text class="ai-np-ptitle" x="${L}" y="11">PE(${p}) 和每个位置 q 的点积（最大是 d/2 = ${d / 2}）</text>`;
+      t += `<line class="ai-np-sep" x1="${L}" y1="${Y2(0)}" x2="${R}" y2="${Y2(0)}"/><path class="ai-al-f" d="${sims.map((x, q) => `${q ? 'L' : 'M'}${X2(q).toFixed(1)} ${Y2(x).toFixed(1)}`).join(' ')}"/>`;
+      t += `<line class="ai-al-zl" x1="${X2(p)}" y1="${T}" x2="${X2(p)}" y2="${B}"/><g class="ai-vp-tick"><text x="${L}" y="126" text-anchor="middle">0</text><text x="${R}" y="126" text-anchor="middle">63</text><text x="${L - 4}" y="${Y2(d / 2) + 3}" text-anchor="end">${d / 2}</text><text x="${L - 4}" y="${Y2(0) + 3}" text-anchor="end">0</text></g>`;
+      fig.querySelector('[data-sim]')!.innerHTML = t;
+      const show = Math.min(4, d);
+      const parts = Array.from({ length: show }, (_, j) => { const i = Math.floor(j / 2); return `${j % 2 ? 'cos' : 'sin'}(${p} / ${fmt(10000 ** (2 * i / d), 2)}) = ${fmt(v[j])}`; });
+      fig.querySelector('[data-eq]')!.innerHTML = `PE(${p}) 的前 ${show} 维：${parts.join('，')}`
+        + `<br><span class="ai-faint">越往后的维度，分母越大，波动越慢：前几维每隔几个位置就转一圈，最后几维在 64 个位置里几乎不变。和 p 越近的位置，点积越大。</span>`;
+    }
+    pIn.addEventListener('input', draw);
+    cv.addEventListener('click', (e) => { const r = cv.getBoundingClientRect(); pIn.value = String(Math.min(63, Math.floor((e.clientY - r.top) / r.height * 64))); draw(); });
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group="d"] [data-v]');
+      if (!b) return;
+      d = Number(b.dataset.v);
+      fig.querySelectorAll('[data-group="d"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-posenc]').forEach(init);
+</script>

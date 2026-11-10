@@ -1,0 +1,56 @@
+---
+// Roofline 图（对数坐标）。能达到的速度 = min(峰值算力, 算术强度 × 带宽)。默认数据与第 54 讲的代码相同。
+// props：gpus = [[名字, 峰值 FLOPS, 带宽 字节/秒], ...]；points = [[名字, 算术强度, 实测 FLOPS（可省略）], ...]。
+// 有实测值的点画成实心，并标出达到了屋顶的几成；没有实测值的点画在屋顶上。
+// 读者可以：选显卡；拖算术强度看落在哪个区；拖批大小，看线性层的点怎么从带宽区移到算力区。
+interface Props { title?: string; caption?: string; gpus?: [string, number, number][]; points?: [string, number, number?][]; batch?: boolean }
+const { title = 'Roofline：卡在算力还是带宽', caption, batch = true,
+  gpus = [['H100', 989e12, 3.35e12], ['A100', 312e12, 2.04e12], ['B200', 2250e12, 8e12]],
+  points = [['逐元素运算', 0.25], ['decode 注意力（MHA）', 1], ['decode 注意力（GQA×4）', 4], ['4096 token 的线性层', 1792]] } = Astro.props;
+---
+<figure class="ai-gt ai-rl" data-roofline data-g={JSON.stringify(gpus)} data-p={JSON.stringify(points)} data-batch={batch ? '1' : '0'}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="g"></div>
+    <label class="ai-tl-lr"><span>算术强度 = <b data-av></b></span><input type="range" min="-1" max="4" step="0.05" value="2" data-a /></label>
+    {batch && <label class="ai-tl-lr"><span>线性层的 token 数 = <b data-bv></b></span><input type="range" min="0" max="12" step="1" value="5" data-b /></label>}
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const G: [string, number, number][] = JSON.parse(fig.dataset.g!), P: [string, number, number?][] = JSON.parse(fig.dataset.p!), hasB = fig.dataset.batch === '1';
+    let gi = 0;
+    const grp = fig.querySelector<HTMLElement>('[data-group="g"]')!;
+    grp.innerHTML = G.length > 1 ? G.map((g, i) => `<button data-v="${i}" aria-pressed="${i === 0}">${g[0]}</button>`).join('') : '';
+    const aIn = fig.querySelector<HTMLInputElement>('[data-a]')!, bIn = fig.querySelector<HTMLInputElement>('[data-b]');
+    function draw() {
+      const [gname, F, BW] = G[gi], ai = 10 ** Number(aIn.value), ridge = F / BW;
+      fig.querySelector('[data-av]')!.textContent = ai >= 10 ? ai.toFixed(0) : ai.toFixed(2);
+      const X = (v: number) => 60 + ((Math.log10(v) + 1) / 5) * 520, Y = (v: number) => 210 - ((Math.log10(v) - 11) / (16 - 11)) * 195;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 240">';
+      for (let e = -1; e <= 4; e++) s += `<line class="ai-bc-grid" x1="${X(10 ** e)}" x2="${X(10 ** e)}" y1="15" y2="210"/><text class="ai-al-gl" x="${X(10 ** e)}" y="224" text-anchor="middle">${10 ** e}</text>`;
+      for (let e = 11; e <= 16; e++) s += `<line class="ai-bc-grid" x1="60" x2="580" y1="${Y(10 ** e)}" y2="${Y(10 ** e)}"/><text class="ai-al-gl" x="54" y="${Y(10 ** e) + 3}" text-anchor="end">${e === 12 ? '1 T' : e === 15 ? '1 P' : e === 13 ? '10 T' : e === 14 ? '100 T' : e === 16 ? '10 P' : '0.1 T'}</text>`;
+      s += `<text class="ai-al-gl" x="320" y="238" text-anchor="middle">算术强度（FLOPs / 字节，对数）</text>`;
+      G.forEach(([, f, bw], i) => { const r = f / bw; s += `<polyline class="ai-rl-roof${i === gi ? ' is-on' : ''}" points="${X(0.1)},${Y(0.1 * bw)} ${X(r)},${Y(f)} ${X(1e4)},${Y(f)}"/>`; });
+      s += `<line class="ai-rl-ridge" x1="${X(ridge)}" x2="${X(ridge)}" y1="${Y(F)}" y2="210"/><text class="ai-al-gl" x="${X(ridge) + 4}" y="${Y(F) + 14}">屋脊点 ${ridge.toFixed(0)}</text>`;
+      const pts = P.map(([n, a, m]) => [n, a, m] as [string, number, number | undefined]);
+      if (hasB && bIn) { const b = 2 ** Number(bIn.value); fig.querySelector('[data-bv]')!.textContent = String(b); const fl = 2 * b * 4096 * 14336, by = 2 * (4096 * 14336 + b * 4096 + b * 14336); pts.push([`线性层，${b} 个 token`, fl / by, undefined]); }
+      pts.forEach(([n, a, m], i) => { const roof = Math.min(F, a * BW), y = m ? Y(m) : Y(roof); s += `<circle class="${m ? 'ai-rl-meas' : 'ai-rl-pt'}${i === pts.length - 1 && hasB ? ' is-b' : ''}" cx="${X(a)}" cy="${y}" r="5"><title>${n}</title></circle><text class="ai-al-gl" x="${X(a) + 7}" y="${y - 6 - (i % 2) * 9}">${n}</text>`; });
+      const perf = Math.min(F, ai * BW);
+      s += `<circle class="ai-bc-dot" cx="${X(ai)}" cy="${Y(perf)}" r="4"/><line class="ai-rl-cur" x1="${X(ai)}" x2="${X(ai)}" y1="${Y(perf)}" y2="210"/>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const meas = pts.filter((p) => p[2]).map(([n, a, m]) => `${n}：实测 ${(m! / 1e12).toFixed(1)} TFLOPS，屋顶 ${(Math.min(F, a * BW) / 1e12).toFixed(1)}，达到 ${Math.round(m! / Math.min(F, a * BW) * 100)}%`).join('；');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${gname}：峰值 ${(F / 1e12).toFixed(0)} TFLOPS，带宽 ${(BW / 1e12).toFixed(2)} TB/s，屋脊点 ${ridge.toFixed(0)} FLOPs/字节。`
+        + `<br>算术强度 ${ai >= 10 ? ai.toFixed(0) : ai.toFixed(2)}：最多 min(${(F / 1e12).toFixed(0)}, ${ai >= 10 ? ai.toFixed(0) : ai.toFixed(2)} × ${(BW / 1e12).toFixed(2)}) = <b>${(perf / 1e12).toFixed(1)} TFLOPS</b>（峰值的 ${(perf / F * 100).toFixed(1)}%），${ai < ridge ? '在屋脊点左边，卡在<b>带宽</b>上' : '在屋脊点右边，卡在<b>算力</b>上'}。`
+        + (meas ? `<br>${meas}` : '') + '<br><span class="ai-faint">斜线是带宽的屋顶（强度 × 带宽），水平线是算力的屋顶；两者的交点是屋脊点。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group="g"] [data-v]'); if (!b) return; gi = Number(b.dataset.v); grp.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-roofline]').forEach(init);
+</script>

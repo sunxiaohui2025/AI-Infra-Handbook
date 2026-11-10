@@ -1,0 +1,58 @@
+---
+// 树形验证（与第 86 讲的代码规则相同）：3 个预测头，每个取前 2 名（a = 第 1 名，b = 第 2 名），组成深度 3 的候选树，14 个节点。
+// 所有候选一次送进大模型，树形注意力掩码让每个节点只看见自己的祖先（和前文）。大模型在每一层认可哪一个，由读者选（a、b 或都不是），
+// 从根开始沿树往下走到走不动为止，被接受的节点数 + 1 就是这一轮前进的 token 数。可切换“只用一条链（每层只取第 1 名）”对比。
+interface Props { title?: string; caption?: string }
+const { title = '一次验证一整棵候选树', caption } = Astro.props;
+---
+<figure class="ai-gt ai-tv" data-treeverify>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="mode"><button data-v="tree" aria-pressed="true">树（每层前 2 名）</button><button data-v="chain" aria-pressed="false">链（每层只取第 1 名）</button></div>
+    <div class="ai-tv-truth" data-truth></div>
+  </div>
+  <div class="ai-tv-wrap"><div data-tree></div><div data-mask></div></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    let mode = 'tree', truth = ['a', 'b', 'a'], sel = 'ab';
+    function nodes() { const out: string[] = []; let level = ['']; for (let d = 0; d < 3; d++) { level = level.flatMap((p) => (mode === 'tree' ? [p + 'a', p + 'b'] : [p + 'a'])); out.push(...level); } return out; }
+    function draw() {
+      const N = nodes(); if (!N.includes(sel)) sel = N[0];
+      fig.querySelector<HTMLElement>('[data-truth]')!.innerHTML = [0, 1, 2].map((d) => `<div class="ai-gt-pre ai-pc-sets" data-level="${d}"><span class="ai-tl-k">大模型在第 ${d + 1} 个位置认可：</span>${['a', 'b', 'x'].map((v) => `<button data-t="${v}" aria-pressed="${truth[d] === v}">${v === 'x' ? '都不是' : v === 'a' ? '第 1 名' : '第 2 名'}</button>`).join('')}</div>`).join('');
+      let acc = ''; for (let d = 0; d < 3; d++) { const nxt = acc + truth[d]; if (truth[d] !== 'x' && N.includes(nxt)) acc = nxt; else break; }
+      // 树
+      const pos: Record<string, [number, number]> = { '': [20, 90] };
+      for (const n of N) { const d = n.length, idx = parseInt(n.replace(/a/g, '0').replace(/b/g, '1'), 2), cnt = mode === 'tree' ? 2 ** d : 1; pos[n] = [20 + d * 85, cnt === 1 ? 90 : 12 + ((idx + 0.5) / cnt) * 160]; }
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 290 185">';
+      for (const n of N) { const [x1, y1] = pos[n.slice(0, -1)], [x2, y2] = pos[n]; s += `<line class="ai-tv-edge${acc.startsWith(n) ? ' is-acc' : ''}" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`; }
+      s += `<circle class="ai-tv-root" cx="20" cy="90" r="7"/><text class="ai-al-gl" x="20" y="108" text-anchor="middle">前文</text>`;
+      for (const n of N) { const [x, y] = pos[n]; s += `<g data-n="${n}" class="ai-tv-node${acc.startsWith(n) ? ' is-acc' : ''}${n === sel ? ' is-sel' : ''}"><circle cx="${x}" cy="${y}" r="10"/><text x="${x}" y="${y + 4}" text-anchor="middle">${n}</text></g>`; }
+      fig.querySelector<HTMLElement>('[data-tree]')!.innerHTML = s + '</svg>';
+      // 掩码
+      const cs = Math.min(14, Math.floor(220 / N.length));
+      let m = `<svg class="ai-tl-svg" viewBox="0 0 ${40 + N.length * cs} ${20 + N.length * cs}">`;
+      N.forEach((r, i) => {
+        m += `<text class="ai-al-gl" x="34" y="${20 + i * cs + cs * 0.7}" text-anchor="end">${r}</text>`;
+        N.forEach((c, j) => { const on = r.startsWith(c); m += `<rect class="ai-tv-m${on ? ' on' : ''}${r === sel ? ' row' : ''}" x="${38 + j * cs}" y="${18 + i * cs}" width="${cs - 1}" height="${cs - 1}"/>`; });
+      });
+      fig.querySelector<HTMLElement>('[data-mask]')!.innerHTML = m + '</svg>';
+      const anc = N.filter((c) => sel.startsWith(c) && c !== sel);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${N.length} 个候选 token 一次送进大模型。选中的节点 <b>${sel}</b> 在注意力里只看得见前文${anc.length ? ' 和 ' + anc.join('、') : ''}（掩码里它那一行）。`
+        + `<br>大模型认可的路径：${truth.map((t) => (t === 'x' ? '×' : t)).join(' → ')}。沿树走到 ${acc || '（根就停了）'}，接受 ${acc.length} 个，这一轮前进 <b>${acc.length + 1}</b> 个 token。`
+        + `<br><span class="ai-faint">${mode === 'tree' ? '树里同时摆着每层的前 2 名，大模型认可第 2 名时也能接着走；代价是要一起验证 14 个候选。' : '链只有 3 个候选，大模型一旦认可的是第 2 名，就只能停在那里。'}</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element, mb = t.closest<HTMLElement>('[data-group="mode"] [data-v]'), tb = t.closest<HTMLElement>('[data-level] [data-t]'), nd = t.closest<SVGGElement>('[data-n]');
+      if (mb) { mode = mb.dataset.v!; fig.querySelectorAll('[data-group="mode"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === mb ? 'true' : 'false')); }
+      else if (tb) truth[Number(tb.closest<HTMLElement>('[data-level]')!.dataset.level)] = tb.dataset.t!;
+      else if (nd) sel = nd.dataset.n!; else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-treeverify]').forEach(init);
+</script>

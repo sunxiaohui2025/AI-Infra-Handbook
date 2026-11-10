@@ -1,0 +1,76 @@
+---
+// miniinfer 的架构图（第五章各讲共用）：同一张图，按版本显示已有的模块，本版新增或改动的模块用强调色。
+// 读者可以：切换版本，看引擎怎么一步步长大；点模块看它在哪个文件、做什么、在哪一讲写。
+// 用法：<EngineArch ver="v2" />（ver 取 v0、v1、v2、v3、v3+、v4、v5、all）
+interface Props { ver?: string; title?: string; caption?: string }
+const { ver = 'all', title = 'miniinfer 的架构', caption } = Astro.props;
+const VERS = ['v0', 'v1', 'v2', 'v3', 'v3+', 'v4', 'v5'];
+---
+<figure class="ai-gt ai-ea" data-enginearch data-ver={ver === 'all' ? 'v5' : ver}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="v"><span class="ai-tl-k">版本：</span>{VERS.map((v) => <button data-v={v} aria-pressed={(ver === 'all' ? 'v5' : ver) === v ? 'true' : 'false'}>{v}</button>)}</div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const ORDER = ['v0', 'v1', 'v2', 'v3', 'v3+', 'v4', 'v5'];
+  type M = { id: string; x: number; y: number; w: number; h: number; since: string; changed?: string[]; label: (v: string) => string; info: (v: string) => string; group?: boolean };
+  const at = (v: string, s: string) => ORDER.indexOf(v) >= ORDER.indexOf(s);
+  const MODS: M[] = [
+    { id: 'engine', x: 160, y: 20, w: 340, h: 250, since: 'v0', changed: ['v1', 'v2', 'v5'], group: true, label: (v) => at(v, 'v2') ? 'engine.py · LLM：add_request() / step()' : 'engine.py · LLM：generate()',
+      info: (v) => at(v, 'v2') ? '<b>引擎</b>（engine.py）：请求先进队列，引擎一步一步地跑 step()：问调度器这一步 batch 里有谁，拼成一维的输入，调用模型，采样，更新每个请求的状态。第 108 讲起是这个样子。' : '<b>引擎</b>（engine.py）：一个请求一个请求地生成。v0 每步把整段序列送进模型；v1 先 prefill 整个提示，之后每步只送一个新 token（第 106、107 讲）。' },
+    { id: 'req', x: 20, y: 40, w: 116, h: 40, since: 'v0', label: () => '请求（文本）', info: () => '<b>请求</b>：一段提示文本，加上最多生成多少个 token。' },
+    { id: 'tok', x: 20, y: 110, w: 116, h: 40, since: 'v0', label: () => '分词器', info: () => '<b>分词器</b>：直接用模型自带的 tokenizer.json（tokenizers 库），文本 ↔ token 编号（第 21 讲）。' },
+    { id: 'out', x: 20, y: 200, w: 116, h: 40, since: 'v0', label: () => '输出文本', info: () => '<b>输出</b>：生成的 token 编号再经分词器还原成文本。' },
+    { id: 'sched', x: 178, y: 54, w: 146, h: 52, since: 'v2', changed: ['v3', 'v5'], label: (v) => at(v, 'v3') ? '调度器：按块数放行、抢占' : '调度器：等待 / 运行队列',
+      info: (v) => at(v, 'v3') ? '<b>调度器</b>（scheduler.py）：每一步先让运行中的请求各 decode 一个 token（下一个位置要进新块时先拿块，拿不到就抢占最晚进来的请求），再用剩下的槽位和空闲块放新请求进来做 prefill（第 109 讲）。' : '<b>调度器</b>（scheduler.py）：两个队列。每一步，运行中的请求各 decode 一个 token；有空位就从等待队列放新请求进来做 prefill；生成完的立刻离开（第 108 讲）。' },
+    { id: 'seq', x: 336, y: 54, w: 146, h: 52, since: 'v2', changed: ['v3'], label: () => '请求状态 sequence.py', info: () => '<b>请求状态</b>（sequence.py）：一个请求的全部 token、已经算进缓存的位置数 num_computed、状态（等待、运行、结束），v3 起还有它的块表。' },
+    { id: 'batch', x: 178, y: 122, w: 304, h: 40, since: 'v0', changed: ['v1', 'v2', 'v5'], label: (v) => at(v, 'v5') ? '拼 batch：新 token + 草稿，记下每个请求的段' : at(v, 'v2') ? '拼 batch：所有请求的新 token 拼成一维' : at(v, 'v1') ? '送入：prefill 整个提示，之后一次一个' : '送入：每步整段序列从头算',
+      info: (v) => at(v, 'v2') ? '<b>拼 batch</b>（engine.step）：把这一步每个请求要算的 token 拼成一维的 tokens、pos，再用 segs 记下每个请求占哪一段、用哪份缓存。线性层一次算完整个 batch，注意力按段分开算。' : '<b>送入模型的 token</b>：v0 每步都把整段序列送进去；v1 第一步送整个提示（prefill），之后每步只送刚生成的那一个（decode）。' },
+    { id: 'sampler', x: 178, y: 178, w: 146, h: 44, since: 'v0', label: () => '采样（贪心）', info: () => '<b>采样</b>：每个请求取最后一个位置打分最高的 token（贪心）。换成温度、top-p 只改这里（第 65 讲）。' },
+    { id: 'spec', x: 336, y: 178, w: 146, h: 44, since: 'v5', label: () => '投机解码 spec.py', info: () => '<b>投机解码</b>（spec.py）：propose() 在已有 token 里找和结尾相同的片段，把后面几个 token 当草稿；verify() 按模型在每个位置的贪心预测决定接受到哪里（第 112 讲）。' },
+    { id: 'model', x: 530, y: 20, w: 350, h: 250, since: 'v0', changed: ['v1', 'v2', 'v4', 'v5'], group: true, label: () => 'model.py · Qwen3 前向', info: () => '<b>模型</b>（model.py）：只用 torch 的基本运算写出 Qwen3：嵌入 → 28 层（RMSNorm、注意力、RMSNorm、SwiGLU，各带残差）→ RMSNorm → 输出层（第 106 讲）。' },
+    { id: 'emb', x: 548, y: 54, w: 314, h: 30, since: 'v0', label: () => '嵌入表：token 编号 → 1024 维向量', info: () => '<b>嵌入</b>：按编号查表（第 22 讲）。Qwen3-0.6B 的输出层和嵌入表共用同一份权重。' },
+    { id: 'attn', x: 548, y: 106, w: 150, h: 104, since: 'v0', changed: ['v1', 'v2'], label: () => '注意力', info: (v) => `<b>注意力</b>：q、k、v 投影 → 对 q、k 做 RMSNorm → RoPE → GQA（16 个查询头共用 8 组 K、V）→ 因果掩码 → softmax → 加权求和 → o 投影。${at(v, 'v1') ? '新 token 的 K、V 先写进缓存，再从缓存读出全部 K、V。' : ''}${at(v, 'v2') ? '按请求分段，各看各的上下文。' : ''}` },
+    { id: 'mlp', x: 712, y: 106, w: 150, h: 104, since: 'v0', label: () => 'SwiGLU', info: () => '<b>FFN</b>：SiLU(x·W_gate) ⊙ (x·W_up) · W_down，中间宽度 3072（第 38 讲）。' },
+    { id: 'head', x: 548, y: 226, w: 314, h: 30, since: 'v0', label: () => 'RMSNorm + 输出层 → 15 万个词的打分', info: () => '<b>输出层</b>：只取每个请求最后一个位置（v5 还要草稿位置）的向量，乘输出层得到对 151,936 个词的打分。' },
+    { id: 'kv', x: 160, y: 292, w: 340, h: 50, since: 'v1', changed: ['v3', 'v3+'], label: (v) => at(v, 'v3+') ? 'block_manager.py：块池 + 块表 + 前缀缓存' : at(v, 'v3') ? 'block_manager.py：块池 + 块表' : 'kv_cache.py：每个请求一份连续的 KV',
+      info: (v) => at(v, 'v3+') ? '<b>前缀缓存</b>：装满的块按“前面所有块 + 本块内容”算哈希登记；新请求从头逐块查，命中的块直接共用（引用计数加一），不用再算（第 110 讲）。' : at(v, 'v3') ? '<b>分页 KV</b>（block_manager.py）：所有请求共用一个块池，每块 16 个位置；请求用块表记下自己的 KV 在哪些块里，用多少拿多少（第 109 讲）。' : '<b>KV Cache</b>（kv_cache.py）：按“提示 + 最大输出”一次分配好，生成时往后写（第 107 讲）。' },
+    { id: 'weights', x: 530, y: 292, w: 170, h: 50, since: 'v0', label: () => 'weights.py 读权重', info: () => '<b>权重</b>（weights.py、config.py）：从 model.safetensors 读出全部张量，按名字放进字典；config.json 给出层数、头数等。' },
+    { id: 'quant', x: 710, y: 292, w: 170, h: 50, since: 'v4', label: () => 'quant.py INT8 权重', info: () => '<b>量化</b>（quant.py）：加载后把每层 7 个线性层换成 INT8，每个输出通道一个 scale；矩阵乘时先算 x·qᵀ 再乘回 scale（第 111 讲）。' },
+  ];
+  const EDGES: [string, number, number, number, number, string][] = [
+    ['v0', 78, 80, 78, 110, ''], ['v0', 136, 130, 178, 130, ''], ['v0', 482, 142, 548, 69, ''], ['v0', 548, 241, 324, 205, ''], ['v0', 178, 205, 136, 220, ''],
+    ['v1', 623, 210, 420, 292, 'kv'], ['v0', 615, 292, 615, 256, ''],
+  ];
+  function init(fig: HTMLElement) {
+    let v = fig.dataset.ver || 'v5', pick = 'engine';
+    function draw() {
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 900 356"><defs><marker id="ea-ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="ai-ea-arh"/></marker></defs>';
+      for (const [since, x1, y1, x2, y2] of EDGES) if (at(v, since)) s += `<line class="ai-ea-edge" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" marker-end="url(#ea-ar)"/>`;
+      for (const m of MODS) {
+        const has = at(v, m.since), isNew = has && (m.since === v || (m.changed || []).includes(v));
+        if (!has) { s += `<g class="ai-ea-m is-future"><rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="6"/><text x="${m.x + m.w / 2}" y="${m.y + m.h / 2 + 4}" text-anchor="middle">${m.since} 加入</text></g>`; continue; }
+        const cls = `ai-ea-m${m.group ? ' is-group' : ''}${isNew ? ' is-new' : ''}${pick === m.id ? ' is-pick' : ''}`;
+        const ty = m.group ? m.y + 18 : m.y + m.h / 2 + 4, tx = m.group ? m.x + 12 : m.x + m.w / 2, anchor = m.group ? 'start' : 'middle';
+        s += `<g class="${cls}" data-m="${m.id}"><rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="6"/><text x="${tx}" y="${ty}" text-anchor="${anchor}">${m.label(v)}</text></g>`;
+      }
+      s += `<text class="ai-al-gl" x="690" y="200" text-anchor="middle">× 28 层，各带残差</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const m = MODS.find((x) => x.id === pick)!;
+      const fresh = MODS.filter((x) => at(v, x.since) && (x.since === v || (x.changed || []).includes(v))).map((x) => x.label(v).split(/[：·]/)[0]);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = (at(v, m.since) ? m.info(v) : `<b>${m.label(v)}</b>：${m.since} 才加入。`)
+        + `<br><span class="ai-faint">${v} 新增或改动（强调色）：${fresh.join('、')}。点模块看说明。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bt = t.closest<HTMLElement>('[data-group] [data-v]');
+      if (bt) { bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false')); v = bt.dataset.v!; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-m]'); if (g) { pick = g.dataset.m!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-enginearch]').forEach(init);
+</script>

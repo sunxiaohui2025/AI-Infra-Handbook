@@ -1,0 +1,59 @@
+---
+// MoE decode 的网络瓶颈（粗略模型，与第 99 讲的代码相同）：DeepSeek-V3 规模，58 个 MoE 层，每卡 B 个 token，EP = N。
+// 每层：专家 = max(本卡专家权重 ÷ 3.35 TB/s, 2·专家参数·8B ÷ 1979 TFLOPS)；通信 = 2α + B·8·7168·3 字节·(N−1)/N ÷ β（分发 FP8 + 合并 BF16），α = 8 μs。
+// 一步 = 2 ms（非专家部分，示意）+ 58 × 每层（不重叠时专家 + 通信，重叠时取较大者）。读者可以：调网络带宽 β、每卡 token 数、EP 规模、是否重叠，
+// 看一步的构成和每卡吞吐；下方曲线是吞吐随 β 的变化。
+interface Props { title?: string; caption?: string }
+const { title = '网络带宽决定 MoE 的吞吐', caption } = Astro.props;
+---
+<figure class="ai-gt ai-mb" data-moebw>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>网络带宽 β = <b data-bv></b> GB/s</span><input type="range" min="0" max="5" step="1" value="1" data-b /></label>
+    <label class="ai-tl-lr"><span>每卡 <b data-tv></b> 个 token</span><input type="range" min="0" max="4" step="1" value="3" data-t /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="n"><span class="ai-tl-k">EP：</span><button data-v="32" aria-pressed="false">32</button><button data-v="64" aria-pressed="true">64</button><button data-v="256" aria-pressed="false">256</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="o"><button data-v="0" aria-pressed="false">通信和计算串行</button><button data-v="1" aria-pressed="true">两个微批次重叠</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const D = 7168, K = 8, E = 256, LAY = 58, EB = 3 * D * 2048, F8 = 1979e12, BW = 3.35e12, ATT = 2.0, AL = 8e-6;
+  const BETAS = [25e9, 50e9, 100e9, 200e9, 450e9, 900e9], TS = [16, 32, 64, 128, 256];
+  function step(B: number, N: number, beta: number, ov: boolean) {
+    const per = Math.max(1, Math.floor(E / N)), ex = Math.max(per * EB / BW, 2 * EB * B * K / F8), cm = 2 * AL + B * K * D * 3 * (N - 1) / N / beta;
+    return { t: ATT + LAY * (ov ? Math.max(ex, cm) : ex + cm) * 1e3, ex: ex * 1e3, cm: cm * 1e3 };
+  }
+  function init(fig: HTMLElement) {
+    let N = 64, ov = true;
+    const bIn = fig.querySelector<HTMLInputElement>('[data-b]')!, tIn = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    function draw() {
+      const beta = BETAS[Number(bIn.value)], B = TS[Number(tIn.value)]; fig.querySelector('[data-bv]')!.textContent = String(beta / 1e9); fig.querySelector('[data-tv]')!.textContent = String(B);
+      const r = step(B, N, beta, ov), sx = 500 / Math.max(r.t, 20);
+      const exT = LAY * r.ex, cmT = LAY * r.cm;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 600 200"><text class="ai-np-ptitle" x="20" y="12">一步的构成（ms）</text>`;
+      if (ov) { const hid = Math.min(exT, cmT); s += `<rect class="ai-mb-a" x="40" y="20" width="${ATT * sx}" height="22"/><rect class="${exT >= cmT ? 'ai-mb-e' : 'ai-mb-c'}" x="${40 + ATT * sx}" y="20" width="${Math.max(exT, cmT) * sx}" height="22"/><rect class="${exT >= cmT ? 'ai-mb-c' : 'ai-mb-e'} is-hid" x="${40 + ATT * sx}" y="44" width="${hid * sx}" height="10"/>`; }
+      else s += `<rect class="ai-mb-a" x="40" y="20" width="${ATT * sx}" height="22"/><rect class="ai-mb-e" x="${40 + ATT * sx}" y="20" width="${exT * sx}" height="22"/><rect class="ai-mb-c" x="${40 + (ATT + exT) * sx}" y="20" width="${cmT * sx}" height="22"/>`;
+      s += `<text class="ai-al-gl" x="${44 + r.t * sx}" y="36">${r.t.toFixed(1)} ms</text>`;
+      // 吞吐随 β 的曲线
+      const pts = BETAS.map((b, i) => [60 + i * 100, B / step(B, N, b, ov).t * 1e3]), mx = Math.max(...pts.map((p) => p[1]));
+      const Y = (v: number) => 185 - (v / mx) * 100;
+      s += `<text class="ai-np-ptitle" x="20" y="74">每卡吞吐（token/s）随网络带宽的变化</text><polyline class="ai-bc-line c-acc" points="${pts.map(([x, v]) => `${x},${Y(v)}`).join(' ')}"/>`;
+      pts.forEach(([x, v], i) => { s += `<circle class="${BETAS[i] === beta ? 'ai-bc-dot' : 'ai-sd-dot'}" cx="${x}" cy="${Y(v)}" r="${BETAS[i] === beta ? 5 : 3}"/><text class="ai-al-gl" x="${x}" y="${Y(v) - 7}" text-anchor="middle">${Math.round(v).toLocaleString()}</text><text class="ai-al-gl" x="${x}" y="198" text-anchor="middle">${BETAS[i] / 1e9} GB/s</text>`; });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const mem = Math.max(1, Math.floor(E / N)) * EB * LAY + 17e9;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `每层：专家计算 ${r.ex.toFixed(3)} ms，All-to-All ${r.cm.toFixed(3)} ms（${r.cm > r.ex ? '<b>通信是瓶颈</b>' : '专家计算是瓶颈'}）。一步 ${r.t.toFixed(1)} ms，每卡 ${Math.round(B / r.t * 1e3).toLocaleString()} token/s。每卡显存约 ${(mem / 1e9).toFixed(0)} GB（FP8 权重）。`
+        + '<br><span class="ai-faint">灰：非专家部分；蓝：专家计算；琥珀：All-to-All 通信。重叠时，较短的那个被藏在较长的下面（下方细条）。专家每卡只有几个，算得很快；每个 token 却要把 8 份隐藏状态送出去再收回来。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      if (g.dataset.group === 'n') N = Number(bt.dataset.v); else ov = bt.dataset.v === '1'; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-moebw]').forEach(init);
+</script>

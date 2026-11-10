@@ -20,7 +20,7 @@ const written = (await getCollection('lectures')).length;
           <div class="ai-stats">
             <div class="ai-stat"><b>5</b><span>章</span></div>
             <div class="ai-stat"><b>14</b><span>篇</span></div>
-            <div class="ai-stat"><b>110</b><span>讲</span></div>
+            <div class="ai-stat"><b>{LECTURES.length}</b><span>讲</span></div>
             <div class="ai-stat"><b><span class="r-full">{LECTURES.length}</span><span class="r-fast">{fastCount(LECTURES)}</span></b><span>当前路线</span></div>
             <div class="ai-stat ai-stat-done"><b>{written}</b><span>已写</span></div>
           </div>

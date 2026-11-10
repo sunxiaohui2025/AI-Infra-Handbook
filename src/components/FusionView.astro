@@ -1,0 +1,65 @@
+---
+// 算子融合前后的显存读写（Llama-3-8B 的形状，BF16，H100 带宽 3.35 TB/s，与第 74 讲的代码相同）。
+// 两段逐元素运算：SwiGLU 激活（张量 T × 14336）、残差相加 + RMSNorm（张量 T × 4096）。
+// 不融合：每个算子一个 kernel，输入从显存读进来、结果写回显存；融合：一个 kernel，中间结果留在片上（寄存器），只读最初的输入、只写最终的输出。
+// 读者可以：切换运算、切换融合与否、调 token 数，看每个 kernel 读写了什么、总字节数和耗时。
+interface Props { title?: string; caption?: string }
+const { title = '融合前后：显存读写了几遍', caption } = Astro.props;
+---
+<figure class="ai-gt ai-fu" data-fusion>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="op"><button data-v="0" aria-pressed="true">SwiGLU 激活</button><button data-v="1" aria-pressed="false">残差相加 + RMSNorm</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="f"><button data-v="0" aria-pressed="true">不融合（逐个算子）</button><button data-v="1" aria-pressed="false">融合成一个 kernel</button></div>
+    <label class="ai-tl-lr"><span>token 数 T = <b data-tv></b></span><input type="range" min="0" max="5" step="1" value="4" data-t /></label>
+  </div>
+  <div class="ai-fu-ks" data-ks></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type K = { name: string; r: string[]; w: string[]; f: string };
+  const OPS: { dim: number; eager: K[]; fused: K }[] = [
+    { dim: 14336, eager: [
+      { name: 'sigmoid', r: ['g'], w: ['t'], f: 't = 1 / (1 + e^(−g))' },
+      { name: 'mul', r: ['g', 't'], w: ['s'], f: 's = g · t（SiLU）' },
+      { name: 'mul', r: ['s', 'u'], w: ['y'], f: 'y = s · u' }],
+      fused: { name: '融合 kernel', r: ['g', 'u'], w: ['y'], f: 'y = g / (1 + e^(−g)) · u，t、s 只在寄存器里' } },
+    { dim: 4096, eager: [
+      { name: 'add', r: ['x', 'h'], w: ['r'], f: 'r = x + h（残差流）' },
+      { name: 'mul', r: ['r'], w: ['sq'], f: 'sq = r · r' },
+      { name: 'mean', r: ['sq'], w: [], f: 'ms = 每行的平均（每个 token 一个数）' },
+      { name: 'add / rsqrt', r: [], w: [], f: '加 eps、开方（两个很小的 kernel）' },
+      { name: 'div', r: ['r'], w: ['n'], f: 'n = r / √(ms + eps)' },
+      { name: 'mul', r: ['n'], w: ['y'], f: 'y = n · w' }],
+      fused: { name: '融合 kernel', r: ['x', 'h'], w: ['r', 'y'], f: '一行一行地：r = x + h → 平方和 → 归一化 → 乘 w，中间结果只在片上' } },
+  ];
+  const TS = [256, 512, 1024, 2048, 4096, 8192], BW = 3.35e12;
+  function init(fig: HTMLElement) {
+    let op = 0, fused = 0;
+    const tIn = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    function draw() {
+      const T = TS[Number(tIn.value)], O = OPS[op], size = T * O.dim * 2;
+      fig.querySelector('[data-tv]')!.textContent = String(T);
+      const ks = fused ? [O.fused] : O.eager;
+      const nKernels = fused ? 1 : (op === 1 ? 7 : 3);
+      const passes = ks.reduce((a, k) => a + k.r.length + k.w.length, 0);
+      fig.querySelector<HTMLElement>('[data-ks]')!.innerHTML = ks.map((k, i) => `<div class="ai-fu-k"><div class="ai-fu-kn">kernel ${fused ? '' : i + 1} <b>${k.name}</b></div><div class="ai-fu-io">${k.r.map((x) => `<span class="ai-fu-r">读 ${x}</span>`).join('')}<span class="ai-fu-f">${k.f}</span>${k.w.map((x) => `<span class="ai-fu-w">写 ${x}</span>`).join('')}</div></div>`).join('');
+      const t = passes * size / BW * 1e6;
+      const other = (fused ? O.eager : [O.fused]).reduce((a, k) => a + k.r.length + k.w.length, 0);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `每个张量 ${T} × ${O.dim} × 2 字节 = ${(size / 1e6).toFixed(1)} MB。${nKernels} 个 kernel，整张量读写 ${passes} 遍 = ${(passes * size / 1e6).toFixed(0)} MB`
+        + `<br>耗时 ≈ ${(passes * size / 1e6).toFixed(0)} MB ÷ 3.35 TB/s ≈ ${t.toFixed(0)} μs（${fused ? '不融合' : '融合后'}读写 ${other} 遍，≈ ${(other * size / BW * 1e6).toFixed(0)} μs）`
+        + '<br><span class="ai-faint">这些运算每个元素只做几次加减乘除，算得再快也要等数据：时间几乎全花在显存读写上。融合省掉的，是中间结果写回去、再读回来的那几遍。</span>';
+    }
+    tIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const grp = b.closest<HTMLElement>('[data-group]')!;
+      if (grp.dataset.group === 'op') op = Number(b.dataset.v); else fused = Number(b.dataset.v);
+      grp.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-fusion]').forEach(init);
+</script>

@@ -1,0 +1,12 @@
+---
+// 通用的静态图外框：标题 + 内容（一般是内联 SVG）+ 图注。根元素是 figure.ai-fig，对照模式能自动识别。
+// 用法：<Figure title="…" caption="图 N-1　…"><svg class="ai-tl-svg" viewBox="…">…</svg></Figure>
+// SVG 里的颜色只用 global.css 的变量，常用的图元样式见 .ai-dg-*（框、线、文字、强调色）。
+interface Props { title?: string; caption?: string }
+const { title, caption } = Astro.props;
+---
+<figure class="ai-fig ai-dg">
+  {title && <div class="ai-ms-title">{title}</div>}
+  <slot />
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>

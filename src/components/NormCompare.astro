@@ -1,0 +1,46 @@
+---
+// LayerNorm 与 RMSNorm 并排对比。
+// 输入一组数（默认是 TinyLM 第 1 层“AI”残差相加后的那一行），两边分别逐步计算；
+// 拖“整体平移”滑块给每个数都加上同一个常数：LayerNorm 的结果不变，RMSNorm 的结果会变。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { title?: string; caption?: string }
+const { title = 'LayerNorm 和 RMSNorm：同一组数，两种算法', caption } = Astro.props;
+const x0 = tiny.examples['34'].steps.find((s) => s.key === 'L1res1')!.v[3];
+---
+<figure class="ai-gt ai-nc" data-normcmp data-x={JSON.stringify(x0)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-nc-in">
+    <span class="ai-tl-k">输入 x：</span>
+    {x0.map((v, i) => <input type="number" step="0.1" value={v} data-i={i} />)}
+    <label class="ai-tl-lr"><span>整体平移 c = <b data-cv></b></span><input type="range" min="-3" max="3" step="0.1" value="0" data-c /></label>
+  </div>
+  <div class="ai-nc-cols">
+    <div class="ai-nc-col"><div class="ai-mlp-pt"><b>LayerNorm</b>（原始 Transformer、GPT-2）</div><ol data-ln></ol></div>
+    <div class="ai-nc-col"><div class="ai-mlp-pt"><b>RMSNorm</b>（Llama、DeepSeek 等）</div><ol data-rms></ol></div>
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmt = (v: number, d = 4) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const vec = (r: number[], d = 4) => '(' + r.map((v) => fmt(v, d)).join(', ') + ')';
+  function init(fig: HTMLElement) {
+    const ins = [...fig.querySelectorAll<HTMLInputElement>('[data-i]')], cIn = fig.querySelector<HTMLInputElement>('[data-c]')!;
+    function draw() {
+      const c = Number(cIn.value);
+      fig.querySelector('[data-cv]')!.textContent = fmt(c, 1);
+      const x = ins.map((i) => (Number(i.value) || 0) + c), n = x.length, eps = 1e-5;
+      const mu = x.reduce((a, b) => a + b, 0) / n, xc = x.map((v) => v - mu);
+      const varr = xc.reduce((a, b) => a + b * b, 0) / n, sd = Math.sqrt(varr + eps), ln = xc.map((v) => v / sd);
+      const ms = x.reduce((a, b) => a + b * b, 0) / n, rms = Math.sqrt(ms + eps), rn = x.map((v) => v / rms);
+      fig.querySelector('[data-ln]')!.innerHTML = `<li>均值 μ = ${fmt(mu)}</li><li>减去均值：${vec(xc)}</li><li>方差 = ${fmt(varr)}，标准差 = ${fmt(sd)}</li><li>除以标准差：<b>${vec(ln)}</b></li><li class="ai-faint">再乘 γ、加 β（各 d 个参数）</li>`;
+      fig.querySelector('[data-rms]')!.innerHTML = `<li class="ai-faint">（不算均值）</li><li class="ai-faint">（不减均值）</li><li>平方的平均 = ${fmt(ms)}，均方根 = ${fmt(rms)}</li><li>除以均方根：<b>${vec(rn)}</b></li><li class="ai-faint">再乘 γ（d 个参数，没有 β）</li>`;
+      fig.querySelector('[data-eq]')!.innerHTML = `输入 x = ${vec(x)}。${Math.abs(mu) < 0.01 ? '均值接近 0，两种算法的结果几乎一样。' : `均值是 ${fmt(mu, 3)}，离 0 比较远，两种结果就不同了。`}`
+        + `<br><span class="ai-faint">拖动“整体平移”：LayerNorm 先减均值，平移被完全抵消，结果不变；RMSNorm 不减均值，平移会改变结果。</span>`;
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-normcmp]').forEach(init);
+</script>

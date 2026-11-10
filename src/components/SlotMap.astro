@@ -1,0 +1,112 @@
+---
+// nano-vllm 的 prepare_prefill / prepare_decode 拼出来的输入（公式与 engine/model_runner.py 相同，见第 115 讲）。
+// 为了看得清，块大小取 4（nano-vllm 实际是 256），块池 8 块，共 32 个槽位：槽位号 = 块号 × 块大小 + 块内偏移。
+// 场景：两个新请求的 prefill；前缀缓存命中后的 prefill；分块 prefill 的第二段；三个请求的 decode；decode 补齐到 CUDA Graph 的档位。
+// 读者可以：切换场景，看这一步要写哪些槽位（深色）、注意力要读哪些槽位（浅色），以及送进 GPU 的每个数组。
+interface Props { title?: string; caption?: string }
+const { title = '一步的输入：slot_mapping、cu_seqlens 和块表', caption } = Astro.props;
+---
+<figure class="ai-gt ai-sm" data-slotmap>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="s">
+    <button data-v="0" aria-pressed="true">prefill：两个新请求</button>
+    <button data-v="1" aria-pressed="false">prefill：前缀命中</button>
+    <button data-v="2" aria-pressed="false">分块 prefill 第二段</button>
+    <button data-v="3" aria-pressed="false">decode：三个请求</button>
+    <button data-v="4" aria-pressed="false">decode：补齐到图的档位</button>
+  </div>
+  <div class="ai-sm-note" data-note></div>
+  <div class="ai-sm-pool" data-pool></div>
+  <div class="ai-sm-legend ai-faint"><span class="ai-sm-cell is-w"></span>这一步写入 K、V　<span class="ai-sm-cell is-r"></span>已在缓存里、注意力要读　<span class="ai-sm-cell"></span>空闲或别人的</div>
+  <table class="ai-sm-arr" data-arr></table>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const BS = 4, NB = 8, HUE: Record<string, number> = { A: 210, B: 25, C: 140 };
+  type S = { n: string; len: number; cached: number; sched: number; table: number[] };
+  type Sc = { prefill: boolean; seqs: S[]; graph?: number; note: string };
+  const SC: Sc[] = [
+    { prefill: true, seqs: [{ n: 'A', len: 6, cached: 0, sched: 6, table: [5, 2] }, { n: 'B', len: 3, cached: 0, sched: 3, table: [7] }],
+      note: 'A 有 6 个提示 token，B 有 3 个，都是第一次进来。调度器已经给 A 分了块 5、2，给 B 分了块 7（块不必连续）。这一步把 9 个 token 拼成一维送进去；K、V 刚算出来就紧挨着放在一起，所以注意力直接用这一批的 K、V，不需要块表。' },
+    { prefill: true, seqs: [{ n: 'A', len: 10, cached: 8, sched: 2, table: [3, 6, 1] }],
+      note: 'A 有 10 个提示 token，前两块（8 个位置）和之前某个请求完全相同，前缀缓存命中了块 3、6，num_cached_tokens = 8；只有最后 2 个 token 要算。注意力的键有 10 个、查询只有 2 个（cu_seqlens_k 比 cu_seqlens_q 大），这时要传块表，flash-attn 从块池里读出前 8 个位置的 K、V。' },
+    { prefill: true, seqs: [{ n: 'A', len: 10, cached: 4, sched: 4, table: [0, 4, 6] }],
+      note: 'A 有 10 个提示 token，一步的 token 预算是 4（max_num_batched_tokens）。上一步算了位置 0–3，这一步算 4–7，下一步算 8–9。和前缀命中一样，查询少于键，要传块表。这一段的最后一个位置也会算出打分，但调度器发现提示还没算完，就把它丢掉（postprocess 里的 continue）。' },
+    { prefill: false, seqs: [{ n: 'A', len: 7, cached: 6, sched: 1, table: [5, 2] }, { n: 'B', len: 5, cached: 4, sched: 1, table: [7, 3] }, { n: 'C', len: 9, cached: 8, sched: 1, table: [0, 4, 1] }],
+      note: '三个请求各送最后一个 token。B 的长度从 4 变成 5，第 5 个位置要进新块，调度器在这一步之前用 may_append 给它加了块 3。slot = 块表最后一块 × 4 + 最后一块里的 token 数 − 1。注意力按 context_lens 和块表直接从块池里读。' },
+    { prefill: false, graph: 4, seqs: [{ n: 'A', len: 7, cached: 6, sched: 1, table: [5, 2] }, { n: 'B', len: 5, cached: 4, sched: 1, table: [7, 3] }, { n: 'C', len: 9, cached: 8, sched: 1, table: [0, 4, 1] }],
+      note: '同样 3 个请求，打开 CUDA Graph：图只录了 batch 为 1、2、4、8、16… 的版本，3 个请求用 4 的那张图。多出来的一行：slot_mapping 填 −1（写 KV 的 kernel 遇到 −1 直接返回），context_lens 填 0，算出来的结果不取。' },
+  ];
+  const tok = (n: string, p: number) => `${n}${p}`;
+  const pad = (t: number[][]) => { const L = Math.max(...t.map((x) => x.length)); return t.map((x) => [...x, ...Array(L - x.length).fill(-1)]) as (number | string)[][]; };
+  function build(sc: Sc) {
+    const ids: string[] = [], pos: number[] = [], slot: number[] = [], cuq = [0], cuk = [0], ctx: number[] = [];
+    let tables: (number | string)[][] | null = null;
+    if (sc.prefill) {
+      for (const s of sc.seqs) {
+        const start = s.cached, end = start + s.sched;
+        for (let p = start; p < end; p++) { ids.push(tok(s.n, p)); pos.push(p); }
+        cuq.push(cuq[cuq.length - 1] + s.sched); cuk.push(cuk[cuk.length - 1] + end);
+        const sb = Math.floor(start / BS), eb = Math.ceil(end / BS);
+        for (let i = sb; i < eb; i++) {                              // 和 prepare_prefill 的循环一样
+          let a = s.table[i] * BS; if (i === sb) a += start % BS;
+          const b = i !== eb - 1 ? s.table[i] * BS + BS : s.table[i] * BS + end - i * BS;
+          for (let x = a; x < b; x++) slot.push(x);
+        }
+      }
+      if (cuk[cuk.length - 1] > cuq[cuq.length - 1]) tables = pad(sc.seqs.map((s) => s.table));
+    } else {
+      for (const s of sc.seqs) {
+        ids.push(tok(s.n, s.len - 1)); pos.push(s.len - 1); ctx.push(s.len);
+        const last = s.len - (s.table.length - 1) * BS;            // last_block_num_tokens
+        slot.push(s.table[s.table.length - 1] * BS + last - 1);
+      }
+      tables = pad(sc.seqs.map((s) => s.table));
+      if (sc.graph) for (let i = sc.seqs.length; i < sc.graph; i++) { ids.push('·'); pos.push(0); slot.push(-1); ctx.push(0); tables.push(['不用']); }
+    }
+    return { ids, pos, slot, cuq, cuk, ctx, tables };
+  }
+  function init(fig: HTMLElement) {
+    let k = 0;
+    function draw() {
+      const sc = SC[k], r = build(sc);
+      const owner = new Map<number, [string, number, boolean]>();     // 槽位 → (请求, 位置, 是否本步写入)
+      for (const s of sc.seqs) {
+        const end = sc.prefill ? s.cached + s.sched : s.len;
+        for (let p = 0; p < end; p++) {
+          const w = sc.prefill ? p >= s.cached : p === s.len - 1;
+          owner.set(s.table[Math.floor(p / BS)] * BS + p % BS, [s.n, p, w]);
+        }
+      }
+      let pool = '';
+      for (let b = 0; b < NB; b++) {
+        pool += `<div class="ai-sm-blk"><div class="ai-faint">块 ${b}</div><div class="ai-sm-cells">`;
+        for (let o = 0; o < BS; o++) {
+          const x = b * BS + o, ow = owner.get(x);
+          pool += ow ? `<span class="ai-sm-cell ${ow[2] ? 'is-w' : 'is-r'}" style="--h:${HUE[ow[0]]}" title="槽位 ${x}">${ow[0]}${ow[1]}<small>${x}</small></span>`
+                     : `<span class="ai-sm-cell" title="槽位 ${x}"><small>${x}</small></span>`;
+        }
+        pool += '</div></div>';
+      }
+      fig.querySelector<HTMLElement>('[data-pool]')!.innerHTML = pool;
+      fig.querySelector<HTMLElement>('[data-note]')!.innerHTML = sc.note;
+      const row = (name: string, v: (string | number)[] | null, why: string) => `<tr><th><code>${name}</code></th><td>${v === null ? '<span class="ai-faint">None</span>' : '[' + v.join(', ') + ']'}</td><td class="ai-faint">${why}</td></tr>`;
+      let t = row('input_ids', r.ids, '这一步送进模型的 token（这里用“请求名+位置”表示）') + row('positions', r.pos, 'RoPE 用的位置');
+      if (sc.prefill) {
+        t += row('cu_seqlens_q', r.cuq, '查询的前缀和：第 i 个请求的查询是 [cu[i], cu[i+1])')
+           + row('cu_seqlens_k', r.cuk, '键的前缀和：每个请求的键包括已缓存的部分');
+      } else t += row('context_lens', r.ctx, '每个请求有多少个位置的 K、V（含这一步的）');
+      t += row('slot_mapping', r.slot, '每个新 token 的 K、V 写到哪个槽位');
+      t += row('block_tables', r.tables ? r.tables.map((x) => '[' + x.join(', ') + ']') : null, sc.prefill ? '只有查询少于键（有缓存的部分）时才需要' : '注意力按它找每个请求的块；短的行用 −1 补齐');
+      fig.querySelector<HTMLElement>('[data-arr]')!.innerHTML = t;
+    }
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as Element).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      k = +bt.dataset.v!; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-slotmap]').forEach(init);
+</script>

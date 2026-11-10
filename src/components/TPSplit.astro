@@ -1,0 +1,57 @@
+---
+// 张量并行的 FFN（Megatron 的切法，与第 93 讲代码的思路相同，这里用小整数便于看清）：Z = ReLU(X·A)·B，X 是 2×4，A 是 4×4，B 是 4×2。
+// 两张卡：A 按列切（卡 0 拿前 2 列，卡 1 拿后 2 列），B 按行切（卡 0 拿前 2 行，卡 1 拿后 2 行）。
+// 步骤：0 切分；1 各卡算 X·A_i；2 各卡做 ReLU（不需要通信）；3 各卡算 Y_i·B_i，得到部分和；4 All-Reduce 相加，等于单卡结果。
+// 读者可以：一步步看；切换“A 按行切”的错误做法，看为什么 ReLU 之前就得通信。
+interface Props { title?: string; caption?: string }
+const { title = '一个 FFN 拆到两张卡上', caption } = Astro.props;
+---
+<figure class="ai-gt ai-tp" data-tpsplit>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="col" aria-pressed="true">A 按列切、B 按行切</button><button data-v="row" aria-pressed="false">A 按行切（反例）</button></div>
+    <label class="ai-tl-lr"><span>第 <b data-sv></b> 步</span><input type="range" min="0" max="4" step="1" value="0" data-s /></label>
+  </div>
+  <div class="ai-tp-gpus" data-gpus></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const X = [[1, -1, 2, 0], [0, 1, -1, 1]];
+  const A = [[1, 0, -1, 2], [0, 1, 1, -1], [-2, 1, 0, -1], [-1, 1, 2, 0]];
+  const B = [[1, 0], [0, 1], [1, 1], [-1, 2]];
+  const mm = (P: number[][], Q: number[][]) => P.map((r) => Q[0].map((_, k) => r.reduce((a, v, j) => a + v * Q[j][k], 0)));
+  const relu = (P: number[][]) => P.map((r) => r.map((v) => Math.max(0, v)));
+  const add = (P: number[][], Q: number[][]) => P.map((r, i) => r.map((v, j) => v + Q[i][j]));
+  const cols = (P: number[][], a: number, b: number) => P.map((r) => r.slice(a, b));
+  const mat = (name: string, P: number[][], cls = '') => `<div class="ai-tp-m ${cls}"><small>${name}</small><table>${P.map((r) => `<tr>${r.map((v) => `<td>${v}</td>`).join('')}</tr>`).join('')}</table></div>`;
+  function init(fig: HTMLElement) {
+    let mode = 'col';
+    const sIn = fig.querySelector<HTMLInputElement>('[data-s]')!;
+    function draw() {
+      const s = Number(sIn.value); fig.querySelector('[data-sv]')!.textContent = `${s} / 4`;
+      const full = mm(relu(mm(X, A)), B);
+      let html = '', eq = '';
+      if (mode === 'col') {
+        const g = [0, 1].map((i) => { const Ai = cols(A, 2 * i, 2 * i + 2), Bi = B.slice(2 * i, 2 * i + 2), H = mm(X, Ai), Y = relu(H), Zi = mm(Y, Bi); return { Ai, Bi, H, Y, Zi }; });
+        html = g.map((x, i) => `<div class="ai-tp-gpu"><b>卡 ${i}</b><div class="ai-tp-row">${mat('X（每卡一份）', X)}${mat(`A_${i}（A 的第 ${2 * i + 1}–${2 * i + 2} 列）`, x.Ai, 'is-a')}${mat(`B_${i}（B 的第 ${2 * i + 1}–${2 * i + 2} 行）`, x.Bi, 'is-b')}</div><div class="ai-tp-row">${s >= 1 ? mat(`X·A_${i}`, x.H) : ''}${s >= 2 ? mat(`Y_${i} = ReLU`, x.Y) : ''}${s >= 3 ? mat(`部分和 Y_${i}·B_${i}`, x.Zi, 'is-part') : ''}${s >= 4 ? mat('All-Reduce 后', add(g[0].Zi, g[1].Zi), 'is-final') : ''}</div></div>`).join('');
+        eq = ['A 的列、B 的行切给两张卡，X 每张卡都有一份。', '各卡算 X·A_i（2×2）：A 按列切，每张卡得到的是中间结果 X·A 的一部分列，每一列都是完整的值。', 'ReLU 逐元素作用，每列独立，各卡自己做就行，不需要通信。', 'Y_i·B_i：Y 的第 i 组列只和 B 的第 i 组行相乘，得到的是 Z 的一个部分和（2×2）。', `All-Reduce 把两份部分和加起来，两张卡都得到 Z = ${JSON.stringify(full)}，和单卡结果一样。整个 FFN 只通信一次。`][s];
+      } else {
+        const g = [0, 1].map((i) => { const Xi = cols(X, 2 * i, 2 * i + 2), Ai = A.slice(2 * i, 2 * i + 2), H = mm(Xi, Ai); return { Xi, Ai, H }; });
+        const sumH = add(g[0].H, g[1].H), wrong = add(relu(g[0].H), relu(g[1].H));
+        html = g.map((x, i) => `<div class="ai-tp-gpu"><b>卡 ${i}</b><div class="ai-tp-row">${mat(`X 的第 ${2 * i + 1}–${2 * i + 2} 列`, x.Xi)}${mat(`A 的第 ${2 * i + 1}–${2 * i + 2} 行`, x.Ai, 'is-a')}</div><div class="ai-tp-row">${s >= 1 ? mat(`X_i·A_i（部分和）`, x.H, 'is-part') : ''}${s >= 2 ? mat('ReLU(部分和)', relu(x.H)) : ''}</div></div>`).join('');
+        eq = s === 0 ? 'A 按行切，X 也要按列切开对应。' : s === 1 ? '各卡算出的 X_i·A_i 只是 X·A 的部分和（4 列都有，但都不完整）。' : `如果各卡直接做 ReLU 再相加：${JSON.stringify(wrong)}；正确的是先相加再 ReLU：${JSON.stringify(relu(sumH))}。<b>不一样</b>——ReLU 是非线性的，必须在它之前做一次 All-Reduce，FFN 要通信两次。`;
+      }
+      fig.querySelector<HTMLElement>('[data-gpus]')!.innerHTML = html;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = eq + '<br><span class="ai-faint">单卡结果 Z = ReLU(X·A)·B = ' + JSON.stringify(full) + '</span>';
+    }
+    sIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      mode = b.dataset.v!; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-tpsplit]').forEach(init);
+</script>

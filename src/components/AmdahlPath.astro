@@ -1,0 +1,56 @@
+---
+// 局部加速能让整个请求快多少（公式与第 74 讲第二段代码相同）。
+//   串行：热点占比 f、热点加速 s → 整体加速 1 ÷ ((1 − f) + f/s)（Amdahl 定律）
+//   并行分支：准备 10 μs → A、B 同时执行 → 收尾 10 μs 等两条都完成；总时间 = 10 + max(A, B) + 10
+// 读者可以：串行模式下调 f、s，看整体加速和上限；分支模式下调 A 的加速和 A 对 B 的带宽干扰，看关键路径什么时候换成 B。
+interface Props { title?: string; caption?: string }
+const { title = '把一个 kernel 加速，请求能快多少', caption } = Astro.props;
+---
+<figure class="ai-gt ai-amd" data-amdahl>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><span class="ai-tl-k">结构：</span><button data-v="ser" aria-pressed="true">串行阶段</button><button data-v="par" aria-pressed="false">两条并行分支</button></div>
+    <label class="ai-tl-lr" data-only="ser"><span>热点占 <b data-fv></b>%</span><input type="range" min="1" max="95" step="1" value="20" data-f /></label>
+    <label class="ai-tl-lr"><span>热点加速 <b data-sv></b> 倍</span><input type="range" min="1" max="20" step="0.5" value="4" data-s /></label>
+    <label class="ai-tl-lr" data-only="par"><span>A 抢带宽，B 变慢到 <b data-bv></b> μs</span><input type="range" min="40" max="100" step="5" value="40" data-b /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    let mode = 'ser';
+    const q = (s: string) => Number(fig.querySelector<HTMLInputElement>(s)!.value);
+    function draw() {
+      const f = q('[data-f]') / 100, sp = q('[data-s]'), B2 = q('[data-b]');
+      fig.querySelector('[data-fv]')!.textContent = String(Math.round(f * 100)); fig.querySelector('[data-sv]')!.textContent = String(sp); fig.querySelector('[data-bv]')!.textContent = String(B2);
+      fig.querySelectorAll<HTMLElement>('[data-only]').forEach((el) => (el.style.display = el.dataset.only === mode ? '' : 'none'));
+      const x0 = 120, w = 460;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 140">', eq = '';
+      if (mode === 'ser') {
+        const nt = (1 - f) + f / sp, sx = w;
+        s += `<text class="ai-al-gl" x="${x0 - 6}" y="44" text-anchor="end">原来</text><rect class="ai-rtl-q" x="${x0}" y="30" width="${(1 - f) * sx}" height="20"/><rect class="ai-sn-a" x="${x0 + (1 - f) * sx}" y="30" width="${f * sx}" height="20"/>`;
+        s += `<text class="ai-al-gl" x="${x0 - 6}" y="84" text-anchor="end">加速后</text><rect class="ai-rtl-q" x="${x0}" y="70" width="${(1 - f) * sx}" height="20"/><rect class="ai-sn-a" x="${x0 + (1 - f) * sx}" y="70" width="${f / sp * sx}" height="20"/><text class="ai-al-gl" x="${x0 + nt * sx + 4}" y="84">${(nt * 100).toFixed(1)}%</text>`;
+        s += `<text class="ai-al-gl" x="${x0}" y="118">灰：其他阶段（不变）；橙：热点</text>`;
+        eq = `整体加速 = 1 ÷ ((1 − ${f.toFixed(2)}) + ${f.toFixed(2)} ÷ ${sp}) = <b>${(1 / nt).toFixed(2)} 倍</b>；热点耗时降到零也只有 1 ÷ ${(1 - f).toFixed(2)} = ${(1 / (1 - f)).toFixed(2)} 倍。`;
+      } else {
+        const A = 60 / sp, Bt = B2, T0 = 10 + Math.max(60, 40) + 10, T1 = 10 + Math.max(A, Bt) + 10, sx = w / Math.max(T0, T1);
+        const row = (y: number, a: number, b: number, lab: string, T: number) => `<text class="ai-al-gl" x="${x0 - 6}" y="${y + 24}" text-anchor="end">${lab}</text><rect class="ai-rtl-q" x="${x0}" y="${y}" width="${10 * sx}" height="34"/><rect class="ai-sn-a" x="${x0 + 10 * sx}" y="${y}" width="${a * sx}" height="16"/><rect class="ai-sn-b" x="${x0 + 10 * sx}" y="${y + 18}" width="${b * sx}" height="16"/><rect class="ai-rtl-q" x="${x0 + (10 + Math.max(a, b)) * sx}" y="${y}" width="${10 * sx}" height="34"/><text class="ai-al-gl" x="${x0 + T * sx + 4}" y="${y + 22}">${T.toFixed(0)} μs</text>`;
+        s += row(14, 60, 40, '原来', T0) + row(66, A, Bt, '优化 A 后', T1) + `<text class="ai-al-gl" x="${x0}" y="132">橙：分支 A　绿：分支 B　灰：准备和收尾（收尾要等两条分支都完成）</text>`;
+        eq = `总时间 = 10 + max(A, B) + 10：A 从 60 降到 ${A.toFixed(1)} μs，请求从 ${T0} 变成 <b>${T1.toFixed(0)} μs</b>。` + (A < Bt ? `B（${Bt} μs）接替 A 成了关键路径，再优化 A 没有用。` : 'A 仍是关键路径。') + (Bt > 40 ? ` A 的新实现抢了带宽，让 B 从 40 变成 ${Bt} μs${T1 > T0 ? '，请求反而变慢了' : ''}。` : '');
+      }
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = eq + '<br><span class="ai-faint">局部节省的时间，要放回整个请求的依赖图里，才知道用户能少等多少。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      mode = bt.dataset.v!; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-amdahl]').forEach(init);
+</script>

@@ -1,0 +1,57 @@
+---
+// 剪枝前后的权重矩阵（缩小的例子，思路与第 87 讲的代码相同，数据用固定种子在浏览器里生成）。
+// 一个线性层 y = x·W：16 个输入通道（行）→ 16 个输出（列），64 个校准 token，第 3、11 号输入通道的激活大 10 倍。
+// 方式：按 |w| 非结构化剪 50%；按 |w|·‖x_j‖（Wanda）非结构化剪 50%；2:4（每列沿输入方向每 4 个留 2 个）；结构化（整行去掉 8 个输入通道）。
+// 读者可以：切换方式，看哪些权重被剪掉（灰色）、输出误差、以及 GPU 能不能因此变快。
+interface Props { title?: string; caption?: string }
+const { title = '剪掉一半权重：剪哪些、怎么剪', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pr" data-pruneview>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="none" aria-pressed="false">原始</button><button data-v="mag" aria-pressed="false">非结构化：按 |w|</button><button data-v="wanda" aria-pressed="true">非结构化：按 |w|·‖x‖</button><button data-v="24" aria-pressed="false">2:4</button><button data-v="row" aria-pressed="false">结构化：去掉整行</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const D = 16, T = 64, OUTS = [3, 11];
+  function gauss(seed: number) { let s = seed; const u = () => { s = (s * 1103515245 + 12345) % 2147483648; return (s + 0.5) / 2147483648; }; return () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u()); }
+  const g = gauss(5);
+  const X = Array.from({ length: T }, () => Array.from({ length: D }, (_, j) => g() * (OUTS.includes(j) ? 10 : 1)));
+  const W = Array.from({ length: D }, () => Array.from({ length: D }, () => g() * 0.05));
+  const xn = Array.from({ length: D }, (_, j) => Math.sqrt(X.reduce((a, r) => a + r[j] ** 2, 0)));
+  const mm = (A: number[][], B: number[][]) => A.map((r) => B[0].map((_, k) => r.reduce((a, v, j) => a + v * B[j][k], 0)));
+  const Y = mm(X, W), nrm = (A: number[][]) => Math.sqrt(A.reduce((a, r) => a + r.reduce((b, v) => b + v * v, 0), 0));
+  function mask(mode: string): boolean[][] {
+    const sc = W.map((r, j) => r.map((v) => Math.abs(v) * (mode === 'mag' ? 1 : xn[j])));
+    if (mode === 'none') return W.map((r) => r.map(() => true));
+    if (mode === 'mag' || mode === 'wanda') return W.map((r, j) => r.map((_, k) => { const col = sc.map((rr) => rr[k]).sort((a, b) => a - b); return sc[j][k] > col[D / 2 - 1]; }));
+    if (mode === '24') return W.map((r, j) => r.map((_, k) => { const g0 = j - (j % 4), grp = [0, 1, 2, 3].map((i) => sc[g0 + i][k]).sort((a, b) => b - a); return sc[j][k] >= grp[1]; }));
+    const rs = W.map((r, j) => Math.sqrt(r.reduce((a, v) => a + v * v, 0)) * xn[j]), thr = [...rs].sort((a, b) => a - b)[D / 2 - 1];
+    return W.map((r, j) => r.map(() => rs[j] > thr));
+  }
+  function init(fig: HTMLElement) {
+    let mode = 'wanda';
+    function draw() {
+      const M = mask(mode), Wp = W.map((r, j) => r.map((v, k) => (M[j][k] ? v : 0))), Yp = mm(X, Wp);
+      const e = nrm(Y.map((r, i) => r.map((v, k) => v - Yp[i][k]))) / nrm(Y), kept = M.flat().filter(Boolean).length;
+      const mx = Math.max(...W.flat().map(Math.abs)), cs = 15;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 330 ${D * cs + 26}" style="max-width:420px"><text class="ai-al-gl" x="70" y="10">输出通道 →</text>`;
+      W.forEach((r, j) => {
+        s += `<text class="ai-al-gl" x="58" y="${16 + j * cs + 11}" text-anchor="end">${OUTS.includes(j) ? '★ ' : ''}${j}</text>`;
+        r.forEach((v, k) => { s += `<rect class="ai-pr-c${M[j][k] ? '' : ' is-cut'}" x="${62 + k * cs}" y="${16 + j * cs}" width="${cs - 1}" height="${cs - 1}" style="--o:${(0.15 + 0.85 * Math.abs(v) / mx).toFixed(2)}"/>`; });
+        if (mode === '24' && j % 4 === 3 && j < D - 1) s += `<line class="ai-fs-sep" x1="62" x2="${62 + D * cs}" y1="${16 + (j + 1) * cs - 0.5}" y2="${16 + (j + 1) * cs - 0.5}"/>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const hw: Record<string, string> = { none: '原始的稠密矩阵。', mag: '零散地剪掉一半，矩阵还是 16 × 16，普通的 GPU 矩阵乘法照样要算这些 0，几乎不会变快。', wanda: '同样零散，速度上和按 |w| 剪一样没有好处；但它保住了离群通道（★）那两行的权重，误差小得多。', '24': '每 4 个里恰好留 2 个，这种规则的稀疏，Ampere 以后的 GPU 有专门的稀疏 Tensor Core，理论上矩阵乘法快一倍。', row: '整行去掉，矩阵真的变成了 8 × 16，任何硬件都能直接变快、变省；但一次去掉整个通道，误差也更大，通常要再训练来恢复。' };
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `保留 ${kept} / ${D * D} 个权重，输出相对误差 ${(e * 100).toFixed(2)}%。<br><span class="ai-faint">${hw[mode]}颜色深浅是 |w| 的大小，灰色是被剪掉的；★ 是激活大 10 倍的输入通道。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      mode = b.dataset.v!; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pruneview]').forEach(init);
+</script>

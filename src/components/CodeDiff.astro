@@ -1,0 +1,24 @@
+---
+// 两个版本同一个文件的差别（第五章）：绿底是新增的行，红底是删掉的行，没变的行折叠成“…… 省略 n 行没变的代码”。
+// 用法：<CodeDiff a="v1/model.py" b="v2/model.py" />。b 文件在 a 版本里不存在时传 a={null}，整份当作新增。
+import fs from 'node:fs';
+import path from 'node:path';
+import { MINI, readMini, lineDiff } from './_mini';
+interface Props { a: string | null; b: string; caption?: string; context?: number }
+const { a, b, caption, context = 2 } = Astro.props;
+const left = a && fs.existsSync(path.join(MINI, a)) ? readMini(a) : '';
+const d = lineDiff(left, readMini(b));
+const keep = d.map((r, i) => r[0] !== ' ' || d.slice(Math.max(0, i - context), i + context + 1).some((x) => x[0] !== ' '));
+const rows: ({ k: string; t: string; n: number } | { gap: number })[] = [];
+let gap = 0;
+d.forEach((r, i) => { if (keep[i]) { if (gap) rows.push({ gap }); gap = 0; rows.push({ k: r[0], t: r[1], n: r[0] === '-' ? r[2] : r[3] }); } else gap++; });
+if (gap) rows.push({ gap });
+const add = d.filter((r) => r[0] === '+').length, del = d.filter((r) => r[0] === '-').length;
+---
+<figure class="ai-gt ai-cd">
+  <div class="ai-cw-head"><span class="ai-cw-file">{b}</span><span class="ai-faint">{a ? `对比 ${a}` : '新文件'}：+{add} 行 / −{del} 行</span></div>
+  <pre class="ai-cd-pre">{rows.map((r) => 'gap' in r
+    ? <span class="ai-cd-gap">…… 省略 {r.gap} 行没变的代码</span>
+    : <span class={`ai-cd-ln ${r.k === '+' ? 'is-add' : r.k === '-' ? 'is-del' : ''}`}><span class="ai-cd-n">{r.n}</span><span class="ai-cd-k">{r.k}</span>{r.t || ' '}</span>)}</pre>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>

@@ -1,0 +1,57 @@
+---
+// 推理速度与成本计算器（与第 64 讲的代码同一套公式）。
+// prefill 每秒处理的输入 token = 总算力 / 每 token 计算量 × 效率；decode 一步 = max(计算, 读写) / 效率，吞吐 = 并发 / TPOT；
+// 每百万 token 成本 = 每小时租金 / 每小时处理的 token 数 × 10⁶。prefill 和 decode 分别按“整卡都用来做这件事”计算。
+// 读者可以：换模型、改 GPU 租金和效率、调并发、提示和输出长度。显存是否放得下用第 63 讲的账本粗查。
+interface Props { title?: string; caption?: string }
+const { title = '每百万 token 要花多少钱', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cost" data-costcalc>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-mc-in">
+    <label><span>模型</span><select data-f="m"><option value="8">Llama-3-8B（1 × H100）</option><option value="70">Llama-3-70B（4 × H100）</option></select></label>
+    <label><span>每张卡租金（美元/小时）</span><input type="number" step="0.1" min="0.1" value="2.5" data-f="price" /></label>
+    <label><span>效率（实际 / 理论）</span><select data-f="eff"><option value="1">100%（理论上限）</option><option value="0.8">80%</option><option value="0.6" selected>60%</option><option value="0.4">40%</option></select></label>
+    <label><span>提示长度</span><input type="number" min="1" value="1024" data-f="p" /></label>
+    <label><span>输出长度</span><input type="number" min="1" value="1024" data-f="o" /></label>
+  </div>
+  <label class="ai-tl-lr"><span>并发请求数 = <b data-bv></b></span><input type="range" min="0" max="9" step="1" value="7" data-b /></label>
+  <div class="ai-mc-cards" data-cards></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const BS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512];
+  const M: Record<string, { N: number; Ne: number; L: number; d: number; kv: number; g: number }> = {
+    '8': { N: 8.03e9, Ne: 525e6, L: 32, d: 4096, kv: 131072, g: 1 },
+    '70': { N: 70.55e9, Ne: 1051e6, L: 80, d: 8192, kv: 327680, g: 4 },
+  };
+  function init(fig: HTMLElement) {
+    const v = (k: string) => (fig.querySelector(`[data-f="${k}"]`) as HTMLInputElement).value;
+    const bIn = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    function draw() {
+      const m = M[v('m')], price = Math.max(0.01, Number(v('price'))) * m.g, eff = Number(v('eff')), p = Math.max(1, Number(v('p'))), o = Math.max(1, Number(v('o'))), b = BS[Number(bIn.value)];
+      fig.querySelector('[data-bv]')!.textContent = String(b);
+      const F = 989e12 * m.g, BW = 3.35e12 * m.g, ctx = p + o / 2;
+      const preTps = F / (2 * (m.N - m.Ne) + 4 * m.L * m.d * p / 2) * eff;
+      const fl = (2 * (m.N - m.Ne) + 4 * m.L * m.d * ctx) * b, by = m.N * 2 + m.kv * ctx * b;
+      const tpot = Math.max(fl / F, by / BW) / eff, decTps = b / tpot;
+      const ttft = Math.max(2 * (m.N - m.Ne) * p / F, m.N * 2 / BW) / eff;
+      const cin = price / (preTps * 3600) * 1e6, cout = price / (decTps * 3600) * 1e6;
+      const room = 80e9 * 0.9 * m.g - m.N * 2 - 2e9 * m.g - 8192 * (4 * m.d + 3 * m.d * 3.5) * 2, maxReq = Math.max(0, Math.floor(room / (m.kv * (p + o))));
+      fig.querySelector<HTMLElement>('[data-cards]')!.innerHTML =
+        `<div><span>TTFT（单独 prefill）</span><b>${(ttft * 1e3).toFixed(1)} ms</b><small>prefill 每秒可处理 ${Math.round(preTps).toLocaleString()} 个输入 token</small></div>`
+        + `<div><span>TPOT</span><b>${(tpot * 1e3).toFixed(1)} ms</b><small>每个请求 ${(1 / tpot).toFixed(0)} token/s；总输出 ${Math.round(decTps).toLocaleString()} token/s</small></div>`
+        + `<div><span>每百万输入 token</span><b>$${cin.toFixed(3)}</b><small>租金 $${price.toFixed(1)}/小时 ÷ 每小时 ${(preTps * 3600 / 1e6).toFixed(0)}M 个</small></div>`
+        + `<div><span>每百万输出 token</span><b>$${cout.toFixed(3)}</b><small>÷ 每小时 ${(decTps * 3600 / 1e6).toFixed(1)}M 个</small></div>`
+        + `<div><span>一个请求</span><b>$${((p * cin + o * cout) / 1e6).toFixed(5)}</b><small>${p} 个输入 + ${o} 个输出</small></div>`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = (b > maxReq ? `<b class="c-key">注意：按第 63 讲的账本，这样的请求最多只能同时放约 ${maxReq} 个，${b} 个放不下。</b><br>` : '')
+        + `<span class="ai-faint">输出 token 比输入贵得多：prefill 时同一份权重被很多 token 共用，decode 时每一步都要把权重重读一遍。并发越高，权重的读取被分摊得越多，输出越便宜。</span>`;
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-costcalc]').forEach(init);
+</script>

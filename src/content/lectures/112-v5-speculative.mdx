@@ -1,0 +1,108 @@
+---
+id: 112
+slug: v5-speculative
+title: v5 · 投机解码
+chapter: 5
+part: 14
+problem: 一次前向验证多个 token
+prereqs: [85, 86, 109]
+level: 主线
+demos: [EngineArch, CodeWalk, CodeDiff, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineArch from '../../components/EngineArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CodeDiff from '../../components/CodeDiff.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[85, 86, 109]} />
+
+到 v4 为止，每个请求每一步 decode 只出一个 token。第 107 讲测过，decode 一个 token 要 63 ms，而 prefill 199 个 token 只要 357 ms：一次前向多算几个 token，时间涨得很少，因为大头是把权重读一遍。
+
+第 85 讲的投机解码就是利用这一点：先用一个很便宜的办法**猜**接下来的几个 token（草稿），再让模型一次前向把它们全部**验证**一遍。猜对了几个，这一步就多出几个 token；猜错了，最多只损失这一步多算的那几个位置。在贪心采样下，它生成的结果和不投机时**完全一样**。
+
+<EngineArch ver="v5" caption="图 112-1　v5 新增 spec.py（起草和验证），引擎的 step() 在 decode 请求后面接上草稿一起送进模型，模型多返回几个位置的打分。" />
+
+## 设计：草稿从哪里来
+
+第 85 讲的标准做法是用一个小模型起草。我们用一个更简单、完全不需要第二个模型的办法：**n-gram 查找**（也叫 prompt lookup decoding）。
+
+思路是：很多生成任务会大段地重复已有的内容。改写代码时，大部分代码原样抄过来；总结文档时，会引用原文的短语；多轮对话里，会重复上一轮提过的名字。所以，看看当前序列结尾的几个 token，**在前面出现过没有**；出现过，就把那次出现之后紧跟着的几个 token 当作草稿。
+
+```text
+已有的 token： … for i, v in enumerate(values):  …  total += v  …  for i, v in
+结尾 3 个：                                                       [for, i, v]
+前面出现过，后面跟着：                     [in, enumerate, (, values]          ← 草稿（k = 4）
+```
+
+先找结尾 3 个 token，找不到就退到 2 个、1 个；从近往远找，越近的上下文越可能相关。整个过程只是在列表里做比较，比一次前向便宜几个数量级。
+
+## 设计：一次前向怎么验证
+
+草稿接在最后一个真实 token 后面，一起送进模型。设最后一个真实 token 是 t，草稿是 d₁ d₂ d₃ d₄，送进去的就是 5 个 token：t d₁ d₂ d₃ d₄，位置连续。模型对这 5 个位置各给出一个“下一个 token”的贪心预测 p₀ … p₄：
+
+- p₀ 是看完 t 之后的预测。如果 p₀ = d₁，说明草稿第一个猜对了。
+- p₁ 是看完 t d₁ 之后的预测。如果前面猜对了，而且 p₁ = d₂，第二个也猜对了。
+- 依此类推，直到第一个不一致的位置。
+
+假设 d₁、d₂ 对了，d₃ 错了：这一步接受 d₁、d₂，再加上 p₂（模型在“看完 t d₁ d₂”之后真正想要的 token），一共新增 **3 个** token。全猜错也有 p₀，至少和不投机一样多出 1 个。
+
+为什么结果和不投机完全一样？因为每个被接受的 token，都是模型在“同样的前缀”下的贪心选择，和一步一步生成时选的完全相同（第 85 讲）。
+
+**KV 怎么办。**这一步把 5 个位置的 K、V 都写进了缓存。被接受的位置（t、d₁、d₂）的 K、V 是正确的；被拒绝的位置（d₃、d₄）写进去的是错的。不需要专门去删：把 `num_computed` 只推进到被接受的位置，那两格就算作“没写过”，下一步会被新的 token 覆盖。这就是投机解码的“回滚”，在分页的块里只是一个数的事。
+
+## spec.py
+
+<CodeWalk file="v5/spec.py" steps={[
+  { lines: [4, 15], title: 'propose：找草稿', body: '<p>n 从 3 退到 1：取结尾 n 个 token，从近往远在前面找一样的片段，找到就返回它后面的最多 k 个 token。都找不到就没有草稿，这一步退化成普通的 decode。</p><p>这里用的是最朴素的线性查找，每步 O(序列长度 × n)。序列很长时可以用哈希表记录每个 n-gram 最近出现的位置，做到常数时间。</p>' },
+  { lines: [18, 27], title: 'verify：接受到哪里', body: '<p><code>pred[j]</code> 是模型在第 j 个送入位置的贪心预测（第 0 个位置是最后一个真实 token）。逐个比较：草稿第 j 个等于 <code>pred[j]</code> 就接受，第一次不相等就停。最后总是再加上 <code>pred[已接受的个数]</code>：它是模型在已接受的前缀之后真正想要的 token。</p><p>所以返回值的长度在 1 到 k + 1 之间。</p>' },
+]} />
+
+## 模型和调度器的小改动
+
+模型原来每个请求只返回最后一个位置的打分，现在要返回“最后一个真实 token + 每个草稿”的位置。forward 多一个参数 `out_idx`，指定要哪些位置的打分。
+
+<CodeDiff a="v4/model.py" b="v5/model.py" caption="图 112-2　model.py 和 v4 的差别：forward 可以指定返回哪些位置的打分，默认仍是每个请求的最后一个位置。" />
+
+调度器给 decode 的请求拿块时，要多留草稿的位置；块管理器的 `append_slot` 相应地多一个参数。
+
+<CodeDiff a="v4/scheduler.py" b="v5/scheduler.py" caption="图 112-3　scheduler.py 和 v4 的差别：保证块表能放下“下一个位置 + 草稿”，token 预算也按 1 + 草稿数来算。" />
+
+## engine.py：起草、验证、回滚
+
+<CodeWalk file="v5/engine.py" from={35} to={70} steps={[
+  { lines: [41, 46], title: '给 decode 的请求起草', body: '<p>只有 decode 的请求（这一步只送 1 个 token）才起草；prefill 的请求照常。草稿不能超过这个请求还能生成的数量，否则会多生成。</p>' },
+  { lines: [47, 51], title: '要哪些位置的打分', body: '<p>这个请求送进去 1 + len(draft) 个 token，占 tokens 的 [a, a + len(new))。需要打分的是最后一个真实 token 和每个草稿，正好是最后 1 + len(draft) 个位置。prefill 的请求没有草稿，就是最后一个位置，和以前一样。</p>' },
+  { lines: [55, 57], title: '一次前向', body: '<p>所有请求、所有草稿一起算。返回的打分按 <code>out_idx</code> 的顺序排列，每个请求连续占 1 + len(draft) 行。</p>' },
+  { lines: [58, 62], title: '逐个请求验证', body: '<p>按顺序取出每个请求的那几行预测，交给 <code>verify</code>，得到这一步真正新增的 token。统计接受了多少个草稿，用来看效果。</p>' },
+  { lines: [63, 63], title: '回滚：只推进到被接受的位置', body: '<p>这一步写进缓存的有：最后一个真实 token 和全部草稿。真正有效的是最后一个真实 token 和被接受的草稿，所以 <code>num_computed</code> = 原来的 token 数 + 被接受的草稿数 = <code>len(tokens) + len(accepted) − 1</code>。</p><p>被拒绝的草稿位置不用清理：下一步会从 <code>num_computed</code> 开始写，覆盖掉它们。前缀缓存的登记也只看 <code>num_computed</code> 以内的块，不会把错的内容登记进去。</p>' },
+  { lines: [64, 70], title: '追加 token，检查是否结束', body: '<p>把新增的 token 依次接上去；中途遇到结束符或到达长度上限就停，后面的不要。最后和以前一样判断是否结束。</p>' },
+]} />
+
+## 先验证：投机不改变结果
+
+<RunOutput cmd=".venv/bin/python tests/check.py v5" file="outputs/check_v5.txt" caption="图 112-4　v5（每步最多 4 个草稿）和 HuggingFace 逐 token 一致：起草和验证只改变了“一步出几个 token”，没有改变“出哪些 token”。" />
+
+v5 默认不打开量化：我们要验证投机解码本身不改变结果，量化会带来另一种差异，混在一起就分不清了。
+
+## 测一测：抄得多，猜得准
+
+投机解码的收益完全取决于草稿猜得准不准。用两种请求对比：一种是“给一个函数加上类型标注，其余不变”，答案大部分是在抄输入的代码；另一种是自由地写一段说明。
+
+<RunOutput cmd=".venv/bin/python bench/spec.py" file="outputs/bench_spec.txt" caption="图 112-5　改写代码：128 个 token 只用了 34 步 decode，接受了 93 个草稿，平均每次前向 3.66 个 token，用时从 9.4 s 降到 6.6 s。自由生成：53 步，平均每次前向 2.37 个 token，用时从 9.2 s 降到 8.0 s。两种情况的输出都和不投机时完全一致。" />
+
+**步数大幅减少。**改写代码时，n-gram 草稿 128 个 token 里猜对了 93 个，decode 从 127 步降到 34 步。连自由生成也有 2.37 个 token 一步：这个小模型在贪心解码下很容易重复自己说过的话，n-gram 正好抓住了这一点。
+
+**时间没有按步数同比例减少。**步数降到约四分之一，时间只降到七成。原因是每一步不再只算 1 个 token，而是 5 个；在 CPU 上，多算 4 个 token 并不是免费的（不像在 GPU 上那样，decode 时算力大量闲置）。第 85 讲的加速比公式里，这对应“验证 k 个草稿的代价”这一项；CPU 上这一项比 GPU 上大得多，所以同样的接受率，CPU 上的加速比更小。
+
+**猜不准时也不亏多少。**草稿全错时，这一步仍然出 1 个 token，只是多算了几个位置。草稿在 batch 很大时会更“贵”：每个请求多出的 k 个位置都要算，batch 已经让硬件很忙时，多算的部分就不再藏在读权重的时间里了。这也是工业引擎在高负载时会自动减少、甚至关闭投机的原因。
+
+<Note kind="point">投机解码 = 便宜地起草 + 一次前向验证。n-gram 起草在已有 token 里找和结尾相同的片段，把后面的几个 token 当草稿；验证时逐个比较草稿和模型的贪心预测，接受到第一个不一致处，再加上模型自己的那个 token。被拒绝的草稿位置只要不推进 num_computed 就自动作废。贪心采样下结果和不投机完全一样。</Note>
+
+## 回顾
+
+v5 新增 spec.py：`propose` 用 n-gram 在已有 token 里找草稿，`verify` 按模型在每个位置的贪心预测决定接受到哪里。引擎在 decode 请求后面接上草稿一起送进模型，模型按 `out_idx` 返回需要的几个位置的打分；回滚只需要把 `num_computed` 推进到被接受的位置。和 HuggingFace 仍然逐 token 一致。改写代码时平均每次前向出 3.66 个 token，用时从 9.4 s 降到 6.6 s；自由生成也有 2.37 个。
+
+到这里，miniinfer 已经有了一个推理引擎的主要零件。它离 vLLM 这样的工业级引擎还差多远？时间到底花在了哪里？下一讲：**复盘 · 时间花在哪里**。

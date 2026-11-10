@@ -1,0 +1,56 @@
+---
+// SmoothQuant 的平滑缩放（缩小的例子，思路与第 82 讲的代码相同，数据用固定种子在浏览器里生成）。
+// 16 个输入通道、64 个 token，第 3、11 号通道的激活大 50 倍。s_j = max|X_j|^α / max|W_j|^(1−α)，X' = X / s，W' = s·W。
+// 上图：每个通道的 max|X'_j|；下图：权重每一行的 max|W'_j|（对数坐标）。读数给出两者的“最大值 / 中位数”和 INT8 量化后的误差
+// （激活每个 token 一个 scale，权重每个输出通道一个 scale）。读者可以：拖 α 从 0（不平滑）到 1（全部推给权重）。
+interface Props { title?: string; caption?: string }
+const { title = '把激活的“难”匀一部分给权重', caption } = Astro.props;
+---
+<figure class="ai-gt ai-sm" data-smoothview>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-tl-lr"><span>迁移强度 α = <b data-av></b></span><input type="range" min="0" max="1" step="0.05" value="0" data-a /></label>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const D = 16, T = 64, OUTS = [3, 11];
+  function gauss(seed: number) { let s = seed; const u = () => { s = (s * 1103515245 + 12345) % 2147483648; return (s + 0.5) / 2147483648; }; return () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u()); }
+  const g = gauss(11);
+  const X = Array.from({ length: T }, () => Array.from({ length: D }, (_, j) => g() * (OUTS.includes(j) ? 50 : 1)));
+  const W = Array.from({ length: D }, () => Array.from({ length: D }, () => g() * 0.05));
+  const mm = (A: number[][], B: number[][]) => A.map((r) => B[0].map((_, k) => r.reduce((a, v, j) => a + v * B[j][k], 0)));
+  const qRows = (A: number[][]) => A.map((r) => { const s = Math.max(...r.map(Math.abs)) / 127; return r.map((v) => Math.round(v / s) * s); });
+  const qCols = (A: number[][]) => { const s = A[0].map((_, k) => Math.max(...A.map((r) => Math.abs(r[k]))) / 127); return A.map((r) => r.map((v, k) => Math.round(v / s[k]) * s[k])); };
+  const nrm = (A: number[][]) => Math.sqrt(A.reduce((a, r) => a + r.reduce((b, v) => b + v * v, 0), 0));
+  const rel = (A: number[][], B: number[][]) => nrm(A.map((r, i) => r.map((v, j) => v - B[i][j]))) / nrm(A);
+  const med = (a: number[]) => { const b = [...a].sort((x, y) => x - y); return (b[7] + b[8]) / 2; };
+  const Y = mm(X, W);
+  function init(fig: HTMLElement) {
+    const aIn = fig.querySelector<HTMLInputElement>('[data-a]')!;
+    function draw() {
+      const a = Number(aIn.value); fig.querySelector('[data-av]')!.textContent = a.toFixed(2);
+      const xm = Array.from({ length: D }, (_, j) => Math.max(...X.map((r) => Math.abs(r[j])))), wm = W.map((r) => Math.max(...r.map(Math.abs)));
+      const s = xm.map((v, j) => v ** a / wm[j] ** (1 - a));
+      const Xs = X.map((r) => r.map((v, j) => v / s[j])), Ws = W.map((r, j) => r.map((v) => v * s[j]));
+      const xm2 = xm.map((v, j) => v / s[j]), wm2 = wm.map((v, j) => v * s[j]);
+      const all = [...xm2, ...wm2], lo = Math.log10(Math.min(...all)) - 0.2, hi = Math.log10(Math.max(...all)) + 0.1;
+      const H = (v: number) => ((Math.log10(v) - lo) / (hi - lo)) * 66, bw = 560 / D;
+      let svg = '<svg class="ai-tl-svg" viewBox="0 0 600 200"><text class="ai-np-ptitle" x="20" y="12">激活：每个通道的 max|x′|（对数坐标）</text><text class="ai-np-ptitle" x="20" y="108">权重：每一行的 max|w′|（对数坐标）</text>';
+      for (let j = 0; j < D; j++) {
+        const o = OUTS.includes(j) ? ' is-out' : '';
+        svg += `<rect class="ai-oq-a${o}" x="${30 + j * bw}" y="${86 - H(xm2[j])}" width="${bw - 4}" height="${H(xm2[j])}"/>`;
+        svg += `<rect class="ai-oq-c${o}" x="${30 + j * bw}" y="${182 - H(wm2[j])}" width="${bw - 4}" height="${H(wm2[j])}"/><text class="ai-al-gl" x="${30 + j * bw + bw / 2 - 2}" y="196" text-anchor="middle">${j}</text>`;
+      }
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = svg + '</svg>';
+      const Xq = qRows(Xs), Wq = qCols(Ws), norm = (A: number[][]) => A.map((r) => r.filter((_, j) => !OUTS.includes(j)));
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `激活 最大 / 中位数 = ${(Math.max(...xm2) / med(xm2)).toFixed(1)}，权重 最大 / 中位数 = ${(Math.max(...wm2) / med(wm2)).toFixed(1)}`
+        + `<br>INT8 后：普通通道的激活误差 ${(rel(norm(Xs), norm(Xq)) * 100).toFixed(2)}%，权重误差 ${(rel(Ws, Wq) * 100).toFixed(2)}%，输出误差 ${(rel(Y, mm(Xq, Wq)) * 100).toFixed(2)}%`
+        + `<br><span class="ai-faint">${a === 0 ? 'α = 0：s 只用来把权重各行拉平，激活里的两个离群通道比别的大几十倍，每个 token 的 scale 都被它们定死，普通通道只剩几个格点。' : a >= 0.95 ? 'α ≈ 1：激活被完全拉平，可离群全转到了权重的那两行上，权重又变难量化了。' : '激活的离群被压下去一部分，权重的对应行被放大一部分，两边都不太极端时，总误差最小（α 在 0.5 附近）。'}</span>`;
+    }
+    aIn.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-smoothview]').forEach(init);
+</script>

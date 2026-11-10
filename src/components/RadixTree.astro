@@ -1,0 +1,87 @@
+---
+// SGLang 的 RadixCache（逻辑与 srt/mem_cache/radix_cache.py 的 match_prefix / _split_node / _insert_helper / evict 相同，page_size = 1）：
+//   每个节点存一段 token（key）和它们的 KV 槽位（value）；匹配从根往下走，停在某个节点中间就把它劈成两段；
+//   插入时没匹配上的部分作为新的叶子挂上去；淘汰时从“没人在用的叶子”里挑最久没访问的删掉，父节点变成叶子后也可以继续删。
+// 为了对比，同时算“按块哈希、每块 4 个 token”时能命中多少（vLLM、nano-vllm、miniinfer 的做法）。
+// 读者可以：依次送入预设的请求，看树怎么长；点“淘汰一个叶子”，看 LRU 淘汰。
+interface Props { title?: string; caption?: string }
+const { title = '前缀缓存是一棵基数树', caption } = Astro.props;
+const REQS = [
+  '系统 ： 你 是 助手 。 问 ： 北京 天气 怎样',
+  '系统 ： 你 是 助手 。 问 ： 上海 天气 怎样',
+  '系统 ： 你 是 助手 。 问 ： 北京 美食 推荐',
+  '系统 ： 你 是 翻译 。 把 这 句 译 成 英文',
+  '系统 ： 你 是 助手 。 问 ： 北京 天气 怎样 ？ 答 ： 晴',
+];
+---
+<figure class="ai-gt ai-rt" data-radixtree data-reqs={JSON.stringify(REQS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-btns></div>
+  <div class="ai-rt-tree" data-tree></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type N = { key: string[]; kids: Map<string, N>; parent: N | null; t: number; id: number };
+  function init(fig: HTMLElement) {
+    const REQS: string[][] = JSON.parse(fig.dataset.reqs!).map((s: string) => s.split(' '));
+    let root: N, clock = 0, ids = 0, sent: boolean[], msg = '', hot = new Set<number>();
+    const node = (key: string[], parent: N | null): N => ({ key, kids: new Map(), parent, t: clock, id: ids++ });
+    function reset() { root = node([], null); clock = 0; sent = REQS.map(() => false); msg = '树是空的。依次送入请求。'; hot = new Set(); }
+    function split(child: N, n: number) {                       // 和 _split_node 一样：前 n 个 token 成为新的父节点
+      const p = child.parent!, nn = node(child.key.slice(0, n), p);
+      nn.t = child.t; p.kids.set(nn.key[0], nn);
+      child.key = child.key.slice(n); child.parent = nn; nn.kids.set(child.key[0], child);
+      return nn;
+    }
+    function insert(toks: string[]) {
+      clock++; hot = new Set();
+      let cur = root, k = toks, matched = 0, splitted = false;
+      while (k.length && cur.kids.has(k[0])) {
+        const c = cur.kids.get(k[0])!; let m = 0;
+        while (m < c.key.length && m < k.length && c.key[m] === k[m]) m++;
+        c.t = clock; hot.add(c.id);
+        matched += m; k = k.slice(m);
+        if (m < c.key.length) { cur = split(c, m); hot.add(cur.id); splitted = true; break; }   // 停在节点中间：劈开
+        cur = c;
+      }
+      if (k.length) { const leaf = node(k, cur); cur.kids.set(k[0], leaf); hot.add(leaf.id); }
+      const B = 4;                                               // 对比：按块哈希能命中多少（只复用整块，且不复用含最后一个 token 的块）
+      const blockHit = Math.min(Math.floor(matched / B), Math.floor((toks.length - 1) / B)) * B;
+      return { matched, splitted, blockHit, total: toks.length };
+    }
+    function leaves(n: N, out: N[] = []): N[] { if (n !== root && n.kids.size === 0) out.push(n); n.kids.forEach((c) => leaves(c, out)); return out; }
+    function evict() {
+      const ls = leaves(root); if (!ls.length) { msg = '树已经空了。'; return; }
+      const v = ls.reduce((a, b) => (a.t <= b.t ? a : b));     // 最久没访问的叶子
+      v.parent!.kids.delete(v.key[0]); hot = new Set();
+      msg = `淘汰了最久没访问的叶子「${v.key.join('')}」（${v.key.length} 个 token 的 KV 槽位还给内存池）。它的父节点如果因此没有孩子了，下次就轮到它。`;
+    }
+    function render(n: N, depth: number): string {
+      let s = '';
+      const kids = [...n.kids.values()];
+      for (const c of kids) {
+        s += `<div class="ai-rt-node${hot.has(c.id) ? ' is-hot' : ''}" style="margin-left:${depth * 22}px"><span class="ai-rt-seg">${c.key.join('')}</span><span class="ai-faint">${c.key.length} 个 token · 最近访问 t=${c.t}${c.kids.size ? '' : ' · 叶子'}</span></div>`;
+        s += render(c, depth + 1);
+      }
+      return s;
+    }
+    function draw() {
+      fig.querySelector<HTMLElement>('[data-btns]')!.innerHTML = REQS.map((r, i) => `<button data-i="${i}" ${sent[i] ? 'aria-pressed="true"' : ''}>送入请求 ${i + 1}</button>`).join('') + '<button data-ev>淘汰一个叶子</button><button data-rs>清空</button>';
+      fig.querySelector<HTMLElement>('[data-tree]')!.innerHTML = `<div class="ai-rt-node"><span class="ai-rt-seg">（根）</span></div>` + render(root, 1);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = msg;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const b = t.closest<HTMLElement>('[data-i]');
+      if (b) { const i = +b.dataset.i!; const r = insert(REQS[i]); sent[i] = true;
+        msg = `请求 ${i + 1}「${REQS[i].join('')}」共 ${r.total} 个 token：在树里匹配上 <b>${r.matched}</b> 个，只需算剩下的 ${r.total - r.matched} 个${r.splitted ? '；匹配停在一个节点中间，这个节点被劈成了两段' : ''}。<br><span class="ai-faint">换成按块哈希（每块 4 个 token）：只能命中 ${r.blockHit} 个。块越大，差得越多。</span>`; }
+      if (t.closest('[data-ev]')) evict();
+      if (t.closest('[data-rs]')) reset();
+      draw();
+    });
+    reset(); draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-radixtree]').forEach(init);
+</script>

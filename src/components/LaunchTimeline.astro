@@ -1,0 +1,75 @@
+---
+// 启动开销时间线（模型与第 79 讲的代码相同，数字是假设的量级）：decode 一步（批大小 1）里的几百个 kernel。
+// eager：CPU 每发射一个 kernel 花 LAUNCH 微秒，GPU 只能在 kernel 被发射之后开始执行；CPU 可以跑在 GPU 前面，但跑得比 GPU 慢时，GPU 就在两个 kernel 之间空等。
+// CUDA Graph：整步提前录成一张图，CPU 只发射一次（约 20 μs），之后 GPU 一个接一个地执行，中间没有空隙。
+// 读者可以：选模型、切换 eager / CUDA Graph、调 CPU 发射一个 kernel 的时间，看整步或前 2 层的 CPU、GPU 两条时间线。
+interface Props { title?: string; caption?: string }
+const { title = 'CPU 发射，GPU 执行：谁在等谁', caption } = Astro.props;
+---
+<figure class="ai-gt ai-lt" data-launchtl>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="md"><button data-v="0" aria-pressed="false">Llama-3-8B，1 张卡</button><button data-v="1" aria-pressed="true">Llama-3-8B，8 卡张量并行</button><button data-v="2" aria-pressed="false">Llama-3.2-1B，1 张卡</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="z"><button data-v="0" aria-pressed="true">看前 2 层</button><button data-v="1" aria-pressed="false">看整步</button></div>
+    <label class="ai-tl-lr"><span>CPU 发射一个 kernel = <b data-lv></b> μs</span><input type="range" min="2" max="20" step="1" value="8" data-l /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const BW = 3.35e12, SMALL = 2, GRAPH = 20;
+  const CFG: [number, number, number, number, number, number][] = [[4096, 14336, 32, 1024, 128256, 1], [4096, 14336, 32, 1024, 128256, 8], [2048, 8192, 16, 512, 128256, 1]];
+  function kernels([d, dff, L, kv, V, tp]: number[]) {
+    const ks: number[] = []; // 单位 μs
+    for (let l = 0; l < L; l++) {
+      for (const [r, c] of [[d + 2 * kv, d], [d, d], [2 * dff, d], [d, dff]]) ks.push(Math.max(SMALL, r * c * 2 / tp / BW * 1e6));
+      for (let k = 0; k < 11; k++) ks.push(SMALL);
+      if (tp > 1) ks.push(10, 10);
+    }
+    ks.push(V * d * 2 / tp / BW * 1e6);
+    return { ks, perLayer: 15 + (tp > 1 ? 2 : 0) };
+  }
+  function sim(ks: number[], graph: boolean, launch: number) {
+    let cpu = graph ? GRAPH : 0, gpu = 0; const ev: { c0: number; c1: number; g0: number; g1: number }[] = [];
+    for (const g of ks) { const c0 = cpu; if (!graph) cpu += launch; const g0 = Math.max(gpu, cpu); gpu = g0 + g; ev.push({ c0, c1: cpu, g0, g1: gpu }); }
+    return { ev, end: gpu };
+  }
+  function init(fig: HTMLElement) {
+    let md = 1, zoom = 0;
+    const lIn = fig.querySelector<HTMLInputElement>('[data-l]')!;
+    function lanes(name: string, r: ReturnType<typeof sim>, n: number, T: number, graph: boolean, y0: number) {
+      const X0 = 70, W = 520, sx = (t: number) => X0 + (t / T) * W;
+      let s = `<text class="ai-np-ptitle" x="4" y="${y0 + 10}">${name}</text><text class="ai-al-gl" x="4" y="${y0 + 30}">CPU</text><text class="ai-al-gl" x="4" y="${y0 + 52}">GPU</text>`;
+      s += `<rect class="ai-lt-bg" x="${X0}" y="${y0 + 40}" width="${W}" height="16"/>`;
+      if (graph) s += `<rect class="ai-lt-cpu" x="${X0}" y="${y0 + 18}" width="${Math.max(1, sx(GRAPH) - X0)}" height="16"/>`;
+      r.ev.slice(0, n).forEach((e, i) => {
+        if (!graph && e.c0 < T) s += `<rect class="ai-lt-cpu${i % 2 ? ' alt' : ''}" x="${sx(e.c0)}" y="${y0 + 18}" width="${Math.max(0.5, sx(Math.min(e.c1, T)) - sx(e.c0) - 0.3)}" height="16"/>`;
+        if (e.g0 < T) s += `<rect class="ai-lt-gpu${i % 2 ? ' alt' : ''}" x="${sx(e.g0)}" y="${y0 + 40}" width="${Math.max(0.5, sx(Math.min(e.g1, T)) - sx(e.g0) - 0.2)}" height="16"/>`;
+      });
+      return s;
+    }
+    function draw() {
+      const L = Number(lIn.value); fig.querySelector('[data-lv]')!.textContent = String(L);
+      const { ks, perLayer } = kernels(CFG[md]), n = zoom ? ks.length : perLayer * 2;
+      const a = sim(ks, false, L), b = sim(ks, true, L);
+      const T = zoom ? Math.max(a.end, b.end) : Math.max(a.ev[n - 1].g1, b.ev[n - 1].g1);
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 150">' + lanes('eager（逐个发射）', a, n, T, false, 0) + lanes('CUDA Graph（整步一次发射）', b, n, T, true, 72);
+      s += `<text class="ai-al-gl" x="590" y="146" text-anchor="end">0 – ${T >= 1000 ? (T / 1000).toFixed(2) + ' ms' : T.toFixed(0) + ' μs'}</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const busy = ks.reduce((x, y) => x + y, 0);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `一步 ${ks.length} 个 kernel，GPU 真正在算 ${(busy / 1000).toFixed(2)} ms；CPU 逐个发射要 ${ks.length} × ${L} μs = ${(ks.length * L / 1000).toFixed(2)} ms。`
+        + `<br>eager 一步 ${(a.end / 1000).toFixed(2)} ms（GPU 忙 ${Math.round(busy / a.end * 100)}%）；CUDA Graph 一步 ${(b.end / 1000).toFixed(2)} ms（GPU 忙 ${Math.round(busy / b.end * 100)}%）。`
+        + `<br><span class="ai-faint">${ks.length * L > busy ? 'CPU 发射得比 GPU 执行得慢：GPU 那一行出现很多空隙，一步的时间由 CPU 决定。' : 'CPU 发射得比 GPU 执行得快：CPU 一路跑在前面，GPU 没有空隙，启动开销被藏住了。'}</span>`;
+    }
+    lIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      if (g.dataset.group === 'md') md = Number(bt.dataset.v); else zoom = Number(bt.dataset.v); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-launchtl]').forEach(init);
+</script>

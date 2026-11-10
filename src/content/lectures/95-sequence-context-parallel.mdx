@@ -1,0 +1,142 @@
+---
+id: 95
+slug: sequence-context-parallel
+title: 序列并行与上下文并行
+chapter: 4
+part: 12
+problem: 超长序列怎么拆
+prereqs: [42, 75, 76, 89, 93]
+level: 选读
+minutes: 30
+demos: [RingAttnView]
+video: ""
+formula: '上下文并行：序列切成 $P$ 段，各卡存自己那段的 $Q$、$K$、$V$；$K$、$V$ 沿环传 $P$ 步，每步用在线 softmax 累加。因果掩码下要之字形切分才能负载均衡'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import RingAttnView from '../../components/RingAttnView.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[42, 75, 76, 89, 93]} />
+
+前两讲切的都是模型：张量并行切矩阵，流水并行切层。可是还有一种情况，模型本身不大，**序列**却很长。第 42 讲讲过，今天的模型支持几十万甚至上百万 token 的上下文。Llama-3-8B 一个 100 万 token 的请求，光 KV Cache 就有 **122 GiB**，一张卡根本放不下；prefill 的注意力计算量随长度平方增长，一张卡要算很久。
+
+这一讲讲沿着序列切开的两种做法：训练里配合张量并行的**序列并行**，以及把一条长序列分到多张卡上算注意力的**上下文并行**。
+
+## 序列并行：张量并行里没切开的那部分
+
+先说一个容易被忽略的问题。第 93 讲的张量并行切开了注意力和 FFN 的计算，但每一层里还有 RMSNorm、残差相加这些部分没有切：每张卡都对**完整的**激活做同样的计算，存同样的一份。训练时这些激活要留到反向用，t 张卡就存了 t 份一模一样的东西。
+
+2022 年 Megatron 的**序列并行**（sequence parallelism，SP）把这部分沿序列切开：每张卡只对 1/t 的 token 做 RMSNorm 和残差。进入注意力或 FFN 之前，用 **All-Gather** 把完整的序列拼回来；算完之后，原本的 All-Reduce 换成 **Reduce-Scatter**，求和的同时就按序列切开。
+
+第 89 讲说过，All-Reduce = Reduce-Scatter + All-Gather，所以通信总量**一点没变**，只是拆成两半放在了不同的位置，而这部分激活的显存降到了 1/t。这几乎是免费的优化，训练里和张量并行一起默认开启。
+
+## 上下文并行：一条序列分给几张卡
+
+序列并行只处理了逐 token 的部分，注意力本身还是要看完整的序列。当一条序列长到一组张量并行都放不下时，就要把**注意力也沿序列切开**，这叫**上下文并行**（context parallelism，CP）。
+
+把序列切成 P 段，卡 i 存第 i 段 token 的 Q、K、V。难点在于，第 i 段的查询要和**所有**段的键做注意力，而别的段的 K、V 在别的卡上。
+
+**Ring Attention**（2023 年）的做法是让 K、V 在卡之间沿环转一圈：
+
+1. 第 1 步，每张卡用自己的 Q 和自己的 K、V 算一块注意力；同时把自己的 K、V 发给下一张卡。
+2. 第 2 步，每张卡收到了上一张卡的 K、V，用自己的 Q 和它算一块；再把它传下去。
+3. 如此 P 步，每张卡的 Q 见过了所有段的 K、V。
+
+每一步只算出注意力的一部分，怎么合并？就是第 75 讲的**在线 softmax**：每张卡为自己的查询维护最大值 m、指数和 l、加权和 acc，每来一块就更新一次，最后输出 acc / l，和一次算完完全相同。代码用 4 张卡、32 个 token 验证了这一点，带不带因果掩码都对。
+
+传 K、V 的同时可以计算当前这一块，只要每块的计算时间比传输时间长，通信就被完全藏住了。序列越长，每块的计算量（随长度平方增长）相对传输量（线性增长）越大，越容易藏住。
+
+## 因果掩码带来的不均衡
+
+加上因果掩码（第 27 讲）以后出现了一个问题：每个 token 只看它前面的 token。如果按顺序切，卡 0 拿最前面的 8 个 token，它们前面几乎没有别的 token，大部分块都被掩码挡掉了，计算量很少；卡 3 拿最后 8 个 token，要看前面所有的 token，计算量最大。代码数出来的各卡计算量是 **36、100、164、228**，最忙的卡是最闲的六倍多。所有卡都要等最慢的那张，效率很低。
+
+解决办法是**之字形切分**（zigzag）：把序列切成 2P 段，卡 i 拿第 i 段和倒数第 i 段。每张卡都分到一段靠前的（活少）和一段靠后的（活多），忙闲搭配。代码里，之字形切分后各卡的计算量都是 **132**，完全均衡，结果也不变。
+
+下面的演示画出了 4 张卡在 4 步中各自算哪一块。行是查询，列是键，颜色表示归哪张卡，深色是这一步正在算的块。
+
+<RingAttnView caption="图 95-1　Ring Attention。每一步各卡用自己的 Q 和手里的 K、V 算一块，同时把 K、V 传给下一张卡，4 步后都看过了全部的键。加上因果掩码时，按顺序切会让后面的卡最忙；之字形切分让各卡的计算量相同。" />
+
+<Note kind="point">序列并行把张量并行中没切开的逐 token 运算（RMSNorm、残差）沿序列切开，All-Reduce 换成 Reduce-Scatter + All-Gather，通信不变、激活显存降为 1/t。上下文并行把注意力也沿序列切开：Ring Attention 让 K、V 沿环传 P 步，每步用在线 softmax 累加，传输和计算重叠；因果掩码下要用之字形切分来平衡负载。</Note>
+
+## 另一种思路：按头换着切
+
+DeepSpeed 的 **Ulysses** 用了不同的办法：注意力之前，用一次 **All-to-All**（第 89 讲）把“每张卡有一段序列的所有头”换成“每张卡有完整序列的一部分头”；这样每张卡就能对自己那几个头做完整的注意力（可以直接用 FlashAttention）；算完再用一次 All-to-All 换回来。它的通信量和头数有关，并行度不能超过头数（GQA 的 KV 头更少）；Ring Attention 没有这个限制。实际系统常把两者组合使用。
+
+## 到了大模型里
+
+**训练长上下文模型离不开它。**训练 128K 甚至 1M 的上下文时，激活和注意力的计算都太大，Megatron、DeepSpeed 等框架都提供上下文并行（或 Ulysses），和张量、流水、数据并行组合起来用。
+
+**推理的长上下文 prefill。**一个几十万 token 的 prefill，在一组卡上要算好几秒甚至更久。上下文并行能把它分到更多的卡上，缩短 TTFT。推理引擎正在陆续支持这种方式。
+
+**decode 时 KV Cache 也可以按序列切。**100 万 token 的 KV 有 122 GiB，按序列分到 8 张卡上，每张 15 GiB。decode 时，每张卡用新 token 的 q 和自己那段 KV 算出部分的 (m, l, acc)，再在卡之间合并，这和第 76 讲的 Flash-Decoding 是同一个思路，只是从一张卡里的多个 SM 扩展到了多张卡。
+
+**通信量不小。**按顺序传 K、V，每张卡每层每步要传自己那段的 K、V：100 万 token 分 8 卡、Llama-3-8B，每层约 488 MiB。所以上下文并行通常放在 NVLink 这样的快速连接上，并依赖计算和传输的重叠。
+
+## 用代码复现
+
+下面的代码实现了 Ring Attention：4 张卡、32 个 token，K、V 沿环传 4 步，用在线 softmax 累加，分别验证不带掩码和带因果掩码时与完整注意力的结果一致；比较按顺序切和之字形切的各卡计算量；最后算 100 万 token 的 KV Cache 和每层要传的数据量。
+
+```python
+import numpy as np
+rng = np.random.default_rng(0)
+
+# 1. Ring Attention：序列切成 P 段，卡 i 存第 i 段的 Q、K、V。K、V 沿环传 P 步，每步用在线 softmax（第 75 讲）累加
+P, n, d = 4, 32, 8
+Q, K, V = rng.standard_normal((3, n, d))
+def full_attn(causal):
+    s = Q @ K.T / np.sqrt(d)
+    if causal: s = np.where(np.tril(np.ones((n, n))) > 0, s, -np.inf)
+    e = np.exp(s - s.max(1, keepdims=True)); return e / e.sum(1, keepdims=True) @ V
+
+def ring_attn(causal, chunks):
+    """chunks[i] = 卡 i 负责的 token 下标。第 t 步，卡 i 拿到的是卡 (i − t) 的 K、V"""
+    out = np.zeros_like(Q); work = [0] * P
+    for i in range(P):
+        qi = chunks[i]; m = np.full(len(qi), -np.inf); l = np.zeros(len(qi)); acc = np.zeros((len(qi), d))
+        for t in range(P):
+            kj = chunks[(i - t) % P]
+            s = Q[qi] @ K[kj].T / np.sqrt(d)
+            if causal: s = np.where(qi[:, None] >= kj[None, :], s, -np.inf)
+            work[i] += int(np.isfinite(s).sum())                         # 这一块里真正要算的打分个数
+            if not np.isfinite(s).any(): continue
+            m_new = np.maximum(m, s.max(1)); sc = np.exp(m - m_new); e = np.exp(s - m_new[:, None])
+            l = l * sc + e.sum(1); acc = acc * sc[:, None] + e @ V[kj]; m = m_new
+        out[qi] = acc / l[:, None]
+    return out, work
+
+contig = np.split(np.arange(n), P)                                     # 按顺序切：卡 0 拿最前面的 8 个 token
+half = np.split(np.arange(n), 2 * P)
+zigzag = [np.concatenate([half[i], half[2 * P - 1 - i]]) for i in range(P)]   # 之字形：卡 i 拿第 i 段和倒数第 i 段
+o, _ = ring_attn(False, contig); print("Ring Attention（不带掩码）= 完整注意力：", np.allclose(o, full_attn(False)))
+o, w1 = ring_attn(True, contig); print("Ring Attention（因果掩码）= 完整注意力：", np.allclose(o, full_attn(True)), "；按顺序切，各卡的计算量：", w1)
+o, w2 = ring_attn(True, zigzag); print("之字形切分，结果一样：", np.allclose(o, full_attn(True)), "；各卡的计算量：", w2)
+
+# 2. 为什么要切序列：Llama-3-8B 一个 100 万 token 的请求
+kv = 1_000_000 * 131072
+print(f"100 万 token 的 KV Cache：{kv / 2**30:.0f} GiB；上下文并行 8 卡，每卡 {kv / 8 / 2**30:.0f} GiB")
+print(f"每卡每步要传给下一张卡的 K、V（每层）：{1_000_000 / 8 * 2 * 8 * 128 * 2 / 2**20:.0f} MiB")
+```
+
+输出：
+
+```text
+Ring Attention（不带掩码）= 完整注意力： True
+Ring Attention（因果掩码）= 完整注意力： True ；按顺序切，各卡的计算量： [36, 100, 164, 228]
+之字形切分，结果一样： True ；各卡的计算量： [132, 132, 132, 132]
+100 万 token 的 KV Cache：122 GiB；上下文并行 8 卡，每卡 15 GiB
+每卡每步要传给下一张卡的 K、V（每层）：488 MiB
+```
+
+前三行是验证和计算量：两种切法的结果都正确，按顺序切的计算量是 36、100、164、228，之字形切是四个 132。最后两行是 100 万 token 的规模：KV 122 GiB，8 卡各 15 GiB，每层每步传 488 MiB。
+
+## 容易混淆的地方
+
+1. **“序列并行”这个词有好几种用法。**Megatron 的序列并行专指张量并行里切逐 token 运算的那个优化；也有人把上下文并行、Ulysses 都叫序列并行。读文档时要看它具体切了什么。
+2. **上下文并行不改变注意力的结果。**它和 FlashAttention 一样，靠在线 softmax 精确合并，不是近似。
+3. **之字形切分只在因果掩码下需要。**双向注意力（比如编码器）每个查询都看所有的键，按顺序切就已经均衡了。
+
+## 回顾
+
+序列很长时，激活和 KV Cache 一张卡放不下，注意力的计算量也随长度平方增长。Megatron 的序列并行把张量并行里没切开的 RMSNorm、残差沿序列切开，All-Reduce 换成 Reduce-Scatter + All-Gather，通信不变、激活显存降到 1/t。上下文并行把注意力也沿序列切开：Ring Attention 让 K、V 沿环传 P 步，每步用在线 softmax 累加，结果和完整注意力相同；因果掩码下，按顺序切的计算量是 36、100、164、228，之字形切分后均为 132。Ulysses 用 All-to-All 在“按序列切”和“按头切”之间切换。
+
+到这里，稠密模型能切的维度都切过了：数据、矩阵、层、序列。MoE 模型还多了一个维度：专家。DeepSeek-V3 有 256 个路由专家，每个 token 只去其中 8 个。专家怎么分到各张卡上，token 又怎么找到自己的专家？下一讲：**专家并行与 All-to-All**。

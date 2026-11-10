@@ -1,0 +1,51 @@
+---
+// SFT 演示。
+// 上：一段对话套上对话模板后的样子（Llama-3 风格的特殊标记，示意），每一块标出“算不算损失”：只有助手的回答算。
+// 下：在 ToyLM 上做的一次最小 SFT（tinylm.json examples["47"]），几个前缀在微调前后对下一个词的概率。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { title?: string; caption?: string }
+const { title = '对话模板，以及只对回答算损失', caption } = Astro.props;
+const ex = tiny.examples['47'];
+const TPL: [string, 0 | 1, string][] = [
+  ['<|begin_of_text|>', 0, '一段文本的开头'],
+  ['<|start_header_id|>system<|end_header_id|>', 0, '角色标记：系统'],
+  ['你是一个乐于助人的助手。', 0, '系统提示'],
+  ['<|eot_id|>', 0, '这一轮结束'],
+  ['<|start_header_id|>user<|end_header_id|>', 0, '角色标记：用户'],
+  ['用一句话解释什么是梯度下降。', 0, '用户的问题'],
+  ['<|eot_id|>', 0, '这一轮结束'],
+  ['<|start_header_id|>assistant<|end_header_id|>', 0, '角色标记：助手（从这里开始由模型生成）'],
+  ['沿着损失下降最快的方向，一小步一小步地调整参数。', 1, '助手的回答：算损失'],
+  ['<|eot_id|>', 1, '回答结束：也算损失，模型要学会在这里停下'],
+];
+---
+<figure class="ai-gt ai-sft" data-sft data-cfg={JSON.stringify(ex)}>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-al-chk"><input type="checkbox" data-mask checked />只对助手的回答算损失</label>
+  <div class="ai-sft-tpl">
+    {TPL.map(([t, m, n]) => <span class={`ai-sft-tok${m ? ' is-ans' : ''}`} data-m={m} title={n}>{t}<small>{n}</small></span>)}
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  <div class="ai-mlp-pt" style="margin-top:12px">ToyLM 微调前后：提示“你 学”，回答“AI 。”，只训练输出层</div>
+  <table class="ai-vp-tbl" data-tbl></table>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const C = JSON.parse(fig.dataset.cfg!), V: string[] = C.vocab;
+    const mask = fig.querySelector<HTMLInputElement>('[data-mask]')!;
+    const top = (p: number[]) => p.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, 2).map(([v, i]) => `${V[i]} ${v.toFixed(2)}`).join('，');
+    function draw() {
+      fig.querySelectorAll<HTMLElement>('.ai-sft-tok').forEach((el) => el.classList.toggle('is-loss', !mask.checked || el.dataset.m === '1'));
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = mask.checked
+        ? '绿色的部分算损失：模型只学“看到这样的提示，该怎么回答”。系统提示和用户的问题是给定的输入，不需要模型学着去生成它们。'
+        : '不加遮挡时，整段都算损失：模型也会学着生成用户的问题和系统提示，这既浪费训练，也可能让它学会“替用户说话”。';
+      fig.querySelector<HTMLElement>('[data-tbl]')!.innerHTML = `<thead><tr><th>前缀</th><th>微调前（最可能的两个）</th><th>微调后</th></tr></thead><tbody>`
+        + C.ctx.map((c: string[], i: number) => `<tr><td>${c.join(' ')}</td><td>${top(C.before[i])}</td><td><b>${top(C.after[i])}</b></td></tr>`).join('') + '</tbody>';
+    }
+    mask.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-sft]').forEach(init);
+</script>

@@ -1,0 +1,103 @@
+---
+// nano-vllm 的架构图（第 15 篇共用，对应提交 bb823b3）：引擎（CPU 侧）、执行器、模型（GPU 侧）三大块，加上 KV Cache 和张量并行的工作进程。
+// 视图：all 全部；cpu 第 114 讲讲的调度一侧；gpu 第 115 讲讲的执行一侧；spec 第 116 讲移植投机解码改动的模块。当前视图的模块用强调色。
+// 读者可以：切换视图；点模块看它在哪个文件、做什么，以及在 miniinfer 里对应什么。
+// 用法：<NanoArch view="cpu" />
+interface Props { view?: 'all' | 'cpu' | 'gpu' | 'spec'; title?: string; caption?: string }
+const { view = 'all', title = 'nano-vllm 的架构', caption } = Astro.props;
+const VIEWS: [string, string][] = [['all', '全部'], ['cpu', '调度一侧（114）'], ['gpu', '执行一侧（115）'], ['spec', '投机解码的改动（116）']];
+---
+<figure class="ai-gt ai-ea" data-nanoarch data-view={view}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="v"><span class="ai-tl-k">视图：</span>{VIEWS.map(([v, l]) => <button data-v={v} aria-pressed={view === v ? 'true' : 'false'}>{l}</button>)}</div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type M = { id: string; x: number; y: number; w: number; h: number; label: string; tags: string[]; group?: boolean; file: string; info: string; mini: string };
+  const MODS: M[] = [
+    { id: 'engine', x: 10, y: 10, w: 280, h: 300, group: true, tags: ['cpu', 'spec'], label: 'LLMEngine · llm_engine.py', file: 'engine/llm_engine.py',
+      info: '引擎：在主进程里。generate() 把请求放进调度器，然后反复调用 step()：问调度器这一步跑谁 → 交给执行器跑模型、采样 → 把新 token 交回调度器更新状态。', mini: 'engine.py 的 LLM 类' },
+    { id: 'step', x: 26, y: 40, w: 248, h: 36, tags: ['cpu'], label: 'generate() → add_request / step()', file: 'engine/llm_engine.py',
+      info: 'step() 只有 7 行：schedule() → model_runner.call("run") → postprocess()。和 miniinfer 不同，拼 batch 的工作不在这里，而在执行器里。', mini: 'engine.step()（但 miniinfer 在这里拼 batch）' },
+    { id: 'tok', x: 26, y: 86, w: 116, h: 36, tags: ['cpu'], label: '分词器（HF）', file: 'engine/llm_engine.py',
+      info: '直接用 transformers 的 AutoTokenizer。提示可以是文本，也可以是 token 编号的列表。', mini: 'tokenizers 库的 Tokenizer' },
+    { id: 'sp', x: 158, y: 86, w: 116, h: 36, tags: ['cpu'], label: 'SamplingParams', file: 'sampling_params.py',
+      info: '每个请求的温度、最多生成几个 token、是否忽略结束符。不允许温度为 0（不支持纯贪心）。', mini: 'max_new_tokens 参数' },
+    { id: 'sched', x: 26, y: 134, w: 248, h: 56, tags: ['cpu', 'spec'], label: 'Scheduler：先 prefill，没有才 decode', file: 'engine/scheduler.py',
+      info: '调度器：等待、运行两个队列。一步要么全是 prefill（可以分块），要么全是 decode，不混在一起；decode 时块不够就抢占运行队列末尾的请求。第 116 讲在这里起草、验证和回滚。', mini: 'scheduler.py（miniinfer 一步里 decode 和 prefill 混着跑）' },
+    { id: 'seq', x: 26, y: 200, w: 116, h: 48, tags: ['cpu', 'spec'], label: 'Sequence', file: 'engine/sequence.py',
+      info: '一个请求的状态：token_ids、num_cached_tokens（KV 已在缓存里的位置数）、num_scheduled_tokens（这一步要算几个）、块表。跨进程传递时只发必要的字段。第 116 讲加了 draft。', mini: 'sequence.py（num_computed 对应 num_cached_tokens）' },
+    { id: 'bm', x: 158, y: 200, w: 116, h: 48, tags: ['cpu', 'spec'], label: 'BlockManager', file: 'engine/block_manager.py',
+      info: '块管理器：空闲块队列、引用计数、前缀缓存（xxhash 链式哈希，命中后再比一遍 token）。每块 256 个位置。第 116 讲加了“一次要多个位置”和回滚后退块。', mini: 'block_manager.py 的 BlockManager（每块 16 个位置）' },
+    { id: 'spec', x: 26, y: 258, w: 248, h: 36, tags: ['spec'], label: 'spec.py：起草、验证（116 讲新增）', file: 'engine/spec.py（第 116 讲新增）',
+      info: '第 116 讲加入：n-gram 起草和验证，和 miniinfer v5 的 spec.py 相同。原版 nano-vllm 没有投机解码。', mini: 'spec.py' },
+    { id: 'runner', x: 305, y: 10, w: 250, h: 300, group: true, tags: ['gpu', 'spec'], label: 'ModelRunner · model_runner.py', file: 'engine/model_runner.py',
+      info: '执行器：每张卡一个。rank 0 在主进程里，其余在各自的进程里。负责分配 KV Cache、拼输入张量、跑模型（或重放 CUDA Graph）、采样。', mini: 'engine.step() 里拼 batch 的部分' },
+    { id: 'prep', x: 321, y: 40, w: 218, h: 44, tags: ['gpu', 'spec'], label: 'prepare_prefill / prepare_decode', file: 'engine/model_runner.py',
+      info: '把这一步的请求拼成一维的 input_ids、positions，算出 cu_seqlens（每个请求占哪一段）、slot_mapping（每个新 token 的 K、V 写到块池的哪个槽位）、块表。第 116 讲加了 prepare_verify。', mini: 'step() 里的 tokens、pos、segs' },
+    { id: 'ctx', x: 321, y: 94, w: 218, h: 36, tags: ['gpu', 'spec'], label: 'Context：全局的注意力元数据', file: 'utils/context.py',
+      info: '一个全局变量，存这一步的 cu_seqlens、slot_mapping、块表等。模型的 forward 只收 token 和位置，注意力层自己来这里取元数据，模型代码就不用一层层传参数。', mini: 'model.forward 的 segs 参数' },
+    { id: 'graph', x: 321, y: 140, w: 218, h: 40, tags: ['gpu'], label: 'CUDA Graph：decode 按 batch 分档', file: 'engine/model_runner.py',
+      info: '启动时为 batch 大小 1、2、4、8、16、32…512 各录一张 decode 的图；运行时把输入复制进固定的缓冲区，挑不小于实际 batch 的那一档重放。prefill 不用图。', mini: '没有（CPU 上没有发射开销的问题）' },
+    { id: 'sampler', x: 321, y: 190, w: 218, h: 36, tags: ['gpu'], label: 'Sampler：温度采样', file: 'layers/sampler.py',
+      info: '概率除以一个指数分布的随机数，取最大值：这等价于按概率抽样，而且整个 batch 一次在 GPU 上完成。', mini: 'argmax（只有贪心）' },
+    { id: 'kvalloc', x: 321, y: 236, w: 218, h: 40, tags: ['gpu'], label: '预热 → 按剩余显存分 KV', file: 'engine/model_runner.py',
+      info: '先用最大的 batch 跑一次 prefill，量出激活的峰值显存；剩下的显存（乘 gpu_memory_utilization）全部按块切给 KV Cache。', mini: 'num_blocks 参数，手动指定' },
+    { id: 'model', x: 570, y: 10, w: 320, h: 300, group: true, tags: ['gpu'], label: 'Qwen3ForCausalLM · models/qwen3.py', file: 'models/qwen3.py + layers/*.py',
+      info: '模型：用 nn.Module 搭起来，线性层都换成了支持张量并行的版本；q/k/v 合成一个矩阵，gate/up 合成一个矩阵，各少一次矩阵乘的发射。', mini: 'model.py（只用基本的 torch 运算）' },
+    { id: 'emb', x: 586, y: 40, w: 288, h: 30, tags: ['gpu'], label: 'VocabParallelEmbedding', file: 'layers/embed_head.py',
+      info: '嵌入表按词表切到各张卡上；每张卡只查自己那段词表里的 token，其余位置填 0，再 All-Reduce 相加。', mini: 'w["model.embed_tokens.weight"][tokens]' },
+    { id: 'qkv', x: 586, y: 84, w: 140, h: 30, tags: ['gpu'], label: 'QKVParallelLinear', file: 'layers/linear.py',
+      info: 'q、k、v 三个投影合成一个 [(16+8+8)×128, 1024] 的矩阵，按头切到各张卡上（列并行），一次矩阵乘算出三样。', mini: '三次 x @ W.T' },
+    { id: 'rope', x: 734, y: 84, w: 140, h: 30, tags: ['gpu'], label: 'q/k RMSNorm + RoPE', file: 'layers/layernorm.py、rotary_embedding.py',
+      info: 'Qwen3 对每个头的 q、k 先做 RMSNorm，再旋转位置编码。cos、sin 预先算好一张表，按位置查。用 torch.compile 把逐元素运算融合。', mini: 'rms_norm()、rope()' },
+    { id: 'attn', x: 586, y: 122, w: 288, h: 44, tags: ['gpu'], label: 'Attention：写 KV（Triton）+ flash_attn', file: 'layers/attention.py',
+      info: '先用一个 Triton kernel 按 slot_mapping 把这一步的 K、V 写进块池；prefill 调 flash_attn_varlen_func，decode 调 flash_attn_with_kvcache，两者都直接按块表读 KV。', mini: 'SeqKV.write / read + 逐请求的 attend()' },
+    { id: 'oproj', x: 586, y: 174, w: 140, h: 30, tags: ['gpu'], label: 'RowParallel o_proj', file: 'layers/linear.py',
+      info: 'o 投影按输入维切（行并行），各卡算出部分和，All-Reduce 相加。注意力这半层只有这一次通信。', mini: 'x @ W_o.T' },
+    { id: 'mlp', x: 734, y: 174, w: 140, h: 30, tags: ['gpu'], label: 'gate_up → SiLU·up → down', file: 'models/qwen3.py、layers/activation.py',
+      info: 'gate、up 合成一个列并行的矩阵；SiLU(gate)·up 用 torch.compile 融合成一个 kernel；down 是行并行，再一次 All-Reduce。', mini: 'swiglu()' },
+    { id: 'norm', x: 586, y: 212, w: 288, h: 30, tags: ['gpu'], label: 'RMSNorm（残差相加融合进来）', file: 'layers/layernorm.py',
+      info: '“残差相加 + RMSNorm”合成一个函数：返回归一化的结果和新的残差，少读写一遍激活。', mini: 'x = x + h; rms_norm(x)' },
+    { id: 'head', x: 586, y: 262, w: 288, h: 30, tags: ['gpu', 'spec'], label: 'ParallelLMHead：只算最后一个位置', file: 'layers/embed_head.py',
+      info: 'prefill 时只取每个请求最后一个位置的向量算打分；各卡算自己那段词表，gather 到 rank 0 拼起来。第 116 讲：验证草稿时每个位置都要算。', mini: '输出层，只取每个请求的最后一个位置' },
+    { id: 'workers', x: 10, y: 330, w: 280, h: 44, tags: ['gpu'], label: 'rank 1…N−1：共享内存收命令', file: 'engine/model_runner.py',
+      info: '张量并行时，其余每张卡一个进程，各有一份 ModelRunner。rank 0 把“方法名 + 参数”序列化写进 1 MiB 的共享内存，用事件通知它们，大家一起执行同一个方法。', mini: '没有（单卡）' },
+    { id: 'loader', x: 10, y: 384, w: 280, h: 36, tags: ['gpu'], label: 'loader.py：按 weight_loader 装权重', file: 'utils/loader.py',
+      info: '逐个读 safetensors 里的张量，交给对应参数的 weight_loader：它知道这个参数是合并的哪一份（q、k、v 或 gate、up），又该取哪张卡的那一片。', mini: 'weights.py' },
+    { id: 'kv', x: 305, y: 330, w: 585, h: 44, tags: ['gpu'], label: 'KV Cache：一个张量 [2, 28, 块数, 256, KV 头数, 128]，每层的 Attention 拿到自己那一片', file: 'engine/model_runner.py',
+      info: '整个块池是一个大张量，K、V 各一半、每层一片。分配时给每个 Attention 模块挂上 k_cache、v_cache 两个视图，之后写 KV、读 KV 都直接对着它们。', mini: 'KVPool' },
+  ];
+  const EDGES: [number, number, number, number][] = [
+    [150, 76, 150, 134], [274, 160, 321, 62], [539, 112, 586, 144], [586, 277, 539, 208], [430, 276, 430, 330], [730, 310, 730, 330], [305, 290, 290, 340],
+  ];
+  function init(fig: HTMLElement) {
+    let view = fig.dataset.view || 'all', pick = 'engine';
+    function draw() {
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 900 430"><defs><marker id="na-ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="ai-ea-arh"/></marker></defs>';
+      for (const [x1, y1, x2, y2] of EDGES) s += `<line class="ai-ea-edge" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" marker-end="url(#na-ar)"/>`;
+      for (const m of MODS) {
+        if (m.id === 'spec' && view !== 'spec') { s += `<g class="ai-ea-m is-future" data-m="spec"><rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="6"/><text x="${m.x + m.w / 2}" y="${m.y + m.h / 2 + 4}" text-anchor="middle">第 116 讲加入</text></g>`; continue; }
+        const on = view !== 'all' && m.tags.includes(view);
+        const cls = `ai-ea-m${m.group ? ' is-group' : ''}${on ? ' is-new' : ''}${pick === m.id ? ' is-pick' : ''}`;
+        const ty = m.group ? m.y + 18 : m.y + m.h / 2 + 4, tx = m.group ? m.x + 12 : m.x + m.w / 2, anchor = m.group ? 'start' : 'middle';
+        s += `<g class="${cls}" data-m="${m.id}"><rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="6"/><text x="${tx}" y="${ty}" text-anchor="${anchor}">${m.label}</text></g>`;
+      }
+      s += `<text class="ai-al-gl" x="730" y="256" text-anchor="middle">× 28 层，各带残差</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const m = MODS.find((x) => x.id === pick)!;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${m.label.split('：')[0]}</b>（<code>${m.file}</code>）：${m.info}<br><span class="ai-faint">miniinfer 里对应：${m.mini}。点模块看说明。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bt = t.closest<HTMLElement>('[data-group] [data-v]');
+      if (bt) { bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false')); view = bt.dataset.v!; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-m]'); if (g) { pick = g.dataset.m!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-nanoarch]').forEach(init);
+</script>

@@ -1,0 +1,54 @@
+---
+// 前缀缓存命中模拟（一个字当一个 token，每块 4 个 token，与第 68 讲的代码规则相同）。
+// 每块的“指纹” = 哈希(前一块的指纹 + 这一块的内容)；只缓存装满的块；新请求从头逐块查，遇到第一个没命中的块就停。
+// 4 个请求依次到达，算完的块留在缓存里。绿色 = 命中（不用 prefill），琥珀色 = 要算，灰色 = 最后没装满的块（不缓存）。
+// 读者可以：改系统提示（任何一个字），看所有请求的命中怎么变。
+interface Props { title?: string; caption?: string }
+const { title = '前缀缓存：哪些块可以直接复用', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ph" data-prefixhit>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-bpe-lab">系统提示（可以改）<input data-sys value="你是一个乐于助人的助手，请用简洁的中文回答。" /></label>
+  <div data-reqs></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const B = 4;
+  const fnv = (s: string) => { let h = 0x811c9dc5; for (const ch of s) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16); };
+  function init(fig: HTMLElement) {
+    const sysIn = fig.querySelector<HTMLInputElement>('[data-sys]')!;
+    function draw() {
+      const sys = sysIn.value;
+      const reqs: [string, string][] = [
+        ['请求 1', sys + '问：什么是注意力？'],
+        ['请求 2', sys + '问：什么是残差连接？'],
+        ['请求 3（多轮对话的第 2 轮）', sys + '问：什么是注意力？答：每个词按相关程度收集其他词的信息。问：那多头注意力呢？'],
+        ['请求 4（系统提示第一个字不同）', (sys.length ? '您' + Array.from(sys).slice(1).join('') : '') + '问：什么是注意力？'],
+      ];
+      const cache = new Set<string>();
+      let totalTok = 0, totalHit = 0, h = '';
+      for (const [name, text] of reqs) {
+        const chars = Array.from(text), nb = Math.floor(chars.length / B);
+        let parent = '', hit = 0, stop = false;
+        const hs: string[] = [];
+        for (let i = 0; i < nb; i++) { parent = fnv(parent + '|' + chars.slice(i * B, (i + 1) * B).join('')); hs.push(parent); if (!stop && cache.has(parent)) hit++; else stop = true; }
+        hs.forEach((x) => cache.add(x));
+        totalTok += chars.length; totalHit += hit * B;
+        let row = '';
+        for (let i = 0; i * B < chars.length; i++) {
+          const cls = i >= nb ? 'is-tail' : i < hit ? 'is-hit' : 'is-miss';
+          row += `<span class="ai-ph-blk ${cls}">${chars.slice(i * B, (i + 1) * B).join('').replace(/</g, '&lt;')}</span>`;
+        }
+        h += `<div class="ai-ph-req"><div class="ai-mlp-pt">${name}：${chars.length} 个 token，命中 ${hit} 块，要算 ${chars.length - hit * B} 个</div><div class="ai-ph-row">${row}</div></div>`;
+      }
+      fig.querySelector<HTMLElement>('[data-reqs]')!.innerHTML = h;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `4 个请求一共 ${totalTok} 个 token，${totalHit} 个命中缓存，命中率 ${Math.round(totalHit / totalTok * 100)}%。`
+        + '<br><span class="ai-faint">每块的指纹包含了它前面的全部内容，所以只要前面有一个字不同，从那一块开始往后全都不会命中（请求 4）。最后没装满的块不缓存，所以命中总是以整块为单位。</span>';
+    }
+    sysIn.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-prefixhit]').forEach(init);
+</script>

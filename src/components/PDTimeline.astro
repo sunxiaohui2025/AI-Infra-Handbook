@@ -1,0 +1,56 @@
+---
+// 一个请求的时间线：先 prefill（一次处理整段提示），再一步步 decode（每步一个 token）。
+// 模型：Llama-3-8B（BF16），硬件：一张 H100（989 TFLOPS、3.35 TB/s）。每一步耗时 = max(计算时间, 读写时间)，
+// 计算 = 2 × 非嵌入参数 × 新 token 数 + 4 × 层数 × d × 上下文 × 新 token 数；读写 = 权重 16 GB + KV Cache（每 token 128 KiB）。
+// 与第 60 讲的代码同一套公式。都是理想值（假设硬件跑满），实际会慢一些。
+interface Props { title?: string; caption?: string }
+const { title = '一个请求的时间线：prefill 一次，decode 一步一步', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pd" data-pdtl>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>提示长度 = <b data-v="p"></b></span><input type="range" min="1" max="12" step="1" value="6" data-s="p" /></label>
+    <label class="ai-tl-lr"><span>生成长度 = <b data-v="o"></b></span><input type="range" min="1" max="8" step="1" value="4" data-s="o" /></label>
+  </div>
+  <svg class="ai-tl-svg" viewBox="0 0 600 110" data-svg role="img" aria-label="请求时间线"></svg>
+  <div class="ai-mc-cards" data-cards></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const N = 8.03e9, NE = 128256 * 4096, L = 32, D = 4096, WB = N * 2, KV = 2 * 32 * 8 * 128 * 2, F = 989e12, BW = 3.35e12;
+  const PS = [16, 64, 128, 256, 512, 1000, 2000, 4000, 8000, 16000, 32000, 64000], OS = [10, 50, 100, 200, 500, 1000, 2000, 4000];
+  const step = (n: number, ctx: number) => [(2 * (N - NE) * n + 4 * L * D * ctx * n) / F * 1e3, (WB + KV * (ctx + n)) / BW * 1e3];
+  const ms = (v: number) => (v >= 1000 ? (v / 1000).toFixed(2) + ' s' : v >= 10 ? v.toFixed(1) + ' ms' : v.toFixed(2) + ' ms');
+  function init(fig: HTMLElement) {
+    const g = (k: string) => Number(fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!.value);
+    function draw() {
+      const p = PS[g('p') - 1], o = OS[g('o') - 1];
+      fig.querySelector('[data-v="p"]')!.textContent = p.toLocaleString();
+      fig.querySelector('[data-v="o"]')!.textContent = o.toLocaleString();
+      const [pc, pm] = step(p, p / 2), pre = Math.max(pc, pm);
+      const steps: number[] = []; for (let i = 0; i < o; i++) { const [c, m] = step(1, p + i); steps.push(Math.max(c, m)); }
+      const dec = steps.reduce((a, b) => a + b, 0), total = pre + dec;
+      const [dc, dm] = step(1, p);
+      const X0 = 10, X1 = 590, sc = (X1 - X0) / total;
+      let s = `<rect class="ai-pd-pre" x="${X0}" y="20" width="${Math.max(2, pre * sc)}" height="40"/>`;
+      // decode：太多时每一格合并若干步
+      const per = Math.max(1, Math.ceil(o / 120));
+      let x = X0 + pre * sc;
+      for (let i = 0; i < o; i += per) { const w = steps.slice(i, i + per).reduce((a, b) => a + b, 0) * sc; s += `<rect class="ai-pd-dec" x="${x}" y="20" width="${Math.max(0.6, w - 0.6)}" height="40"/>`; x += w; }
+      s += `<text class="ai-al-gl" x="${X0}" y="14">prefill ${ms(pre)}</text><text class="ai-al-gl" x="${X1}" y="14" text-anchor="end">decode ${o} 步 ${ms(dec)}</text>`;
+      s += `<line class="ai-al-zl" x1="${X0 + pre * sc}" y1="16" x2="${X0 + pre * sc}" y2="70"/><text class="ai-al-gl" x="${X0 + pre * sc + 3}" y="82">第一个 token 出来（TTFT ${ms(pre)}）</text>`;
+      s += `<text class="ai-al-gl" x="${X1}" y="102" text-anchor="end">总计 ${ms(total)}</text>`;
+      fig.querySelector('[data-svg]')!.innerHTML = s;
+      fig.querySelector<HTMLElement>('[data-cards]')!.innerHTML =
+        `<div><span>prefill（${p.toLocaleString()} 个 token 一起算）</span><b>${ms(pre)}</b><small>计算 ${ms(pc)}，读写 ${ms(pm)} → 卡在${pc > pm ? '算力' : '带宽'}</small></div>`
+        + `<div><span>decode 每一步（1 个 token）</span><b>${ms(steps[0])}</b><small>计算 ${ms(dc)}，读写 ${ms(dm)} → 卡在${dc > dm ? '算力' : '带宽'}；算力只用了 ${(dc / Math.max(dc, dm) * 100).toFixed(1)}%</small></div>`
+        + `<div><span>时间花在哪</span><b>decode ${(dec / total * 100).toFixed(0)}%</b><small>prefill ${(pre / total * 100).toFixed(0)}%</small></div>`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<span class="ai-faint">绿色是 prefill：整段提示一次前向，大矩阵乘法，算力是瓶颈。琥珀色的细格是 decode：每步一个 token，却要把 16 GB 的权重整个读一遍，带宽是瓶颈。提示越长，prefill 越久；生成越长，decode 越久。</span>`;
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pdtl]').forEach(init);
+</script>

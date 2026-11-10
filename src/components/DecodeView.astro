@@ -1,0 +1,63 @@
+---
+// 解码策略：“今天天气真 ___” 的 12 个候选词（示意的 logits，与第 65 讲的代码相同）。
+// 依次应用：温度 → Top-k → Top-p → Min-p → 重新归一化。浅色条是原始概率，深色条是最终概率，被去掉的词变灰。
+// 读者可以：调四个参数；点“抽 100 次”看按最终分布随机抽样的结果。
+interface Props { title?: string; caption?: string }
+const { title = '温度、Top-k、Top-p：从分布里怎么选词', caption } = Astro.props;
+---
+<figure class="ai-gt ai-dec" data-decode>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-cg-eq">提示：“今天天气真 ___”</div>
+  <div class="ai-dec-sl">
+    <label class="ai-tl-lr"><span>温度 T = <b data-v="t"></b></span><input type="range" min="0.1" max="2" step="0.1" value="1" data-s="t" /></label>
+    <label class="ai-tl-lr"><span>Top-k = <b data-v="k"></b></span><input type="range" min="0" max="12" step="1" value="0" data-s="k" /></label>
+    <label class="ai-tl-lr"><span>Top-p = <b data-v="p"></b></span><input type="range" min="0.1" max="1" step="0.05" value="1" data-s="p" /></label>
+    <label class="ai-tl-lr"><span>Min-p = <b data-v="m"></b></span><input type="range" min="0" max="0.5" step="0.05" value="0" data-s="m" /></label>
+  </div>
+  <div class="ai-nt-bars" data-bars></div>
+  <div class="ai-gt-play"><button class="ai-pill ai-pill--solid" data-act="draw">抽 100 次</button><button class="ai-pill" data-act="reset">恢复默认</button></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const W = ['好', '不错', '晴朗', '热', '冷', '糟糕', '适合', '闷', '美', '差', '蓝', '猫'];
+  const Z = [3.0, 2.6, 2.2, 1.8, 1.5, 1.0, 0.8, 0.5, 0.4, 0.0, -1.0, -3.0];
+  const soft = (z: number[]) => { const m = Math.max(...z), e = z.map((v) => Math.exp(v - m)), s = e.reduce((a, b) => a + b, 0); return e.map((v) => v / s); };
+  function init(fig: HTMLElement) {
+    const g = (k: string) => Number(fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!.value);
+    let counts: number[] | null = null, seed = 1;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    function final() {
+      const T = g('t'), K = g('k'), P = g('p'), MP = g('m');
+      const base = soft(Z), p = soft(Z.map((v) => v / T)), order = p.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).map((x) => x[1]);
+      const keep = p.map(() => true), why: string[] = p.map(() => '');
+      if (K) order.slice(K).forEach((i) => { if (keep[i]) { keep[i] = false; why[i] = 'Top-k'; } });
+      if (P < 1) { let c = 0, cut = order.length; for (let j = 0; j < order.length; j++) { c += p[order[j]]; if (c >= P - 1e-12) { cut = j + 1; break; } } order.slice(cut).forEach((i) => { if (keep[i]) { keep[i] = false; why[i] = 'Top-p'; } }); }
+      if (MP > 0) { const mx = Math.max(...p); p.forEach((v, i) => { if (keep[i] && v < MP * mx) { keep[i] = false; why[i] = 'Min-p'; } }); }
+      const s = p.reduce((a, v, i) => a + (keep[i] ? v : 0), 0);
+      return { base, p, q: p.map((v, i) => (keep[i] ? v / s : 0)), keep, why, order };
+    }
+    function draw() {
+      ['t', 'k', 'p', 'm'].forEach((k) => { const v = g(k); fig.querySelector(`[data-v="${k}"]`)!.textContent = k === 'k' ? (v ? String(v) : '不限') : k === 'p' && v === 1 ? '不限' : k === 'm' && v === 0 ? '不限' : String(v); });
+      const { base, q, keep, why } = final();
+      fig.querySelector<HTMLElement>('[data-bars]')!.innerHTML = `<div class="ai-nt-head"><span>候选词</span><span>浅色：原始概率　深色：最终概率</span><span>${counts ? '抽中次数' : ''}</span></div>`
+        + W.map((w, i) => `<div class="ai-nt-row ai-dec-row${keep[i] ? '' : ' is-low'}"><span class="ai-nt-w">${w}</span><span class="ai-nt-bar"><i class="ai-dec-base" style="width:${(base[i] * 100).toFixed(1)}%"></i><i style="width:${(q[i] * 100).toFixed(1)}%"></i><b>${keep[i] ? q[i].toFixed(3) : `去掉（${why[i]}）`}</b></span><span class="ai-nt-c">${counts ? counts[i] : ''}</span></div>`).join('');
+      const n = keep.filter(Boolean).length;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `保留 ${n} 个候选词。${n === 1 ? '只剩一个，等同于贪心。' : ''}<br><span class="ai-faint">温度改变分布的尖平；Top-k 只留概率最高的 k 个；Top-p 从高到低累加，凑够 p 就停；Min-p 去掉概率不到最高者 × min-p 的词。剩下的重新归一化，再随机抽。</span>`;
+    }
+    fig.addEventListener('input', () => { counts = null; draw(); });
+    fig.addEventListener('click', (e) => {
+      const a = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
+      if (a === 'draw') {
+        const { q } = final();
+        counts = W.map(() => 0);
+        for (let t = 0; t < 100; t++) { const u = rnd(); let c = 0, pick = q.length - 1; for (let i = 0; i < q.length; i++) { c += q[i]; if (u < c) { pick = i; break; } } counts[pick]++; }
+        draw();
+      }
+      else if (a === 'reset') { ([['t', '1'], ['k', '0'], ['p', '1'], ['m', '0']] as const).forEach(([k, v]) => { fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!.value = v; }); counts = null; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-decode]').forEach(init);
+</script>

@@ -1,0 +1,50 @@
+---
+// 模型大小与单卡显存（数字与第 88 讲的代码相同）：权重 = 参数量 × 每个参数的字节数；KV = 每 token KV × 请求数 × 上下文。
+// 显卡按 90% 可用。读者可以：选模型、权重精度、显卡，调并发请求数和上下文长度，看总共要几张卡、一张卡读一遍权重要多久。
+interface Props { title?: string; caption?: string }
+const { title = '一张卡装得下吗', caption } = Astro.props;
+const MODELS = [['Llama-3-8B', 8.03e9, 131072], ['Llama-3.1-70B', 70.6e9, 327680], ['Llama-3.1-405B', 405.9e9, 516096], ['DeepSeek-V3', 671e9, 70272]];
+const GPUS = [['H100 80 GB', 80e9, 3.35e12], ['H200 141 GB', 141e9, 4.8e12], ['B200 192 GB', 192e9, 8e12]];
+---
+<figure class="ai-gt ai-mg" data-modelgpu data-m={JSON.stringify(MODELS)} data-g={JSON.stringify(GPUS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m">{MODELS.map((m, i) => <button data-v={i} aria-pressed={i === 1 ? 'true' : 'false'}>{m[0]}</button>)}</div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="p"><button data-v="2" aria-pressed="true">BF16</button><button data-v="1" aria-pressed="false">FP8</button><button data-v="0.5" aria-pressed="false">INT4</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="g">{GPUS.map((g, i) => <button data-v={i} aria-pressed={i === 0 ? 'true' : 'false'}>{g[0]}</button>)}</div>
+    <label class="ai-tl-lr"><span>并发 <b data-rv></b> 个请求</span><input type="range" min="1" max="128" step="1" value="32" data-r /></label>
+    <label class="ai-tl-lr"><span>每个 <b data-cv></b> 个 token</span><input type="range" min="0" max="5" step="1" value="3" data-c /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const CS = [1024, 2048, 4096, 8192, 32768, 131072];
+  function init(fig: HTMLElement) {
+    const M: [string, number, number][] = JSON.parse(fig.dataset.m!), G: [string, number, number][] = JSON.parse(fig.dataset.g!);
+    let mi = 1, bpp = 2, gi = 0;
+    const rIn = fig.querySelector<HTMLInputElement>('[data-r]')!, cIn = fig.querySelector<HTMLInputElement>('[data-c]')!;
+    function draw() {
+      const r = Number(rIn.value), c = CS[Number(cIn.value)]; fig.querySelector('[data-rv]')!.textContent = String(r); fig.querySelector('[data-cv]')!.textContent = c >= 1024 ? `${c / 1024}K` : String(c);
+      const [name, n, kvt] = M[mi], [gname, mem, bw] = G[gi], cap = mem * 0.9, w = n * bpp, kv = kvt * r * c, tot = w + kv, cards = Math.ceil(tot / cap);
+      const scale = 560 / Math.max(tot, cap * cards);
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 600 70"><rect class="ai-mg-w" x="20" y="14" width="${w * scale}" height="24"/><rect class="ai-mg-kv" x="${20 + w * scale}" y="14" width="${kv * scale}" height="24"/>`;
+      for (let k = 1; k <= cards; k++) s += `<line class="ai-mg-gpu" x1="${20 + k * cap * scale}" x2="${20 + k * cap * scale}" y1="6" y2="46"/><text class="ai-al-gl" x="${20 + (k - 0.5) * cap * scale}" y="60" text-anchor="middle">${cards <= 24 || k % 4 === 0 ? `卡 ${k}` : ''}</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const t1 = w / bw * 1e3;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `权重 ${(w / 1e9).toFixed(0)} GB（蓝）+ KV Cache ${(kv / 1e9).toFixed(1)} GB（琥珀）= ${(tot / 1e9).toFixed(0)} GB；每张 ${gname} 按 90% 可用 ${(cap / 1e9).toFixed(0)} GB → 至少 <b>${cards}</b> 张卡（竖线是每张卡的容量）。`
+        + `<br>decode 每步读一遍权重：一张卡要 ${t1.toFixed(1)} ms（单个请求最多约 ${(1000 / t1).toFixed(0)} token/s）；分到 ${cards} 张卡上并行读，约 ${(t1 / cards).toFixed(1)} ms。`
+        + '<br><span class="ai-faint">这里只算权重和 KV，没算激活和框架开销；多卡之间还要通信，后面几讲细说。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      const v = Number(b.dataset.v); if (g.dataset.group === 'm') mi = v; else if (g.dataset.group === 'p') bpp = v; else gi = v; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-modelgpu]').forEach(init);
+</script>

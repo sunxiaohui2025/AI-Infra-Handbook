@@ -1,0 +1,49 @@
+---
+// ZeRO / FSDP 的切分示意（公式与第 92 讲的代码相同）：每个参数 BF16 权重 2 字节、BF16 梯度 2 字节、FP32 主权重 + Adam 两个状态 12 字节。
+// 数据并行每卡一份完整的；ZeRO-1 把优化器状态切成 N 份；ZeRO-2 再切梯度；ZeRO-3（FSDP）连参数也切。
+// 读者可以：选模型、阶段，调卡数，看每张卡上的三块各占多少（浅色是只属于这张卡的 1/N），和 80 GB 比；以及每步的通信量。
+interface Props { title?: string; caption?: string }
+const { title = '把训练状态切到 N 张卡上', caption } = Astro.props;
+---
+<figure class="ai-gt ai-zs" data-zeroshard>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="8.03" aria-pressed="true">Llama-3-8B</button><button data-v="70.6" aria-pressed="false">Llama-3.1-70B</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="s"><button data-v="0" aria-pressed="false">数据并行</button><button data-v="1" aria-pressed="false">ZeRO-1</button><button data-v="2" aria-pressed="false">ZeRO-2</button><button data-v="3" aria-pressed="true">ZeRO-3 / FSDP</button></div>
+    <label class="ai-tl-lr"><span>卡数 N = <b data-nv></b></span><input type="range" min="0" max="7" step="1" value="3" data-n /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    let psi = 8.03e9, st = 3;
+    const nIn = fig.querySelector<HTMLInputElement>('[data-n]')!;
+    function draw() {
+      const N = 2 ** Number(nIn.value); fig.querySelector('[data-nv]')!.textContent = String(N);
+      const parts: [string, number, boolean, string][] = [
+        ['BF16 权重', 2 * psi, st >= 3, 'ai-zs-p'], ['BF16 梯度', 2 * psi, st >= 2, 'ai-zs-g'], ['FP32 主权重 + Adam 状态', 12 * psi, st >= 1, 'ai-zs-o']];
+      const per = parts.map(([n, v, sh, c]) => [n, sh ? v / N : v, sh, c] as [string, number, boolean, string]), tot = per.reduce((a, x) => a + x[1], 0);
+      const mx = Math.max(16 * psi, 80e9) * 1.05, W = 520, sx = (v: number) => (v / mx) * W;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 120"><text class="ai-np-ptitle" x="40" y="12">每张卡上的显存（只算和参数有关的状态）</text>';
+      let x = 40; per.forEach(([n, v, sh, c]) => { s += `<rect class="${c}${sh ? ' is-sh' : ''}" x="${x}" y="22" width="${sx(v)}" height="30"/>`; if (sx(v) > 60) s += `<text class="ai-zs-t" x="${x + 4}" y="41">${n}${sh ? ` ÷ ${N}` : ''}</text>`; x += sx(v); });
+      s += `<line class="ai-mg-gpu" x1="${40 + sx(80e9)}" x2="${40 + sx(80e9)}" y1="16" y2="60"/><text class="ai-al-gl" x="${40 + sx(80e9)}" y="72" text-anchor="middle">80 GB</text>`;
+      s += `<rect class="ai-zs-full" x="40" y="86" width="${sx(16 * psi)}" height="10"/><text class="ai-al-gl" x="40" y="112">对照：一份完整的状态 16Ψ = ${(16 * psi / 1e9).toFixed(0)} GB</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const comm = st === 3 ? 3 : 2;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `每张卡 ${(tot / 1e9).toFixed(1)} GB ${tot <= 72e9 ? '（放得下 80 GB 的卡，还要给激活留空间）' : '<b>（放不下 80 GB 的卡）</b>'}。`
+        + `<br>每步每张卡的通信约 ${comm} × 2Ψ = ${(comm * 2 * psi / 1e9).toFixed(0)} GB：${st === 0 ? 'All-Reduce 梯度。' : st < 3 ? 'Reduce-Scatter 梯度 + All-Gather 更新后的参数，和数据并行一样多。' : '前向 All-Gather 参数、反向再 All-Gather 一次、Reduce-Scatter 梯度，是数据并行的 1.5 倍。'}`
+        + '<br><span class="ai-faint">浅色表示这一块被切成了 N 份，每张卡只存自己那份。卡数加倍，被切的部分减半，没切的部分不变。</span>';
+    }
+    nIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      if (g.dataset.group === 'm') psi = Number(b.dataset.v) * 1e9; else st = Number(b.dataset.v); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-zeroshard]').forEach(init);
+</script>

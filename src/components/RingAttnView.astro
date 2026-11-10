@@ -1,0 +1,60 @@
+---
+// Ring Attention / 上下文并行（与第 95 讲的代码相同）：32 个 token 分给 4 张卡，卡 i 存自己那些 token 的 Q、K、V。
+// 第 t 步，卡 i 拿到的是卡 (i − t) 的 K、V，算出对应的打分块，用在线 softmax 累加；K、V 沿环往下传。4 步后每张卡都看过了所有的 K、V。
+// 网格：行是查询 token，列是键 token，按 8 段（每段 4 个 token）画；颜色表示这一行归哪张卡，深色是这一步正在算的块，灰色是因果掩码挡掉的。
+// 读者可以：拖步数，切换因果掩码，切换按顺序切 / 之字形切，看各卡的计算量是否均衡。
+interface Props { title?: string; caption?: string }
+const { title = 'K、V 沿着环转一圈', caption } = Astro.props;
+---
+<figure class="ai-gt ai-rt" data-ringattn>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>第 <b data-tv></b> 步</span><input type="range" min="0" max="3" step="1" value="1" data-t /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="c"><button data-v="1" aria-pressed="true">因果掩码</button><button data-v="0" aria-pressed="false">不带掩码</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="z"><button data-v="0" aria-pressed="true">按顺序切</button><button data-v="1" aria-pressed="false">之字形切</button></div>
+  </div>
+  <div class="ai-tv-wrap"><div data-grid></div><div data-bars></div></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const P = 4, N = 32, SEG = 4;
+  function init(fig: HTMLElement) {
+    let causal = 1, zig = 0;
+    const tIn = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    function draw() {
+      const t = Number(tIn.value); fig.querySelector('[data-tv]')!.textContent = `${t + 1} / 4`;
+      const segOwner = Array.from({ length: 8 }, (_, s) => (zig ? (s < 4 ? s : 7 - s) : Math.floor(s / 2)));   // 8 段各归哪张卡
+      const owner = (tok: number) => segOwner[Math.floor(tok / SEG)];
+      const work = Array(P).fill(0), done = Array(P).fill(0);
+      for (let q = 0; q < N; q++) for (let k = 0; k < N; k++) { if (causal && k > q) continue; const i = owner(q), step = (((i - owner(k)) % P) + P) % P; work[i]++; if (step <= t) done[i]++; }
+      const cs = 28;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 ${8 * cs + 40} ${8 * cs + 30}"><text class="ai-al-gl" x="40" y="10">键 token（K、V）→</text>`;
+      for (let a = 0; a < 8; a++) {
+        s += `<text class="ai-al-gl" x="34" y="${18 + a * cs + cs * 0.6}" text-anchor="end">卡${segOwner[a]}</text>`;
+        for (let b = 0; b < 8; b++) {
+          const i = segOwner[a], step = (((i - segOwner[b]) % P) + P) % P, masked = causal && b > a;
+          const cls = masked ? 'is-mask' : step === t ? 'is-now' : step < t ? 'is-done' : '';
+          s += `<rect class="ai-rt-c ${cls}" style="--h:${i * 90 + 20}" x="${40 + b * cs}" y="${16 + a * cs}" width="${cs - 2}" height="${cs - 2}"/>`;
+        }
+      }
+      fig.querySelector<HTMLElement>('[data-grid]')!.innerHTML = s + `<text class="ai-al-gl" x="40" y="${8 * cs + 28}">每格 = 4 个查询 × 4 个键</text></svg>`;
+      const mx = Math.max(...work);
+      fig.querySelector<HTMLElement>('[data-bars]')!.innerHTML = '<div class="ai-tl-k">各卡的计算量（打分个数）</div>' + work.map((w, i) => `<div class="ai-kq-row" style="grid-template-columns:40px 1fr 60px"><b>卡 ${i}</b><span class="ai-kq-bar"><i style="width:${(w / mx) * 100}%;background:hsl(${i * 90 + 20} 55% 50%)"></i></span><span>${w}</span></div>`).join('')
+        + `<div class="ai-tl-k" style="margin-top:8px">第 ${t + 1} 步时，卡 i 拿着卡 (i − ${t}) 的 K、V</div>`;
+      const bal = Math.max(...work) / Math.min(...work);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `深色是这一步各卡正在算的块：每张卡用自己的 Q 和刚收到的 K、V 算一块，同时把这份 K、V 传给下一张卡。`
+        + `<br>各卡计算量：${work.join('、')}${causal ? `，最多是最少的 ${bal.toFixed(1)} 倍。` : '，完全均衡。'}`
+        + `<br><span class="ai-faint">${causal && !zig ? '按顺序切时，卡 0 的 token 在最前面，大部分键都被掩码挡掉，很快就闲了；卡 3 的 token 在最后，要看所有的键，最忙。' : causal ? '之字形切：每张卡拿一段靠前的和一段靠后的，忙闲搭配，计算量一样多。' : '不带掩码时每个查询都看所有的键，怎么切都均衡。'}</span>`;
+    }
+    tIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      if (g.dataset.group === 'c') causal = Number(b.dataset.v); else zig = Number(b.dataset.v); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-ringattn]').forEach(init);
+</script>

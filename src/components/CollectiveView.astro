@@ -1,0 +1,46 @@
+---
+// 集合通信原语（数据与第 89 讲的代码相同）：4 张卡，卡 r 的数据是 [10r, 10r+1, 10r+2, 10r+3]，切成 4 段。
+// 每个格子的颜色表示它来自哪张卡；多张卡相加得到的格子画成深色（Σ）。读者可以：选原语，切换“通信前 / 通信后”，
+// 看每张卡手里的数据怎么变，以及每张卡要收发多少。
+interface Props { title?: string; caption?: string }
+const { title = '六种集合通信', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cv" data-collective>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="op"><button data-v="bc" aria-pressed="false">Broadcast</button><button data-v="red" aria-pressed="false">Reduce</button><button data-v="ar" aria-pressed="true">All-Reduce</button><button data-v="rs" aria-pressed="false">Reduce-Scatter</button><button data-v="ag" aria-pressed="false">All-Gather</button><button data-v="a2a" aria-pressed="false">All-to-All</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="st"><button data-v="0" aria-pressed="false">通信前</button><button data-v="1" aria-pressed="true">通信后</button></div>
+  </div>
+  <div class="ai-cv-gpus" data-gpus></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Cell = { v: number; src: number } | null; // src = 来自哪张卡，−1 表示相加的结果
+  const P = 4, D = [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((j) => ({ v: 10 * r + j, src: r })));
+  const SUM = [0, 1, 2, 3].map((j) => ({ v: [0, 1, 2, 3].reduce((a, r) => a + 10 * r + j, 0), src: -1 }));
+  const OPS: Record<string, { pre: Cell[][]; post: Cell[][]; desc: string; vol: string; use: string }> = {
+    bc: { pre: D, post: [0, 1, 2, 3].map(() => D[0]), desc: '卡 0 的数据复制给所有卡。', vol: '其余每张卡收 n', use: '把同一份数据（比如初始权重）发给所有卡。' },
+    red: { pre: D, post: [SUM, null as any, null as any, null as any].map((x) => x ?? [null, null, null, null]), desc: '所有卡的数据按位置相加，结果只放在卡 0。', vol: '卡 0 收 (p−1)·n（树形可分摊）', use: '把结果汇总到一处。' },
+    ar: { pre: D, post: [0, 1, 2, 3].map(() => SUM), desc: '所有卡的数据按位置相加，每张卡都拿到完整的和。', vol: '每张卡至少收发 2(p−1)/p · n = 1.5n', use: '张量并行每层算完把部分和加起来（第 93 讲）；数据并行同步梯度（第 92 讲）。' },
+    rs: { pre: D, post: [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((j) => (j === r ? SUM[j] : null))), desc: '按位置相加，但结果切成 p 段，卡 r 只拿第 r 段。', vol: '每张卡收 (p−1)/p · n = 0.75n', use: 'ZeRO 的梯度切分（第 92 讲）、序列并行（第 95 讲）。' },
+    ag: { pre: [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((j) => (j === r ? SUM[j] : null))), post: [0, 1, 2, 3].map(() => SUM), desc: '每张卡各有一段，拼起来让所有卡都有完整的。', vol: '每张卡收 (p−1)/p · n = 0.75n', use: 'ZeRO-3 / FSDP 用到某层时临时拼出完整权重（第 92 讲）。' },
+    a2a: { pre: D, post: [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((j) => D[j][r])), desc: '卡 j 的第 r 段发给卡 r：每张卡给每张卡发一段不同的数据，像把矩阵转置。', vol: '每张卡收发 (p−1)/p · n = 0.75n', use: 'MoE 的专家并行：把 token 发到它要去的专家所在的卡（第 96 讲）。' },
+  };
+  function init(fig: HTMLElement) {
+    let op = 'ar', st = 1;
+    function draw() {
+      const O = OPS[op], rows = st ? O.post : O.pre;
+      fig.querySelector<HTMLElement>('[data-gpus]')!.innerHTML = rows.map((cells, r) => `<div class="ai-cv-gpu"><b>卡 ${r}</b><div class="ai-cv-cells">${cells.map((c) => (c ? `<span class="ai-cv-c${c.src < 0 ? ' is-sum' : ''}" style="--h:${c.src * 90 + 20}">${c.v}</span>` : '<span class="ai-cv-c is-empty">—</span>')).join('')}</div></div>`).join('');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${O.desc}<br>通信量：${O.vol}（n = 每张卡的数据量）。<br><span class="ai-faint">用在哪里：${O.use}</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      if (g.dataset.group === 'op') op = b.dataset.v!; else st = Number(b.dataset.v); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-collective]').forEach(init);
+</script>

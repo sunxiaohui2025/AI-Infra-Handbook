@@ -1,0 +1,27 @@
+---
+// 一层 MoE 在“注意力卡 + 专家卡”上的执行顺序（示意图，第 99 讲；第 96、103 讲可复用）。
+// 左边 A0–A3 做注意力和路由，右边 B0–B3 各放 1/4 的路由专家。四步：①注意力 + 路由 ②dispatch（4×4 的 All-to-All）
+// ③专家计算 ④combine（原路送回，A 卡按路由权重加权求和）。两处等待：B 卡等所有来源的输入到齐；A 卡等一个 token 的 8 份结果都回来。
+import Figure from './Figure.astro';
+interface Props { title?: string; caption?: string }
+const { title = '一层 MoE：两次 All-to-All 夹着专家计算', caption } = Astro.props;
+const A = [0, 1, 2, 3], C = ['ai-mlf-c0', 'ai-mlf-c1', 'ai-mlf-c2', 'ai-mlf-c3'];
+---
+<Figure title={title} caption={caption}>
+  <svg class="ai-tl-svg" viewBox="0 0 640 300">
+    <text class="ai-sa-tx" x="90" y="18" text-anchor="middle">服务器 A：注意力 + 路由</text>
+    <text class="ai-sa-tx" x="550" y="18" text-anchor="middle">服务器 B：路由专家</text>
+    {A.map((i) => (
+      <g>
+        <g class="ai-sa-b gpu"><rect x="40" y={34 + i * 62} width="100" height="44" rx="4" /><text x="90" y={52 + i * 62} text-anchor="middle">{`A${i}`}</text></g>
+        {A.map((j) => <rect class={C[j]} x={48 + j * 22} y={60 + i * 62} width="18" height="10" rx="2" />)}
+        <g class="ai-sa-b sw"><rect x="500" y={34 + i * 62} width="100" height="44" rx="4" /><text x="550" y={52 + i * 62} text-anchor="middle">{`B${i}：专家 ${i * 64}–${i * 64 + 63}`}</text></g>
+        <rect class={C[i]} x="508" y={60 + i * 62} width="84" height="10" rx="2" />
+      </g>
+    ))}
+    {A.map((i) => A.map((j) => <line class={`ai-mlf-ln ${C[j]}`} x1="140" y1={56 + i * 62} x2="500" y2={56 + j * 62} />))}
+    <text class="ai-sa-tx" x="320" y="30" text-anchor="middle">② dispatch：每张 A 卡把 token 按所选专家的位置分组，发往 4 张 B 卡</text>
+    <text class="ai-sa-tx" x="320" y="276" text-anchor="middle">③ B 卡等所有来源到齐，按专家重排、做矩阵乘　④ combine：结果原路送回</text>
+    <text class="ai-sa-tx" x="320" y="292" text-anchor="middle">A 卡收齐一个 token 的 8 份结果、加权求和，才能进入下一层（① 下一层注意力）</text>
+  </svg>
+</Figure>

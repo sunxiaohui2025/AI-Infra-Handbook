@@ -1,0 +1,53 @@
+---
+// 专家并行的分发（规则与第 96 讲的代码相同，数据用固定种子在浏览器里生成）：4 张卡，8 个专家（卡 g 放专家 2g、2g+1），
+// 每张卡上 8 个 token，每个 token 按路由打分选 top-k 个专家。第 1 次 All-to-All 把 token 副本发到专家所在的卡，
+// 专家算完，第 2 次 All-to-All 发回原来的卡加权合并。读者可以：调 top-k、路由偏斜程度（偏爱专家 0、1），
+// 看每个 token 去了哪里、分发矩阵、每张卡收到多少 token。
+interface Props { title?: string; caption?: string }
+const { title = 'token 去找它的专家', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ep" data-epdispatch>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="k"><span class="ai-tl-k">top-k：</span><button data-v="1" aria-pressed="false">1</button><button data-v="2" aria-pressed="true">2</button></div>
+    <label class="ai-tl-lr"><span>路由偏斜 = <b data-sv></b></span><input type="range" min="0" max="3" step="0.1" value="1" data-s /></label>
+  </div>
+  <div class="ai-ep-gpus" data-gpus></div>
+  <div class="ai-ep-bot"><div data-mat></div><div data-load></div></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const G = 4, E = 8, T = 8;
+  function gauss(seed: number) { let s = seed; const u = () => { s = (s * 1103515245 + 12345) % 2147483648; return (s + 0.5) / 2147483648; }; return () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u()); }
+  const g = gauss(3), BASE = Array.from({ length: G }, () => Array.from({ length: T }, () => Array.from({ length: E }, () => g())));
+  const hue = (e: number) => e * 45;
+  function init(fig: HTMLElement) {
+    let k = 2;
+    const sIn = fig.querySelector<HTMLInputElement>('[data-s]')!;
+    function draw() {
+      const sk = Number(sIn.value); fig.querySelector('[data-sv]')!.textContent = sk.toFixed(1);
+      const bias = [1, 0.8, 0, 0, 0, 0, 0, -0.5].map((b) => b * sk);
+      const top = BASE.map((gt) => gt.map((l) => l.map((v, e) => [v + bias[e], e]).sort((a, b) => b[0] - a[0]).slice(0, k).map((x) => x[1])));
+      const send = Array.from({ length: G }, () => Array(G).fill(0)), load = Array(E).fill(0);
+      top.forEach((gt, gi) => gt.forEach((es) => es.forEach((e) => { send[gi][Math.floor(e / 2)]++; load[e]++; })));
+      fig.querySelector<HTMLElement>('[data-gpus]')!.innerHTML = Array.from({ length: G }, (_, gi) => `<div class="ai-ep-gpu"><b>卡 ${gi}</b><small>专家 ${2 * gi}、${2 * gi + 1}</small><div class="ai-ep-toks">${top[gi].map((es, t) => `<span class="ai-ep-tok">t${t}${es.map((e) => `<i style="--h:${hue(e)}">${e}</i>`).join('')}</span>`).join('')}</div></div>`).join('');
+      const mx = Math.max(...send.flat());
+      fig.querySelector<HTMLElement>('[data-mat]')!.innerHTML = '<div class="ai-tl-k">分发矩阵（行发 → 列收）</div><table class="ai-ep-mat"><tr><th></th>' + [0, 1, 2, 3].map((j) => `<th>卡${j}</th>`).join('') + '</tr>' + send.map((r, i) => `<tr><th>卡${i}</th>${r.map((v, j) => `<td style="--o:${(v / mx).toFixed(2)}" class="${i === j ? 'is-self' : ''}">${v}</td>`).join('')}</tr>`).join('') + '</table>';
+      const recv = [0, 1, 2, 3].map((j) => send.reduce((a, r) => a + r[j], 0)), mr = Math.max(...recv), avg = (G * T * k) / G;
+      fig.querySelector<HTMLElement>('[data-load]')!.innerHTML = '<div class="ai-tl-k">每张卡要算的 token（副本）数</div>' + recv.map((v, j) => `<div class="ai-kq-row" style="grid-template-columns:36px 1fr 30px"><b>卡${j}</b><span class="ai-kq-bar"><i style="width:${(v / mr) * 100}%"></i></span><span>${v}</span></div>`).join('');
+      const cross = send.flat().reduce((a, v) => a + v, 0) - send.reduce((a, r, i) => a + r[i], 0);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${G * T} 个 token × top-${k} = ${G * T * k} 个副本，其中 ${cross} 个要发到别的卡（对角线是留在本卡的）。各专家收到：${load.join('、')}。`
+        + `<br>最忙的卡 ${mr} 个，平均 ${avg} 个，是平均的 ${(mr / avg).toFixed(2)} 倍——所有卡要等最忙的那张算完，才能做第 2 次 All-to-All 把结果送回。`
+        + '<br><span class="ai-faint">每个 token 旁的彩色数字是它选中的专家。偏斜越大，越多 token 挤向专家 0、1（都在卡 0 上），负载越不均衡。</span>';
+    }
+    sIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      k = Number(b.dataset.v); fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-epdispatch]').forEach(init);
+</script>

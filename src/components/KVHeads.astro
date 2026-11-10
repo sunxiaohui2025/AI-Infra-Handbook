@@ -1,0 +1,57 @@
+---
+// MHA / GQA / MQA：32 个查询头共用多少组 K、V。以 Llama-3-8B（32 层，32 个查询头，每头 128 维）为例。
+// 读者可以：选 KV 头数（32 = MHA，8 = Llama-3 的 GQA，1 = MQA，或中间值），调上下文长度和并发请求数，
+//   看分组方式、每个 token 的 KV Cache、总 KV Cache，以及“读一次 K、V 能服务几个查询头”。
+// 公式：每 token 的 KV Cache = 2（K 和 V）× 层数 × KV 头数 × 每头维度 × 2 字节（BF16）。
+interface Props { title?: string; caption?: string }
+const { title = '32 个查询头，共用几组 K、V？', caption } = Astro.props;
+---
+<figure class="ai-gt ai-kvh" data-kvheads>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="kv"><span class="ai-tl-k">KV 头数</span>{[32, 16, 8, 4, 2, 1].map((v) => <button data-v={v} aria-pressed={v === 8 ? 'true' : 'false'}>{v === 32 ? '32（MHA）' : v === 8 ? '8（GQA，Llama-3）' : v === 1 ? '1（MQA）' : v}</button>)}</div>
+    <div class="ai-mc-in">
+      <label><span>上下文长度</span><select data-r="s">{[1024, 8192, 32768, 131072].map((v) => <option value={v} selected={v === 8192}>{v}</option>)}</select></label>
+      <label><span>并发请求数</span><input type="number" min="1" value="16" data-r="b" /></label>
+    </div>
+  </div>
+  <div class="ai-kvh-heads" data-heads></div>
+  <div class="ai-mc-cards" data-cards></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const L = 32, NH = 32, DH = 128, BYTES = 2, WEIGHTS = 8.03e9 * 2;
+  const gib = (n: number) => (n >= 2 ** 30 ? (n / 2 ** 30).toFixed(1) + ' GiB' : (n / 2 ** 20).toFixed(0) + ' MiB');
+  function init(fig: HTMLElement) {
+    let kv = 8;
+    const r = (k: string) => fig.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-r="${k}"]`)!;
+    function draw() {
+      const s = Number(r('s').value), b = Math.max(1, Number(r('b').value) || 1), grp = NH / kv;
+      let h = '<div class="ai-kvh-row"><span class="ai-tl-k">查询头</span>';
+      for (let i = 0; i < NH; i++) h += `<i class="ai-kvh-q" style="--h:${Math.floor(i / grp) * (360 / kv)}"></i>`;
+      h += `</div><div class="ai-kvh-row"><span class="ai-tl-k">K、V 头</span>`;
+      for (let j = 0; j < kv; j++) h += `<i class="ai-kvh-k" style="--h:${j * (360 / kv)}; flex-grow:${grp}"></i>`;
+      fig.querySelector<HTMLElement>('[data-heads]')!.innerHTML = h + '</div>';
+      const perTok = 2 * L * kv * DH * BYTES, mha = 2 * L * NH * DH * BYTES, total = perTok * s * b;
+      fig.querySelector<HTMLElement>('[data-cards]')!.innerHTML =
+        `<div><span>每个 token 的 KV Cache</span><b>${perTok / 1024} KiB</b><small>2 × ${L} 层 × ${kv} 个 KV 头 × ${DH} 维 × 2 字节；MHA 时 ${mha / 1024} KiB</small></div>`
+        + `<div><span>${s} token × ${b} 个请求</span><b>${gib(total)}</b><small>模型权重（BF16）约 ${gib(WEIGHTS)}；${total > WEIGHTS ? 'KV Cache 已经比权重还大' : 'KV Cache 小于权重'}</small></div>`
+        + `<div><span>读一次 K、V 服务几个查询头</span><b>${grp} 个</b><small>decode 时每读一个 K、V 向量，能被 ${grp} 个查询头用上</small></div>`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${kv === NH ? 'MHA：每个查询头有自己的一组 K、V。' : kv === 1 ? 'MQA：全部 32 个查询头共用唯一的一组 K、V。' : `GQA：32 个查询头分成 ${kv} 组，每组 ${grp} 个头共用一组 K、V（同一种颜色）。`}`
+        + ` KV Cache 是 MHA 的 1/${grp}。<br><span class="ai-faint">查询头始终是 32 个，各算各的注意力权重；变少的只是被缓存的 K、V。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-group="kv"] [data-v]');
+      if (!btn) return;
+      kv = Number(btn.dataset.v);
+      fig.querySelectorAll('[data-group="kv"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'));
+      draw();
+    });
+    fig.addEventListener('input', draw);
+    fig.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-kvheads]').forEach(init);
+</script>

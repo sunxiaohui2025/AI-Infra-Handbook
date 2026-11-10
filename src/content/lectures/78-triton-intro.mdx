@@ -1,0 +1,287 @@
+---
+id: 78
+slug: triton-intro
+title: Triton 入门
+chapter: 3
+part: 10
+problem: 怎么用 Python 写 GPU kernel
+prereqs: [74, 77]
+level: 主线
+minutes: 35
+demos: [TritonTiles, SpecializeCost]
+video: ""
+formula: '一个程序处理一整块数据：$offs = \mathrm{pid} \times \mathrm{BLOCK} + \mathrm{arange}(\mathrm{BLOCK})$，$mask = offs < n$，load → 整块计算 → store'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import TritonTiles from '../../components/TritonTiles.astro';
+import SpecializeCost from '../../components/SpecializeCost.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[74, 77]} />
+
+上一讲用 CUDA 写了向量加法，看上去不难。可一旦要写一个真正快的 kernel，事情就多了：矩阵乘法要手动把数据搬进共享内存、安排每个线程搬哪几个元素、在合适的地方同步、让相邻的线程读相邻的地址、调用 Tensor Core 的专用指令、让搬下一块数据和算这一块重叠起来……一个高性能的矩阵乘法 kernel，CUDA 代码动辄几百上千行。
+
+**Triton** 是 OpenAI 在 2021 年开源的一种写 GPU kernel 的语言，嵌在 Python 里。它的思路是把抽象的层级往上提一层：**我们只描述“一个块的数据怎么算”，块里的线程怎么分工，交给编译器。**这一讲用三个例子入门：融合的 SwiGLU 激活、RMSNorm、矩阵乘法。
+
+## 从“一个线程”到“一个块”
+
+CUDA 的视角是一个线程：我是第几个线程，我算哪一个元素。Triton 的视角是一个**程序**（program）：我是第几个程序，我处理哪**一块**元素。一个 Triton 程序大致对应 CUDA 的一个线程块，但我们不用管块里的线程。
+
+在 Triton 里，变量通常不是一个数，而是一整块数（一个小张量）。比如 `tl.arange(0, 256)` 就是 [0, 1, …, 255] 这 256 个数；`tl.load` 一次读进一整块；加减乘除都是对整块逐元素进行的。编译器拿到这样的代码，自己决定用多少个线程、每个线程处理几个元素、怎么合并访存、要不要用共享内存。
+
+## 例一：融合的 SwiGLU 激活
+
+第 74 讲说，`F.silu(g) * u` 逐个算子执行要读写显存 8 遍，融合成一个 kernel 只要 3 遍。用 Triton 写出这个融合 kernel：
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def silu_mul(g_ptr, u_ptr, y_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)                        # 我是第几个程序
+    offs = pid * BLOCK + tl.arange(0, BLOCK)      # 我负责的一整块下标
+    mask = offs < n                               # 最后一块可能越界
+    g = tl.load(g_ptr + offs, mask=mask)          # 一次读进一整块
+    u = tl.load(u_ptr + offs, mask=mask)
+    y = g * tl.sigmoid(g) * u                     # 中间结果只在片上
+    tl.store(y_ptr + offs, y, mask=mask)          # 只写最终结果
+
+def silu_and_mul(g, u):                           # g、u 是 GPU 上的 PyTorch 张量
+    y = torch.empty_like(g)
+    n = g.numel()
+    grid = (triton.cdiv(n, 1024),)                # 网格：要几个程序
+    silu_mul[grid](g, u, y, n, BLOCK=1024)
+    return y
+```
+
+逐行看：
+
+- `@triton.jit` 表示这是一个 Triton kernel，第一次调用时编译成 GPU 代码。
+- `tl.program_id(0)` 是这个程序的编号，相当于 CUDA 的 `blockIdx.x`。
+- `offs` 是一整块下标：程序 pid 负责第 pid × BLOCK 到 pid × BLOCK + BLOCK − 1 个元素。
+- `mask` 标出哪些下标没越界。`tl.load` 和 `tl.store` 带上 mask，越界的位置不读不写。CUDA 里每个线程写一个 `if (i < n)`，这里对整块用一个 mask。
+- `BLOCK: tl.constexpr` 表示 BLOCK 是编译时的常数（`tl.arange` 的长度必须是编译时已知的 2 的幂）。
+- 启动时 `silu_mul[grid](...)`，方括号里是网格，也就是要开几个程序。
+
+n = 1000、BLOCK = 256 时，网格是 ⌈1000 / 256⌉ = 4 个程序；最后一个程序的 offs 是 768 到 1023，mask 只有前 232 个为真。
+
+## 例二：RMSNorm，一个程序处理一行
+
+RMSNorm（第 36 讲）要对每一行求平方和，是一个**归约**。用 Triton 写，可以让一个程序处理一整行：整行读进来，求和、归一化、乘权重，写回去，中间结果都在片上。
+
+```python
+@triton.jit
+def rmsnorm(x_ptr, w_ptr, out_ptr, d, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)                        # 一个程序负责一行
+    cols = tl.arange(0, BLOCK)                    # BLOCK ≥ d，取 2 的幂
+    mask = cols < d
+    x = tl.load(x_ptr + row * d + cols, mask=mask, other=0.0).to(tl.float32)
+    r = x * tl.rsqrt(tl.sum(x * x) / d + eps)     # tl.sum：整块求和
+    w = tl.load(w_ptr + cols, mask=mask)
+    tl.store(out_ptr + row * d + cols, r * w, mask=mask)
+```
+
+网格就是行数（token 数）。`other=0.0` 让越界的位置读成 0，不影响平方和。`tl.sum` 是块内归约，CUDA 里要自己写 warp 内的规约和共享内存里的规约，这里一行搞定。计算前转成 FP32，是为了平方和不溢出、不丢精度。
+
+## 例三：矩阵乘法
+
+最后看矩阵乘法。第 77 讲说过，快的矩阵乘法要分块：每个线程块负责 C 的一个小块，沿 K 方向一段一段地把 A、B 的小块搬进片上，复用之后再搬下一段。用 Triton 写，结构几乎就是这句话的直译：
+
+```python
+@triton.jit
+def matmul(a_ptr, b_ptr, c_ptr, M, N, K,
+           stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
+           BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m, pid_n = tl.program_id(0), tl.program_id(1)    # 二维网格：负责 C 的哪一块
+    rm = pid_m * BM + tl.arange(0, BM)
+    rn = pid_n * BN + tl.arange(0, BN)
+    rk = tl.arange(0, BK)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)           # 累加器
+    for k in range(0, K, BK):                            # 沿 K 方向一块一块地走
+        a = tl.load(a_ptr + rm[:, None] * stride_am + (k + rk)[None, :] * stride_ak)
+        b = tl.load(b_ptr + (k + rk)[:, None] * stride_bk + rn[None, :] * stride_bn)
+        acc += tl.dot(a, b)                              # 小块矩阵乘法，编译器交给 Tensor Core
+    tl.store(c_ptr + rm[:, None] * stride_cm + rn[None, :] * stride_cn, acc)
+```
+
+（为了简洁，这里假设 M、N、K 都是块大小的整数倍，省略了 mask。）`rm[:, None]` 和 `rn[None, :]` 是 NumPy 式的广播，拼出一个 BM × BK 的二维下标块；stride 是每一维相邻元素在内存里隔了多少个元素。`tl.dot` 是块与块的矩阵乘法，编译器把它变成 Tensor Core 指令，并自动安排共享内存。
+
+块大小选多少最快，取决于矩阵的形状和硬件。Triton 提供 `@triton.autotune`：列出几组候选的块大小、warp 数（`num_warps`）、流水线级数（`num_stages`，即提前搬几块数据，让搬运和计算重叠），第一次运行时逐个试，选最快的那组记下来。
+
+下面的演示把代码和它处理的数据块并排放在一起。向量模式下点一行看那个程序的 offs 和 mask；矩阵乘法模式下点 C 的一块选程序，拖动 k 看每次循环取了 A、B 的哪两块。
+
+<TritonTiles caption="图 78-1　Triton 的程序与数据块。左边高亮的代码行，作用在右边高亮的数据块上：向量模式里一个程序处理一整块元素，最后一块用 mask 盖住越界的位置；矩阵乘法里一个程序负责 C 的一块，沿 K 方向取 A、B 的小块相乘累加。" />
+
+<Note kind="point">Triton 让我们以“一块数据”为单位写 kernel：用 program_id 确定自己负责哪一块，用 arange 生成整块下标，用 mask 处理越界，load、整块计算、store。线程分工、合并访存、共享内存、Tensor Core 都由编译器处理，写融合 kernel 和分块矩阵乘法变得像写 NumPy。</Note>
+
+## 候选怎么挑：先排除，再估算，最后实测
+
+`@triton.autotune` 会把每组候选都编译、跑一遍。候选多了，搜索本身就很贵，所以编译器和工程师一般按下面的顺序缩小范围（第 77 讲的块大小分析就是其中一步）：
+
+| 步骤 | 要填的内容 | 依据 |
+| --- | --- | --- |
+| 固定目标 | 输入形状、精度、允许的误差、每种形状的调用频数 | 比较的是同一项数学工作、同一种负载 |
+| 列出候选 | 块大小、循环次序、缓冲槽数（`num_stages`）、warp 数、融合范围 | 编译器和硬件是否支持 |
+| 检查可行性 | 共享内存、寄存器、线程数、对齐、数据依赖 | 编译的资源报告和正确性检查 |
+| 估计时间 | 计算量、实际读写量、启动和布局转换 | 各项资源的服务时间和关键路径 |
+| 实测并选择 | 代表形状的耗时、波动，以及放在完整算子链里的表现 | 按实际负载的总成本选，相近的候选都保留 |
+
+实测的差别往往比估算大。同一个矩阵转置程序，在 RTX PRO 6000 上用 16 × 16 的块约 7.9 μs，用 32 × 32 约 2.9 μs，快 2.7 倍：块的边长翻倍，元素数变成四倍，存储布局和线程协作也一起变了。
+
+**要看调用的比例，而不是单个形状。**某个算子有 A、B 两种输入形状，原实现都要 10 μs。新实现处理 A 只要 5 μs，处理 B 却要 20 μs。设 A 占全部调用的比例为 p，新实现的平均时间是 5p + 20(1 − p) = 20 − 15p μs，要比 10 μs 快，需要 **p > 2/3**。只在形状 A 上测，会以为快了一倍；放到真实的调用比例里，可能反而变慢。所以调优可以按形状分别选实现，也可以按实际调用频数选一个总成本最低的。
+
+**搜索也要回本。**如果一次搜索要 10 分钟，选出来的实现每次调用省 5 μs，要调用 600 s ÷ 5 μs = **1.2 亿次**才收回。每秒调用 1 万次约 3.3 小时，每秒 100 次要 14 天。所以优先调那些调用频繁、会长期使用的形状。
+
+## 动态形状：通用、分桶，还是逐个特化
+
+Triton 的 kernel 是按形状和 `tl.constexpr` 参数即时编译的。推理时每一步的 token 数都在变，运行时有三种选择：**通用**程序按当前形状计算下标和边界；**分桶**把输入补齐到少数几个代表形状，复用这些形状的程序；**特化**为每个常见形状单独编译一份。越利用已知的形状，程序越快，但要编译和保存的程序也越多。
+
+算一个例子：10 次 FFN 为一组，8 次 256 行、1 次 1536 行、1 次 2048 行，共 5632 行。用 512 和 2048 两个桶，实际要算 8192 行，多算 45%。在 RTX PRO 6000（BF16 峰值 503.8 TFLOP/s）上，设三种程序分别发挥峰值的 20%、40%、50%，准备时间（编译、调优）分别为 100、400、900 ms：
+
+| 策略 | 准备 | 每组 | 说明 |
+| --- | --- | --- | --- |
+| 通用 | 100 ms | 16.9 ms | 按实际 5632 行算 |
+| 分桶 | 400 ms | 12.3 ms | 多算 45%，但效率翻倍，仍比通用快 |
+| 特化 | 900 ms | 6.8 ms | 每个形状一份程序 |
+
+跑 r 组的总时间是 准备 + r × 每组。每组越快的方案准备越久，所以最省时的方案随 r 变化：前 65 组通用最省，第 66 组起分桶，第 91 组起特化。只跑 70 组时，分桶最快（1.26 s），特化反而最慢（1.37 s）。如果三种程序都已经编译并缓存，准备时间为零，特化从第一组起就最快。所以运行时的选择同时取决于形状的分布、要跑多少次，以及程序是否已经在缓存里。
+
+<SpecializeCost caption="图 78-2　三种动态形状策略的总时间。截距是准备时间，斜率是每组执行时间。第一次编译时，前 65 组通用最省，第 66 组起分桶，第 91 组起特化；切到“已经缓存”，特化从第一组起就最快。" />
+
+## 用代码复现
+
+这里没有 GPU，我们用 NumPy 模拟 Triton 的执行：写两个小函数模拟带 mask 的 `tl.load` 和 `tl.store`，然后把上面三个 kernel 的逻辑原样写一遍，用循环依次“启动”网格里的每个程序（在 GPU 上它们是同时运行的），和直接用 NumPy 算的结果对比。
+
+```python
+import numpy as np
+
+# 用 NumPy 模拟 Triton 的几个基本操作：一个“程序”一次处理一整块数据
+def load(x, offs, mask, other=0.0):
+    return np.where(mask, x[np.where(mask, offs, 0)], other)          # 越界的位置不读，填 other
+def store(x, offs, val, mask):
+    x[offs[mask]] = val[mask]
+
+# 1. 融合的 SwiGLU 激活：y = silu(g) * u。每个程序处理 BLOCK 个元素
+def silu_mul_kernel(pid, g, u, y, n, BLOCK):
+    offs = pid * BLOCK + np.arange(BLOCK)                # 这个程序负责的下标（一整块）
+    mask = offs < n                                      # 最后一块可能越界
+    gv, uv = load(g, offs, mask), load(u, offs, mask)
+    store(y, offs, gv / (1 + np.exp(-gv)) * uv, mask)
+    return int(mask.sum())
+
+n, BLOCK = 1000, 256
+g, u = np.random.default_rng(0).standard_normal((2, n)); y = np.zeros(n)
+grid = (n + BLOCK - 1) // BLOCK
+valid = [silu_mul_kernel(pid, g, u, y, n, BLOCK) for pid in range(grid)]   # GPU 上这几个程序是同时运行的
+print(f"n = {n}，BLOCK = {BLOCK} → {grid} 个程序，各自处理的有效元素：{valid}")
+print("结果正确：", np.allclose(y, g / (1 + np.exp(-g)) * u))
+
+# 2. RMSNorm：每个程序处理一行（BLOCK 要不小于行长 d），整行留在片上算平方和
+def rmsnorm_kernel(row, x, w, out, d, BLOCK, eps=1e-5):
+    offs = row * d + np.arange(BLOCK); mask = np.arange(BLOCK) < d
+    xv = load(x, offs, mask)
+    r = xv / np.sqrt((xv * xv).sum() / d + eps)          # 越界的位置读成 0，不影响平方和
+    store(out, offs, r * load(w, np.arange(BLOCK), mask), mask)
+rows, d = 3, 10
+x = np.random.default_rng(1).standard_normal(rows * d); w = np.linspace(0.5, 1.5, d); out = np.zeros_like(x)
+for row in range(rows): rmsnorm_kernel(row, x, w, out, d, BLOCK=16)
+X = x.reshape(rows, d)
+print("RMSNorm 结果正确：", np.allclose(out.reshape(rows, d), X / np.sqrt((X**2).mean(1, keepdims=True) + 1e-5) * w))
+
+# 3. 矩阵乘法：程序 (pid_m, pid_n) 负责 C 的一个 BM×BN 小块，沿 K 方向一块一块地取 A、B 相乘累加
+def matmul_kernel(pid_m, pid_n, A, B, C, BM, BN, BK):
+    rm, rn = pid_m * BM + np.arange(BM), pid_n * BN + np.arange(BN)
+    acc = np.zeros((BM, BN))                             # 累加器在寄存器里
+    for k in range(0, A.shape[1], BK):
+        rk = k + np.arange(BK)
+        acc += A[np.ix_(rm, rk)] @ B[np.ix_(rk, rn)]     # tl.dot：交给 Tensor Core
+    C[np.ix_(rm, rn)] = acc
+A, B = np.random.default_rng(2).standard_normal((2, 64, 64)); C = np.zeros((64, 64))
+grid = (64 // 32, 64 // 16)
+for pm in range(grid[0]):
+    for pn in range(grid[1]): matmul_kernel(pm, pn, A, B, C, 32, 16, 16)
+print(f"64×64 矩阵乘法，BM = 32、BN = 16 → 网格 {grid}，共 {grid[0] * grid[1]} 个程序；结果正确：{np.allclose(C, A @ B)}")
+```
+
+输出：
+
+```text
+n = 1000，BLOCK = 256 → 4 个程序，各自处理的有效元素：[256, 256, 256, 232]
+结果正确： True
+RMSNorm 结果正确： True
+64×64 矩阵乘法，BM = 32、BN = 16 → 网格 (2, 4)，共 8 个程序；结果正确：True
+```
+
+第一行：n = 1000、BLOCK = 256，4 个程序，前三个各处理 256 个元素，最后一个只有 232 个有效，和演示一致。第二、三行说明融合的 SwiGLU 和 RMSNorm 结果正确。最后一行：64 × 64 的矩阵乘法，每个程序负责 32 × 16 的一块，网格 (2, 4) 共 8 个程序，结果正确。
+
+如果有一张 NVIDIA 或 AMD 的 GPU，装好 PyTorch 和 Triton，就可以直接运行前面那几段真正的 Triton 代码。
+
+## 到了大模型里
+
+**PyTorch 编译器生成的就是 Triton。**`torch.compile` 的后端 TorchInductor，会把计算图里能融合的运算融合起来，生成 Triton kernel（第 74 讲）。很多人每天都在用 Triton，只是没有亲手写。
+
+**推理引擎里的 Triton kernel。**vLLM 里有不少 kernel 是用 Triton 写的，比如 MoE 的融合 kernel（第 41 讲的专家计算）、一些注意力的实现、各种量化相关的 kernel。SGLang 也一样。Triton 写起来快、改起来方便，新模型、新结构出来时，往往先用 Triton 实现。
+
+**不止 NVIDIA。**Triton 也支持 AMD 的 GPU，同一份 kernel 代码可以在两家的硬件上编译运行，这是它很大的优势。
+
+**极限性能仍然要更底层的工具。**对矩阵乘法、注意力这些最关键的 kernel，CUDA 配合 CUTLASS 等库能更精细地控制硬件的新特性，FlashAttention-3 就是这样写的。也有一些新的工具（比如 CUTLASS 的 Python 接口 CuTe DSL、TileLang）试图在 Triton 的易用和 CUDA 的可控之间找平衡。
+
+第二段代码复现“候选怎么挑”和“动态形状”的数字：调用比例的临界值、三种策略的每组时间与交点，以及调优搜索的回本次数。
+
+```python
+# 1. 新实现对形状 A 快一倍、对形状 B 慢一倍：A 的调用占比 p 超过多少才划算
+old, new_a, new_b = 10, 5, 20                        # μs
+p = (new_b - old) / (new_b - new_a)
+print(f"新实现平均 = {new_a}p + {new_b}(1 − p)，比原来的 {old} μs 快的条件：p > {p:.3f}")
+
+# 2. 动态形状：通用 / 分桶 / 逐形状特化。10 次 FFN 为一组：8 次 256 行、1 次 1536 行、1 次 2048 行
+H, F, peak = 4096, 12288, 503.8e12                   # RTX PRO 6000 BF16 稠密峰值
+real = 8 * 256 + 1536 + 2048
+padded = 8 * 512 + 2048 + 2048                       # 两个桶：512、2048
+plans = {"通用": (0.100, real, 0.20), "分桶": (0.400, padded, 0.40), "特化": (0.900, real, 0.50)}
+T = {k: 6 * H * F * rows / (peak * mfu) for k, (prep, rows, mfu) in plans.items()}
+print(f"实际 {real} 行，分桶后执行 {padded} 行（多算 {padded/real-1:.0%}）")
+for k, (prep, rows, mfu) in plans.items():
+    print(f"{k}：准备 {prep*1e3:.0f} ms，每组 {T[k]*1e3:.1f} ms")
+best = lambda r: min(plans, key=lambda k: plans[k][0] + r * T[k])
+switch = [r for r in range(1, 200) if best(r) != best(r - 1)]
+print("最省时的方案：", ", ".join(f"第 {r} 组起 {best(r)}" for r in [1] + switch))
+print("跑 70 组：", "、".join(f"{k} {plans[k][0] + 70*T[k]:.2f} s" for k in plans))
+
+# 3. 自动调优搜索 10 分钟，每次调用省 5 μs，要调用多少次才收回
+calls = 600 / 5e-6
+print(f"要 {calls:.1e} 次调用；每秒 1 万次约 {calls/1e4/3600:.1f} 小时，每秒 100 次约 {calls/100/86400:.0f} 天")
+```
+
+输出：
+
+```text
+新实现平均 = 5p + 20(1 − p)，比原来的 10 μs 快的条件：p > 0.667
+实际 5632 行，分桶后执行 8192 行（多算 45%）
+通用：准备 100 ms，每组 16.9 ms
+分桶：准备 400 ms，每组 12.3 ms
+特化：准备 900 ms，每组 6.8 ms
+最省时的方案： 第 1 组起 通用, 第 66 组起 分桶, 第 91 组起 特化
+跑 70 组： 通用 1.28 s、分桶 1.26 s、特化 1.37 s
+要 1.2e+08 次调用；每秒 1 万次约 3.3 小时，每秒 100 次约 14 天
+```
+
+对照正文：p > 2/3；分桶多算 45%；每组 16.9、12.3、6.8 ms；第 66 组起分桶、第 91 组起特化；70 组时分桶最快；搜索要 1.2 亿次调用才回本。
+
+## 容易混淆的地方
+
+1. **Triton 的“程序”不是线程。**一个程序处理一整块数据，背后是一个线程块里的几十到几百个线程。`num_warps` 决定这个块用几个 warp。
+2. **它和 NVIDIA 的 Triton 推理服务器不是一个东西。**NVIDIA 有一个推理服务框架也叫 Triton（Triton Inference Server），它是部署模型的服务，和这里写 kernel 的 Triton 语言毫无关系，只是重名。
+3. **块的形状是编译时常数。**`tl.arange` 的长度、`tl.dot` 的块大小都必须在编译时确定，而且一般是 2 的幂。行长 d 不是 2 的幂时，就取不小于它的 2 的幂，再用 mask 盖住多出来的部分。
+
+4. **单个形状上的加速不等于整体加速。**一个实现在某个形状上快、在另一个形状上慢，要按实际的调用比例算平均时间。
+5. **最快的程序不一定最省时间。**特化程序每次最快，但编译和调优的准备时间要靠足够多的调用来摊。
+
+## 回顾
+
+CUDA 以线程为单位写 kernel，要自己管下标、共享内存、同步和访存模式，写快的 kernel 很繁琐。Triton 把视角提到“一块数据”：program_id 决定负责哪一块，arange 生成整块下标，mask 处理越界，load、整块计算、store；线程怎么分工、共享内存、Tensor Core 都交给编译器。融合的 SwiGLU、按行处理的 RMSNorm、分块的矩阵乘法，都只要十几行。torch.compile 生成的就是 Triton，推理引擎里也有大量 Triton kernel。
+
+挑选实现时，先按资源排除放不下的候选，再估算，最后在真实的调用比例下实测：新实现对形状 A 快一倍、对 B 慢一倍时，A 的占比要超过 2/3 才划算。动态形状有通用、分桶、特化三种做法，准备越久的方案每次越快，本例前 65 组通用最省，第 66 组起分桶，第 91 组起特化；程序已经缓存时特化从一开始就最快。
+
+kernel 写得再快，每启动一次，CPU 都要花几微秒准备和发射。decode 一步只有几毫秒，却要启动几百个小 kernel，启动开销会占多少？怎么消除它？下一讲：**CUDA Graph 与调度开销**。

@@ -1,0 +1,93 @@
+---
+// 调度与抢占模拟（规则与第 70 讲的代码相同）：池子 16 块、每块 4 个 token，6 个请求（名字, 到达步数, 提示长度, 生成长度）。
+// 每一步：1. 运行中的请求各写 1 个新 token，需要新块而池子空了，就抢占最后加入的请求（释放它的全部块，回到等待队列最前面，之后重算）；
+// 2. 这一步没有抢占时，按到达顺序放等待的请求进来（prefill 提示 + 已生成的部分，并出 1 个 token）；3. 生成完的请求离开，块还回池子。
+// “按最终长度预留”：进来时就按 提示 + 生成长度 预留全部的块，永远不会被抢占，但进来得晚。
+// 读者可以：切换两种方式，拖动步数或播放，看池子、三个队列和事件记录。
+interface Props { title?: string; caption?: string }
+const { title = '块不够时：预留还是抢占', caption } = Astro.props;
+const REQS = [['A', 0, 7, 9], ['B', 0, 5, 12], ['C', 1, 9, 6], ['D', 2, 6, 10], ['E', 3, 8, 5], ['F', 4, 4, 7]];
+---
+<figure class="ai-gt ai-ss" data-schedsim data-reqs={JSON.stringify(REQS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="preempt" aria-pressed="true">按需分配 + 抢占（重算）</button><button data-v="reserve" aria-pressed="false">按最终长度预留</button></div>
+    <label class="ai-tl-lr"><span>第 <b data-tv></b> 步之后</span><input type="range" min="0" max="16" step="1" value="5" data-t /></label>
+    <div class="ai-gt-pre ai-pc-sets"><button data-act="play">▶ 播放</button></div>
+  </div>
+  <div class="ai-bg-reqs" data-reqlist></div>
+  <div class="ai-bp-pool ai-ss-pool" data-pool></div>
+  <div class="ai-ss-qs" data-qs></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Req = [string, number, number, number];
+  const B = 4, NB = 16;
+  const need = (n: number) => Math.ceil(n / B);
+  type Snap = { owner: (number | null)[]; fill: number[]; waiting: number[]; running: number[]; done: number[]; kv: Record<number, number>; gen: number[]; events: string[] };
+  function simulate(R: Req[], mode: string) {
+    const gen = R.map(() => 0), kv: Record<number, number> = {}, blocks: Record<number, number[]> = {};
+    let free = Array.from({ length: NB }, (_, i) => i);
+    let waiting: number[] = [], running: number[] = []; const done: number[] = [], finish: Record<number, number> = {};
+    let step = 0, preempts = 0, recompute = 0; const snaps: Snap[] = [], events: string[] = [];
+    const take = (i: number, k: number) => { for (let j = 0; j < k; j++) blocks[i].push(free.shift()!); };
+    const give = (i: number) => { free = free.concat(blocks[i]).sort((a, b) => a - b); delete blocks[i]; delete kv[i]; };
+    while (Object.keys(finish).length < R.length && step < 60) {
+      R.forEach((r, i) => { if (r[1] === step) waiting.push(i); });
+      let pre = false;
+      for (const i of [...running]) {
+        if (!running.includes(i)) continue;
+        while (need(kv[i] + 1) > blocks[i].length && free.length === 0) {
+          const v = running.pop()!; give(v); waiting.unshift(v); preempts++; recompute += R[v][2] + gen[v]; pre = true;
+          events.push(`第 ${step} 步：${R[i][0]} 要新块，池子空了 → 抢占 ${R[v][0]}，它的块全部释放，之后要重算 ${R[v][2] + gen[v]} 个 token`);
+          if (v === i) break;
+        }
+        if (running.includes(i)) { if (need(kv[i] + 1) > blocks[i].length) take(i, 1); kv[i]++; gen[i]++; }
+      }
+      while (waiting.length && !pre) {
+        const i = waiting[0], r = R[i], want = mode === 'reserve' ? need(r[2] + r[3]) : need(r[2] + gen[i]);
+        if (want > free.length) break;
+        waiting.shift(); running.push(i); blocks[i] = []; take(i, want); kv[i] = r[2] + gen[i];
+        events.push(`第 ${step} 步：${r[0]} 进来，prefill ${r[2] + gen[i]} 个 token，占 ${want} 块`); gen[i]++;
+      }
+      for (const i of running.filter((i) => gen[i] === R[i][3])) { running = running.filter((x) => x !== i); give(i); done.push(i); finish[i] = step + 1; events.push(`第 ${step} 步：${R[i][0]} 生成完毕，还回块`); }
+      const owner: (number | null)[] = Array(NB).fill(null), fill: number[] = Array(NB).fill(0);
+      for (const k in blocks) blocks[k].forEach((b, j) => { owner[b] = Number(k); fill[b] = Math.max(0, Math.min(B, kv[k] - j * B)); });
+      snaps.push({ owner, fill, waiting: [...waiting], running: [...running], done: [...done], kv: { ...kv }, gen: [...gen], events: [...events] });
+      step++;
+    }
+    const lat = R.map((r, i) => finish[i] - r[1]);
+    return { snaps, steps: step, avg: lat.reduce((a, b) => a + b, 0) / R.length, preempts, recompute };
+  }
+  function init(fig: HTMLElement) {
+    const R: Req[] = JSON.parse(fig.dataset.reqs!);
+    let mode = 'preempt', timer = 0;
+    const tIn = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    fig.querySelector<HTMLElement>('[data-reqlist]')!.innerHTML = '<span class="ai-tl-k">请求：</span>' + R.map((r, i) => `<span class="ai-bg-chip" style="--h:${i * 60}">${r[0]}<small>第 ${r[1]} 步到，提示 ${r[2]}，生成 ${r[3]}</small></span>`).join('');
+    function draw() {
+      const sim = simulate(R, mode); tIn.max = String(sim.steps - 1);
+      const T = Math.min(Number(tIn.value), sim.steps - 1); fig.querySelector('[data-tv]')!.textContent = String(T);
+      const s = sim.snaps[T];
+      fig.querySelector<HTMLElement>('[data-pool]')!.innerHTML = s.owner.map((o, b) => `<div class="ai-bp-blk${o === null ? '' : ' is-own'}" style="--h:${(o ?? 0) * 60}"><small>${b}</small>${o === null ? '' : `<b>${R[o][0]}</b>`}<span class="ai-bp-fill">${Array.from({ length: B }, (_, k) => `<i class="${k < s.fill[b] ? 'on' : ''}"></i>`).join('')}</span></div>`).join('');
+      const chip = (i: number, extra: string) => `<span class="ai-bg-chip" style="--h:${i * 60}">${R[i][0]}<small>${extra}</small></span>`;
+      const q = (name: string, xs: number[], f: (i: number) => string) => `<div class="ai-ss-q"><span class="ai-tl-k">${name}</span>${xs.length ? xs.map((i) => chip(i, f(i))).join('') : '<span class="ai-faint">（空）</span>'}</div>`;
+      fig.querySelector<HTMLElement>('[data-qs]')!.innerHTML = q('运行中', s.running, (i) => `已生成 ${s.gen[i]}/${R[i][3]}`)
+        + q('等待中', s.waiting, (i) => s.gen[i] ? `被抢占过，已生成 ${s.gen[i]}` : '还没开始') + q('已完成', s.done, () => '');
+      const freeN = s.owner.filter((o) => o === null).length;
+      const evs = s.events.slice(-4).map((e) => e.startsWith(`第 ${T} 步`) ? `<b>${e}</b>` : e).join('<br>');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `空闲 ${freeN} 块 / 共 ${NB} 块。最近的事件：<br>${evs || '（无）'}`
+        + `<br><span class="ai-faint">${mode === 'reserve' ? '按最终长度预留' : '按需分配 + 抢占'}：全部完成 ${sim.steps} 步，平均延迟 ${sim.avg.toFixed(1)} 步，抢占 ${sim.preempts} 次，重算 ${sim.recompute} 个 token。</span>`;
+    }
+    const stop = () => { clearInterval(timer); timer = 0; };
+    fig.addEventListener('input', () => { stop(); draw(); });
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, mb = t.closest<HTMLElement>('[data-group="m"] [data-v]'), act = t.closest<HTMLElement>('[data-act]');
+      if (mb) { mode = mb.dataset.v!; fig.querySelectorAll('[data-group="m"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === mb ? 'true' : 'false')); stop(); draw(); }
+      else if (act) { stop(); tIn.value = '0'; draw(); timer = window.setInterval(() => { const v = Number(tIn.value) + 1; if (v > Number(tIn.max)) { stop(); return; } tIn.value = String(v); draw(); }, 800); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-schedsim]').forEach(init);
+</script>

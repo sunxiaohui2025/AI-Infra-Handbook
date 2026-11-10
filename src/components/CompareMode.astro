@@ -1,0 +1,179 @@
+---
+// 对照阅读：图在左、文在右（窄屏时图在下、文在上）。
+// 每个交互演示右上角加一个「⇆ 对照」按钮。进入后：
+//   - 文章里所有演示收成一行占位卡片，演示本身移到左侧面板（DOM 节点整体移动，演示的状态不丢）；
+//   - 面板一次显示一个演示，默认「跟随阅读位置」：滚动时自动换成离阅读线最近的那个；
+//     也可以用 ‹ › 或点占位卡片手动切换（手动切换会关掉跟随）；
+//   - 面板和正文之间的分隔条可以拖动改宽度（窄屏改高度），宽度记在 localStorage；
+//   - Esc 或「退出」回到正常阅读，演示放回原处，阅读位置保持不变。
+// 对照模式是否开着也记在 localStorage，换下一讲时自动保持。
+---
+<aside class="ai-cmp" hidden aria-label="对照阅读面板">
+  <div class="ai-cmp-bar">
+    <b>对照阅读</b>
+    <span class="ai-cmp-nav">
+      <button data-cmp="prev" aria-label="上一个演示">‹</button>
+      <span data-cmp-count></span>
+      <button data-cmp="next" aria-label="下一个演示">›</button>
+    </span>
+    <label class="ai-cmp-follow"><input type="checkbox" data-cmp-follow checked />跟随阅读位置</label>
+    <button class="ai-cmp-exit" data-cmp="exit">退出 <kbd>Esc</kbd></button>
+  </div>
+  <div class="ai-cmp-body ai-article" data-cmp-body></div>
+  <div class="ai-cmp-drag" data-cmp-drag title="拖动调整宽度"></div>
+</aside>
+
+<script>
+  const SEL = '.ai-gt, .ai-vp, .ai-ms, .ai-fig, .ai-calc';
+  const KEY = 'ai-cmp', KEY_W = 'ai-cmp-w', KEY_H = 'ai-cmp-h';
+  const store = {
+    get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
+    set: (k: string, v: string | null) => { try { if (v === null) localStorage.removeItem(k); else localStorage.setItem(k, v); } catch { /* 隐私模式等情况：不记也能用 */ } },
+  };
+
+  const art = document.querySelector<HTMLElement>('.ai-article');
+  const panel = document.querySelector<HTMLElement>('.ai-cmp');
+  if (art && panel) {
+    const body = panel.querySelector<HTMLElement>('[data-cmp-body]')!;
+    const count = panel.querySelector<HTMLElement>('[data-cmp-count]')!;
+    const follow = panel.querySelector<HTMLInputElement>('[data-cmp-follow]')!;
+    const figs = Array.from(art.querySelectorAll<HTMLElement>(SEL)).filter((f) => !f.parentElement!.closest(SEL));
+    const label = (f: HTMLElement) => {
+      const cap = f.querySelector('figcaption')?.textContent ?? '';
+      const no = cap.match(/图\s*[\d-]+/)?.[0];
+      const t = f.querySelector('.ai-ms-title')?.textContent?.trim() || cap.replace(/图\s*[\d-]+\s*/, '').slice(0, 40) || '交互演示';
+      return { no: no ?? '演示', t };
+    };
+    const phs: HTMLElement[] = [];
+    let on = false, active = 0, holdUntil = 0, raf = 0;
+    const narrow = () => window.matchMedia('(max-width: 999px)').matches;
+
+    // 每个演示右上角的「对照」按钮
+    figs.forEach((f, i) => {
+      f.classList.add('ai-cmp-host');
+      const b = document.createElement('button');
+      b.className = 'ai-cmp-btn';
+      b.type = 'button';
+      b.innerHTML = '<span aria-hidden="true">⇆</span> 对照';
+      b.title = '图在一边、文字在另一边，对照着读';
+      b.addEventListener('click', () => enter(i));
+      f.prepend(b);
+      const { no, t } = label(f);
+      const ph = document.createElement('button');
+      ph.type = 'button';
+      ph.className = 'ai-cmp-ph';
+      ph.innerHTML = `<span class="ai-cmp-ph-no">${no}</span><span class="ai-cmp-ph-t"></span><span class="ai-cmp-ph-st"></span>`;
+      ph.querySelector('.ai-cmp-ph-t')!.textContent = t;
+      ph.addEventListener('click', () => { follow.checked = false; show(i); });
+      phs.push(ph);
+    });
+
+    // 切换布局前后，让读者正在读的那一段留在屏幕上的同一个位置
+    function anchor() {
+      const line = 72;
+      const els = Array.from(art!.children) as HTMLElement[];
+      const el = els.find((e) => !figs.includes(e) && e.getBoundingClientRect().bottom > line) ?? null;
+      return el ? { el, top: el.getBoundingClientRect().top } : null;
+    }
+    const restore = (a: ReturnType<typeof anchor>) => { if (a) window.scrollBy(0, a.el.getBoundingClientRect().top - a.top); };
+
+    function show(i: number) {
+      active = (i + figs.length) % figs.length;
+      figs.forEach((f, j) => { f.hidden = j !== active; });
+      phs.forEach((p, j) => {
+        p.classList.toggle('is-active', j === active);
+        p.querySelector('.ai-cmp-ph-st')!.textContent = j === active ? (narrow() ? '下方显示中' : '左侧显示中') : '点击显示';
+      });
+      count.textContent = `${label(figs[active]).no}　${active + 1} / ${figs.length}`;
+      body.scrollTop = 0;
+    }
+
+    function enter(i: number) {
+      if (on) { show(i); return; }
+      const a = anchor();
+      figs.forEach((f, j) => { f.before(phs[j]); body.appendChild(f); });
+      on = true;
+      panel!.hidden = false;
+      document.body.classList.add('is-split');
+      show(i);
+      restore(a);
+      holdUntil = window.scrollY;
+      store.set(KEY, '1');
+      window.addEventListener('scroll', onScroll, { passive: true });
+    }
+
+    function exit() {
+      if (!on) return;
+      const a = anchor();
+      figs.forEach((f, j) => { f.hidden = false; phs[j].replaceWith(f); });
+      on = false;
+      panel!.hidden = true;
+      document.body.classList.remove('is-split');
+      restore(a);
+      store.set(KEY, null);
+      window.removeEventListener('scroll', onScroll);
+    }
+
+    // 跟随：阅读线在视口 40% 的高度，选离它最近的占位卡片。刚进入时先不动，滚过 120px 以后才开始跟随
+    function onScroll() {
+      if (raf) return;
+      raf = window.setTimeout(() => {   // 节流：最多每 80ms 判断一次
+        raf = 0;
+        if (!on || !follow.checked || Math.abs(window.scrollY - holdUntil) < 120) return;
+        holdUntil = -1e9;
+        const line = window.innerHeight * 0.4;
+        let best = active, bd = Infinity;
+        phs.forEach((p, j) => {
+          const r = p.getBoundingClientRect(), d = Math.abs((r.top + r.bottom) / 2 - line);
+          if (d < bd) { bd = d; best = j; }
+        });
+        if (best !== active) show(best);
+      }, 80);
+    }
+
+    panel.addEventListener('click', (e) => {
+      const k = (e.target as HTMLElement).closest<HTMLElement>('[data-cmp]')?.dataset.cmp;
+      if (k === 'exit') exit();
+      else if (k === 'prev' || k === 'next') { follow.checked = false; show(active + (k === 'next' ? 1 : -1)); }
+    });
+    follow.addEventListener('change', () => { if (follow.checked) { holdUntil = -1e9; onScroll(); } });
+    // 用捕获阶段，赶在搜索面板自己的 Esc 处理（会把面板删掉）之前判断
+    window.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !on) return;
+      const t = e.target instanceof Element ? e.target : document.body;
+      if (t.closest('input, textarea, [contenteditable]') && !t.closest('.ai-cmp-bar')) return;
+      const pal = document.querySelector<HTMLElement>('.ai-pal-bg');
+      if (pal && pal.offsetParent !== null) return;   // 搜索面板开着时，Esc 先关搜索
+      exit();
+    }, true);
+
+    // 拖动分隔条：宽屏改面板宽度，窄屏改面板高度
+    const root = document.documentElement;
+    const w0 = Number(store.get(KEY_W)), h0 = Number(store.get(KEY_H));
+    if (w0) root.style.setProperty('--cmp-w', w0 + 'px');
+    if (h0) root.style.setProperty('--cmp-h', h0 + 'px');
+    const drag = panel.querySelector<HTMLElement>('[data-cmp-drag]')!;
+    drag.addEventListener('pointerdown', (e) => {
+      drag.setPointerCapture(e.pointerId);
+      const a = anchor();
+      const move = (ev: PointerEvent) => {
+        if (narrow()) {
+          const h = Math.round(Math.max(160, Math.min(window.innerHeight - 160, window.innerHeight - ev.clientY)));
+          root.style.setProperty('--cmp-h', h + 'px'); store.set(KEY_H, String(h));
+        } else {
+          const w = Math.round(Math.max(320, Math.min(window.innerWidth - 420, ev.clientX)));
+          root.style.setProperty('--cmp-w', w + 'px'); store.set(KEY_W, String(w));
+        }
+        restore(a);
+      };
+      const up = () => { drag.removeEventListener('pointermove', move); drag.removeEventListener('pointerup', up); drag.removeEventListener('pointercancel', up); };
+      drag.addEventListener('pointermove', move);
+      drag.addEventListener('pointerup', up);
+      drag.addEventListener('pointercancel', up);
+      e.preventDefault();
+    });
+    window.addEventListener('resize', () => { if (on) show(active); });
+
+    if (figs.length && store.get(KEY) === '1') enter(0);
+  }
+</script>

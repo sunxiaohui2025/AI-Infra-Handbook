@@ -1,0 +1,63 @@
+---
+// 模型评测两例。
+// 上：用 ToyLM（tinylm.json examples["22"]）做 5 道选择题：给每个选项算模型的概率，选最大的，和标准答案比。点一道题看各选项的概率。
+// 下：Elo 对战排名：两个模型各有一个分，P(A 赢) = 1 / (1 + 10^((R_B − R_A)/400))；每场比赛后按“实际 − 预期”调整分数（K = 32）。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { title?: string; caption?: string }
+const { title = '选择题评测，以及对战排名', caption } = Astro.props;
+const ex = tiny.examples['22'];
+const ITEMS: [string, string[], string][] = [
+  ['小猫 吃', ['鱼', '骨头', '苹果', 'AI'], '鱼'],
+  ['小狗 吃', ['鱼', '骨头', '香蕉', '推理'], '骨头'],
+  ['你 学', ['AI', '推理', '鱼', '小狗'], '推理'],
+  ['我 喜欢', ['小猫', '小狗', '苹果', '学'], '小狗'],
+  ['我 吃', ['苹果', '香蕉', '骨头', '鱼'], '香蕉'],
+];
+---
+<figure class="ai-gt ai-eval" data-eval data-cfg={JSON.stringify({ vocab: ex.vocab, E: ex.E, W1: ex.W1, b1: ex.b1, W2: ex.W2, b2: ex.b2, items: ITEMS })}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-mlp-pt"><b>选择题</b>：模型给哪个选项的概率最高，就算它选了哪个</div>
+  <ol class="ai-eval-items" data-items></ol>
+  <div class="ai-nt-bars" data-bars></div>
+  <div class="ai-cg-eq" data-eq></div>
+  <div class="ai-mlp-pt" style="margin-top:14px"><b>Elo 对战排名</b>：用户看两个匿名模型的回答，投票选更好的</div>
+  <div class="ai-gt-play"><button class="ai-pill" data-win="a">模型 A 赢</button><button class="ai-pill" data-win="b">模型 B 赢</button><button class="ai-pill" data-win="reset">重置</button></div>
+  <div class="ai-cg-eq" data-elo></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const C = JSON.parse(fig.dataset.cfg!), V: string[] = C.vocab;
+    const probs = (a: string, b: string) => {
+      const x = [...C.E[V.indexOf(a)], ...C.E[V.indexOf(b)]];
+      const h = C.b1.map((bj: number, j: number) => Math.max(0, x.reduce((s: number, xi: number, i: number) => s + xi * C.W1[i][j], bj)));
+      const z = C.b2.map((bk: number, k: number) => h.reduce((s: number, hj: number, j: number) => s + hj * C.W2[j][k], bk));
+      const m = Math.max(...z), e = z.map((v: number) => Math.exp(v - m)), s = e.reduce((p: number, q: number) => p + q, 0);
+      return e.map((v: number) => v / s);
+    };
+    const res = C.items.map(([pre, opts, ans]: [string, string[], string]) => { const p = probs(...(pre.split(' ') as [string, string])); const sc = opts.map((o) => p[V.indexOf(o)]); const pick = opts[sc.indexOf(Math.max(...sc))]; return { pre, opts, ans, sc, pick }; });
+    let sel = 4, ra = 1200, rb = 1000, games = 0;
+    function draw() {
+      fig.querySelector<HTMLElement>('[data-items]')!.innerHTML = res.map((r: { pre: string; ans: string; pick: string }, i: number) => `<li data-i="${i}" class="${i === sel ? 'is-sel' : ''}">“${r.pre} __”　<span class="${r.pick === r.ans ? 'c-accent' : 'c-key'}">${r.pick === r.ans ? '✓ 对' : '✗ 错'}</span></li>`).join('');
+      const r = res[sel];
+      fig.querySelector<HTMLElement>('[data-bars]')!.innerHTML = r.opts.map((o: string, j: number) => `<div class="ai-nt-row${o === r.pick ? ' is-pick' : ''}"><span class="ai-nt-w">${o}${o === r.ans ? ' ★' : ''}</span><span class="ai-nt-bar"><i style="width:${(r.sc[j] * 100).toFixed(1)}%"></i><b>${r.sc[j].toFixed(3)}</b></span><span class="ai-nt-c">${o === r.pick ? '模型选' : ''}</span></div>`).join('');
+      const acc = res.filter((x: { pick: string; ans: string }) => x.pick === x.ans).length;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `★ 是标准答案。5 道题对 ${acc} 道，准确率 ${acc * 20}%。`
+        + (sel >= 3 ? `<br><span class="ai-faint">这道题的两个主要选项概率只差 ${Math.abs(r.sc[0] - r.sc[1]).toFixed(3)}：在训练语料里它们本来就一样常见，“标准答案”其实是题目设计者随意定的。好的评测题要有明确、唯一的答案。</span>` : '');
+      const ea = 1 / (1 + 10 ** ((rb - ra) / 400));
+      fig.querySelector<HTMLElement>('[data-elo]')!.innerHTML = `模型 A：<b>${ra.toFixed(1)}</b> 分，模型 B：<b>${rb.toFixed(1)}</b> 分（已比 ${games} 场）。按分差，A 赢的预期概率是 ${ea.toFixed(3)}。`
+        + '<br><span class="ai-faint">爆冷（分低的赢了）时，分数变化大；赢了本该赢的，分数只变一点。比赛多了，分数会收敛到反映真实水平的位置。</span>';
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, li = t.closest<HTMLElement>('[data-i]'), w = t.closest<HTMLElement>('[data-win]')?.dataset.win;
+      if (li) sel = Number(li.dataset.i);
+      else if (w === 'reset') { ra = 1200; rb = 1000; games = 0; }
+      else if (w) { const ea = 1 / (1 + 10 ** ((rb - ra) / 400)), sa = w === 'a' ? 1 : 0; ra += 32 * (sa - ea); rb += 32 * ((1 - sa) - (1 - ea)); games++; }
+      else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-eval]').forEach(init);
+</script>

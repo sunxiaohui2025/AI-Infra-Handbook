@@ -1,0 +1,76 @@
+---
+// FlashAttention 的两个要点：
+// 上半部分：分块遍历。打分矩阵 S 切成 4 × 4 个块，外层一块查询 Q_i 留在片上，内层依次读入 K_j、V_j，算出 S 的一块、用完就扔，
+//   S 从来不完整地出现在显存里。拖动“第几块”看遍历顺序。
+// 下半部分：在线 softmax。一个查询、8 个键（打分与 v 与第 75 讲的代码相同），按块大小一块一块读，维护 m（最大值）、l（指数和）、acc（加权和），
+//   最大值变大时把旧的 l、acc 乘 e^(m_旧 − m_新) 缩小。读完最后一块，acc / l 与一次算完的结果相同。
+interface Props { title?: string; caption?: string }
+const { title = '分块计算注意力：S 不落地，softmax 边读边算', caption } = Astro.props;
+---
+<figure class="ai-gt ai-fs" data-flashsoftmax>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-fs-top">
+    <div data-grid></div>
+    <div class="ai-fs-side">
+      <label class="ai-tl-lr"><span>第 <b data-gv></b> 块</span><input type="range" min="0" max="15" step="1" value="5" data-g /></label>
+      <div class="ai-fs-sram" data-sram></div>
+    </div>
+  </div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="bs"><span class="ai-tl-k">每块几个键：</span><button data-v="2" aria-pressed="false">2</button><button data-v="4" aria-pressed="true">4</button><button data-v="8" aria-pressed="false">8（一次读完）</button></div>
+    <label class="ai-tl-lr"><span>读完第 <b data-sv></b> 块</span><input type="range" min="1" max="2" step="1" value="1" data-s /></label>
+  </div>
+  <div data-bars></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const X = [1.2, -0.5, 2.1, 0.4, 2.2, -1.0, 0.8, 3.4], V = [0.5, -1.0, 2.0, 1.5, -0.5, 1.0, 0.0, 3.0];
+  function init(fig: HTMLElement) {
+    let bs = 4;
+    const gIn = fig.querySelector<HTMLInputElement>('[data-g]')!, sIn = fig.querySelector<HTMLInputElement>('[data-s]')!;
+    function drawGrid() {
+      const g = Number(gIn.value), qi = Math.floor(g / 4), kj = g % 4;
+      fig.querySelector('[data-gv]')!.textContent = `${g + 1} / 16`;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 230 210"><text class="ai-al-gl" x="130" y="12" text-anchor="middle">K、V 的块 j →</text><text class="ai-al-gl" x="10" y="120" transform="rotate(-90 10 120)" text-anchor="middle">Q 的块 i →</text>';
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+        const k = i * 4 + j, cls = k === g ? 'is-now' : k < g ? 'is-done' : '';
+        s += `<rect class="ai-fs-tile ${cls}" x="${50 + j * 44}" y="${20 + i * 44}" width="40" height="40" rx="3"/>`;
+        if (k === g) s += `<text class="ai-fs-tt" x="${70 + j * 44}" y="${44 + i * 44}" text-anchor="middle">S${i + 1}${j + 1}</text>`;
+      }
+      fig.querySelector<HTMLElement>('[data-grid]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-sram]')!.innerHTML = `<b>片上（SRAM）此刻有：</b><br>Q 的第 ${qi + 1} 块（整个内层循环都留着）<br>K、V 的第 ${kj + 1} 块（刚读进来）<br>S 的这一块 S${qi + 1}${kj + 1}（算完、更新 m、l、acc 后就扔掉）<br>这块查询的 m、l、acc`
+        + `<br><span class="ai-faint">${kj === 3 ? `第 ${qi + 1} 块查询看完了所有的键：O = acc / l，写回显存，这是它唯一一次写。` : '浅色的块已经算过、扔掉了，没有写进显存。'}</span>`;
+    }
+    function drawSoftmax() {
+      const nb = 8 / bs; sIn.max = String(nb); if (Number(sIn.value) > nb) sIn.value = String(nb);
+      const T = Number(sIn.value); fig.querySelector('[data-sv]')!.textContent = `${T} / ${nb}`;
+      let m = -Infinity, l = 0, acc = 0, scale = 0; const lines: string[] = [];
+      for (let b = 0; b < T; b++) {
+        const xb = X.slice(b * bs, b * bs + bs), vb = V.slice(b * bs, b * bs + bs), mn = Math.max(m, ...xb);
+        scale = Math.exp(m - mn);
+        const e = xb.map((x) => Math.exp(x - mn));
+        l = l * scale + e.reduce((a, c) => a + c, 0); acc = acc * scale + e.reduce((a, c, k) => a + c * vb[k], 0); m = mn;
+        lines.push(`第 ${b + 1} 块：m = ${m.toFixed(2)}，旧值 ×${scale.toFixed(4)}，l = ${l.toFixed(4)}，acc = ${acc.toFixed(4)}，acc / l = ${(acc / l).toFixed(4)}`);
+      }
+      const mx = Math.max(...X), p = X.map((x) => Math.exp(x - mx)), z = p.reduce((a, c) => a + c, 0), full = p.reduce((a, c, k) => a + c * V[k], 0) / z;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 120"><line class="ai-bc-ax" x1="20" x2="590" y1="70" y2="70"/>';
+      X.forEach((x, k) => {
+        const b = Math.floor(k / bs), cls = b < T - 1 ? 'is-done' : b === T - 1 ? 'is-now' : '', cx = 40 + k * 70;
+        s += `<rect class="ai-fs-bar ${cls}" x="${cx}" y="${x >= 0 ? 70 - x * 15 : 70}" width="44" height="${Math.abs(x) * 15}"/><text class="ai-al-gl" x="${cx + 22}" y="${x >= 0 ? 64 - x * 15 : 82 - x * 15}" text-anchor="middle">${x}</text><text class="ai-al-gl" x="${cx + 22}" y="116" text-anchor="middle">v = ${V[k]}</text>`;
+        if (k % bs === 0 && k) s += `<line class="ai-fs-sep" x1="${cx - 13}" x2="${cx - 13}" y1="8" y2="104"/>`;
+      });
+      fig.querySelector<HTMLElement>('[data-bars]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = lines.join('<br>')
+        + `<br>${T === nb ? `读完了：输出 acc / l = ${(acc / l).toFixed(4)}；一次算完整行 softmax 再加权 = ${full.toFixed(4)}，相同。` : `<span class="ai-faint">还没读完：acc / l 只是“到目前为止”的结果，后面出现更大的打分时会被修正。一次算完 = ${full.toFixed(4)}。</span>`}`;
+    }
+    gIn.addEventListener('input', drawGrid); sIn.addEventListener('input', drawSoftmax);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group="bs"] [data-v]'); if (!b) return;
+      bs = Number(b.dataset.v); fig.querySelectorAll('[data-group="bs"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); drawSoftmax();
+    });
+    drawGrid(); drawSoftmax();
+  }
+  document.querySelectorAll<HTMLElement>('[data-flashsoftmax]').forEach(init);
+</script>

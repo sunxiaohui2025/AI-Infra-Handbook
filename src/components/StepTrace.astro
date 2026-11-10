@@ -1,0 +1,48 @@
+---
+// 引擎实际运行的逐步记录（第 108 讲）：读 miniinfer/outputs/ 里 bench 脚本保存的 JSON，
+// 画成甘特图：每行一个请求，每列一步；琥珀色是这一步做 prefill，绿色是 decode。下方是每一步 batch 里的请求数。
+// 用法：<StepTrace file="outputs/batching_steps.json" runs={['静态批处理（8 个一批）', 'continuous batching（8 个槽）']} />
+import { readMini } from './_mini';
+interface Props { file: string; runs: string[]; title?: string; caption?: string; slots?: number }
+const { file, runs, title = '每一步 batch 里有谁', caption, slots = 8 } = Astro.props;
+const data = JSON.parse(readMini(file));
+const payload = JSON.stringify({ lens: data.lens, runs: Object.fromEntries(runs.map((r) => [r, data.runs[r]])), slots });
+---
+<figure class="ai-gt ai-st" data-steptrace data-payload={payload}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="r"><span class="ai-tl-k">运行：</span>{runs.map((r, i) => <button data-v={r} aria-pressed={i === runs.length - 1 ? 'true' : 'false'}>{r}</button>)}</div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const D = JSON.parse(fig.dataset.payload!) as { lens: number[]; runs: Record<string, [number, number][][]>; slots: number };
+    const names = Object.keys(D.runs);
+    let cur = names[names.length - 1];
+    const maxSteps = Math.max(...names.map((n) => D.runs[n].length));
+    function draw() {
+      const tr = D.runs[cur], n = D.lens.length, x0 = 70, w = 800, cw = w / maxSteps, rh = 14, y0 = 10;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 900 ${y0 + n * rh + 110}">`;
+      for (let r = 0; r < n; r++) s += `<text class="ai-al-gl" x="${x0 - 6}" y="${y0 + r * rh + 10}" text-anchor="end">请求 ${r}（${D.lens[r]}）</text><line class="ai-st-grid" x1="${x0}" y1="${y0 + r * rh + rh}" x2="${x0 + w}" y2="${y0 + r * rh + rh}"/>`;
+      tr.forEach((step, t) => step.forEach(([id, pre]) => (s += `<rect class="${pre ? 'ai-sn-a' : 'ai-sn-b'}" x="${x0 + t * cw}" y="${y0 + id * rh + 2}" width="${Math.max(cw, 0.6)}" height="${rh - 4}"/>`)));
+      const by = y0 + n * rh + 20, bh = 60;
+      s += `<text class="ai-al-gl" x="${x0 - 6}" y="${by + 10}" text-anchor="end">batch 大小</text><line class="ai-eps-80" x1="${x0}" y1="${by}" x2="${x0 + w}" y2="${by}"/><text class="ai-al-gl" x="${x0 + w + 4}" y="${by + 4}">${D.slots} 个槽</text>`;
+      tr.forEach((step, t) => { const hgt = step.length / D.slots * bh; s += `<rect class="ai-eps-cp" x="${x0 + t * cw}" y="${by + bh - hgt}" width="${Math.max(cw, 0.6)}" height="${hgt}"/>`; });
+      for (let t = 0; t <= maxSteps; t += 20) s += `<text class="ai-al-gl" x="${x0 + t * cw}" y="${by + bh + 16}" text-anchor="middle">${t}</text>`;
+      s += `<text class="ai-al-gl" x="${x0 + w}" y="${by + bh + 30}" text-anchor="end">第几步</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const busy = tr.reduce((a, st) => a + st.length, 0), idle = tr.length * D.slots - busy;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${cur}：${tr.length} 步，平均每步 ${(busy / tr.length).toFixed(1)} 个请求；${D.slots} 个槽 × ${tr.length} 步 = ${tr.length * D.slots} 个“槽·步”，用了 ${busy} 个，空着 ${idle} 个（${(idle / (tr.length * D.slots) * 100).toFixed(0)}%）。`
+        + '<br><span class="ai-faint">琥珀色：这一步做 prefill；绿色：decode。括号里是这个请求要生成的 token 数。数据来自引擎的实际运行记录。</span>';
+    }
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      cur = bt.dataset.v!; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-steptrace]').forEach(init);
+</script>

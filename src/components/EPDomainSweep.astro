@@ -1,0 +1,108 @@
+---
+// 高带宽域的大小对大规模 MoE decode 的影响（公式与第 103 讲第二段代码相同）。DeepSeek-V3，FP8 权重，GPU 按 H100（80 GB，3.35 TB/s）。
+// 注意力按数据并行（每卡服务自己的会话），256 个路由专家均分到 S 张卡（EP = S），一个实例占满 S 张卡。
+//   每卡权重 = 共享部分 17.1 GB（注意力、稠密层、共享专家、路由器、嵌入表与输出层，每卡各一份）+ 路由专家 654 GB ÷ S
+//   每卡会话数 n = ⌊(80 GB − 每卡权重 − 2 GiB) ÷ 每会话 KV⌋，每会话 KV = 上下文 × 61 层 × 576 × 2 字节
+//   读显存 = (共享部分 − 嵌入表 + 654 GB ÷ S + n × KV) ÷ 3.35 TB/s；计算 = n × 每 token 计算时间（线性层 FP8、注意力 BF16）
+//   每层 All-to-All = 2α + n·8·7168·3 字节 × (S−1)/S ÷ 450 GB/s（一个 NVLink 域）；分散在 8 卡服务器上时，发往别的服务器的部分走网卡，两部分并行取慢的
+//   一步 = max(读, 算) + 58 × All-to-All；两个微批次重叠时 = max(读 + 多读一遍本卡权重, 算, 通信) + 58 × 4α
+// 读者可以：选域大小、部署方式、是否重叠、上下文长度、网卡带宽，看每卡显存怎么分、一步怎么构成，以及每卡吞吐随 S 的曲线。
+interface Props { title?: string; caption?: string }
+const { title = '高带宽域多大，MoE 每张卡能出多少 token', caption } = Astro.props;
+---
+<figure class="ai-gt ai-eps" data-epsweep>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="s"><span class="ai-tl-k">EP 组（实例）大小 S：</span>{[8, 16, 32, 64, 128, 256].map((v) => <button data-v={v} aria-pressed={v === 64 ? 'true' : 'false'}>{v}</button>)}</div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="d"><span class="ai-tl-k">放在：</span><button data-v="dom" aria-pressed="true">一个 NVLink 域</button><button data-v="srv" aria-pressed="false">多台 8 卡服务器（跨机走网卡）</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="o"><span class="ai-tl-k">重叠：</span><button data-v="0" aria-pressed="true">不重叠</button><button data-v="1" aria-pressed="false">两个微批次重叠</button></div>
+    <label class="ai-tl-lr"><span>上下文 <b data-cv></b> token</span><input type="range" min="0" max="4" step="1" value="2" data-c /></label>
+    <label class="ai-tl-lr"><span>网卡每卡 <b data-bv></b> GB/s</span><input type="range" min="0" max="4" step="1" value="1" data-b /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const HBM = 3.35e12, CAP = 80e9, WS = 2 * 2 ** 30, F8 = 1979e12, BF = 989e12;
+  const ANV = 0.822e-6, BNV = 450e9, AIB = 3.76e-6;
+  const d = 7168, L = 61, MOE = 58, E = 256, K = 8;
+  const attn = d * 1536 + 1536 * 128 * 192 + d * 576 + 512 * 128 * 256 + 128 * 128 * d, expert = 3 * d * 2048;
+  const shared = L * attn + 3 * 3 * d * 18432 + MOE * (expert + E * d) + 129280 * d, emb = 129280 * d, routed = MOE * E * expert;
+  const CTXS = [2048, 4096, 8192, 16384, 32768], NICS = [25e9, 50e9, 100e9, 200e9, 400e9], SS = [8, 16, 32, 64, 128, 256];
+  function run(S: number, ctx: number, srv: boolean, ov: boolean, bib: number) {
+    const kv = ctx * L * 576 * 2, ftok = 2 * (shared + MOE * K * expert) / F8 + L * 2 * 128 * (576 + 512) * ctx / BF;
+    const w = shared + emb + routed / S, n = Math.floor((CAP - w - WS) / kv);
+    if (n < 1) return { w, n: 0, kv, t: 0, read: 0, comp: 0, comm: 0 };
+    let read = (shared + routed / S + n * kv) / HBM;
+    const comp = n * ftok, byte = n * K * d * 3, ps = 8;
+    let a2a: number, al: number;
+    if (!srv || S <= ps) { a2a = 2 * ANV + byte * (S - 1) / S / BNV; al = ANV; }
+    else { a2a = 2 * AIB + Math.max(byte * (ps - 1) / (S - 1) / BNV, byte * (S - ps) / (S - 1) / bib); al = AIB; }
+    const comm = MOE * a2a;
+    let t: number;
+    if (ov) { read += (shared + routed / S) / HBM; t = Math.max(read, comp, comm) + 2 * MOE * 2 * al; }
+    else t = Math.max(read, comp) + comm;
+    return { w, n, kv, t, read, comp, comm };
+  }
+  function init(fig: HTMLElement) {
+    let S = 64, srv = false, ov = false;
+    const cIn = fig.querySelector<HTMLInputElement>('[data-c]')!, bIn = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    function draw() {
+      const ctx = CTXS[Number(cIn.value)], bib = NICS[Number(bIn.value)];
+      fig.querySelector('[data-cv]')!.textContent = ctx.toLocaleString(); fig.querySelector('[data-bv]')!.textContent = String(bib / 1e9);
+      const r = run(S, ctx, srv, ov, bib);
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 330">';
+      // 1. 每卡显存
+      const gx = 120, gw = 480, gb = (v: number) => v / CAP * gw;
+      s += `<text class="ai-np-ptitle" x="10" y="14">每卡 80 GB 显存怎么分</text>`;
+      const parts: [string, number, string][] = [['ai-eps-sh', shared + emb, '共享'], ['ai-eps-ex', routed / S, '专家'], ['ai-eps-kv', r.n * r.kv, 'KV'], ['ai-eps-ws', WS, '']];
+      let x = gx;
+      s += `<rect class="ai-eps-cap" x="${gx}" y="22" width="${gw}" height="22"/>`;
+      parts.forEach(([c, v, lab]) => { const wv = Math.min(gb(v), gx + gw * 1.08 - x); s += `<rect class="${c}" x="${x}" y="22" width="${Math.max(0, wv)}" height="22"/>`; if (lab && wv > 30) s += `<text class="ai-eps-in" x="${x + wv / 2}" y="37" text-anchor="middle">${lab} ${(v / 1e9).toFixed(1)}</text>`; x += wv; });
+      s += `<line class="ai-eps-80" x1="${gx + gw}" y1="18" x2="${gx + gw}" y2="48"/><text class="ai-al-gl" x="${gx - 6}" y="37" text-anchor="end">${r.n ? r.n + ' 个会话' : '放不下'}</text>`;
+      // 2. 一步的构成
+      const tsc = 400 / 45e-3, y2 = 76;
+      s += `<text class="ai-np-ptitle" x="10" y="${y2 - 6}">decode 一步（刻度到 45 ms）</text>`;
+      if (r.n) {
+        const base = Math.max(r.read, r.comp);
+        s += `<text class="ai-al-gl" x="${gx - 6}" y="${y2 + 13}" text-anchor="end">读显存</text><rect class="ai-sn-b" x="${gx}" y="${y2}" width="${r.read * tsc}" height="16"/><text class="ai-al-gl" x="${gx + 4 + r.read * tsc}" y="${y2 + 12}">${(r.read * 1e3).toFixed(1)} ms</text>`;
+        s += `<text class="ai-al-gl" x="${gx - 6}" y="${y2 + 33}" text-anchor="end">计算</text><rect class="ai-eps-cp" x="${gx}" y="${y2 + 20}" width="${r.comp * tsc}" height="16"/><text class="ai-al-gl" x="${gx + 4 + r.comp * tsc}" y="${y2 + 32}">${(r.comp * 1e3).toFixed(1)} ms</text>`;
+        const cx0 = ov ? gx : gx + base * tsc;
+        s += `<text class="ai-al-gl" x="${gx - 6}" y="${y2 + 53}" text-anchor="end">All-to-All</text><rect class="ai-sn-a" x="${cx0}" y="${y2 + 40}" width="${r.comm * tsc}" height="16"/><text class="ai-al-gl" x="${cx0 + 4 + r.comm * tsc}" y="${y2 + 52}">${(r.comm * 1e3).toFixed(1)} ms</text>`;
+        s += `<line class="ai-eps-80" x1="${gx + r.t * tsc}" y1="${y2 - 2}" x2="${gx + r.t * tsc}" y2="${y2 + 60}"/><text class="ai-al-gl" x="${gx + r.t * tsc + 4}" y="${y2 + 66}">一步 ${(r.t * 1e3).toFixed(1)} ms</text>`;
+      } else s += `<text class="ai-al-gl" x="${gx}" y="${y2 + 20}">每卡权重 ${(r.w / 1e9).toFixed(1)} GB，加上工作区已经超过 80 GB，连一个会话也放不下。</text>`;
+      // 3. 每卡吞吐随 S
+      const y3 = 172, ph = 120, px = (i: number) => gx + i * 90;
+      const lineOf = (sv: boolean) => SS.map((v, i) => { const q = run(v, ctx, sv, ov, bib); return [px(i), q.n ? q.n / q.t : 0] as [number, number]; });
+      const A = lineOf(false), B = lineOf(true), mx = Math.max(...A.map((p) => p[1]), ...B.map((p) => p[1]), 1);
+      const Y = (v: number) => y3 + ph - v / mx * (ph - 16);
+      s += `<text class="ai-np-ptitle" x="10" y="${y3}">每卡吞吐（token/s）随 S 的变化</text><rect class="ai-sn-b" x="250" y="${y3 - 9}" width="12" height="10"/><text class="ai-al-gl" x="266" y="${y3}">一个 NVLink 域</text><rect class="ai-sn-a" x="350" y="${y3 - 9}" width="12" height="10"/><text class="ai-al-gl" x="366" y="${y3}">多台 8 卡服务器</text>`;
+      const poly = (P: [number, number][], c: string) => { const q = P.filter((p) => p[1] > 0); return `<polyline class="ai-bc-line ${c}" points="${q.map(([a, v]) => `${a},${Y(v)}`).join(' ')}"/>` + q.map(([a, v]) => `<circle class="ai-eps-dot ${c}" cx="${a}" cy="${Y(v)}" r="3"/>`).join(''); };
+      s += poly(B, 'c-key') + poly(A, 'c-acc');
+      SS.forEach((v, i) => {
+        s += `<text class="ai-al-gl" x="${px(i)}" y="${y3 + ph + 16}" text-anchor="middle">${v}</text>`;
+        if (!A[i][1]) s += `<text class="ai-al-gl" x="${px(i)}" y="${y3 + ph - 4}" text-anchor="middle">放不下</text>`;
+        if (v === S && r.n) { const cur = srv ? B[i] : A[i]; s += `<circle class="ai-bc-dot" cx="${cur[0]}" cy="${Y(cur[1])}" r="5"/><text class="ai-al-gl" x="${cur[0]}" y="${Y(cur[1]) - 9}" text-anchor="middle">${Math.round(cur[1]).toLocaleString()}</text>`; }
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const eq = r.n
+        ? `每卡权重 = 17.1 + 654 ÷ ${S} = ${(r.w / 1e9).toFixed(1)} GB；会话数 n = ⌊(80 − ${(r.w / 1e9).toFixed(1)} − 2.1) ÷ ${(r.kv / 1e9).toFixed(3)}⌋ = ${r.n}。`
+          + `一步 = ${ov ? `max(读 ${(r.read * 1e3).toFixed(1)}, 算 ${(r.comp * 1e3).toFixed(1)}, 通信 ${(r.comm * 1e3).toFixed(1)}) + 启动` : `max(读 ${(r.read * 1e3).toFixed(1)}, 算 ${(r.comp * 1e3).toFixed(1)}) + 通信 ${(r.comm * 1e3).toFixed(1)}`} = ${(r.t * 1e3).toFixed(1)} ms，`
+          + `每卡 ${r.n} ÷ ${(r.t * 1e3).toFixed(1)} ms = <b>${Math.round(r.n / r.t).toLocaleString()} token/s</b>。`
+        : `S = ${S} 时每卡要放 ${(r.w / 1e9).toFixed(1)} GB 权重，超过 80 GB 显存。`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = eq + '<br><span class="ai-faint">显存几乎是满的，每一步又要把它几乎读一遍，所以“读显存”总在 23 ms 上下；吞吐由“显存里有多少是 KV”决定。S 越大，每卡专家越少、会话越多。重叠能藏住通信，代价是本卡权重多读一遍。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((y) => y.setAttribute('aria-pressed', y === bt ? 'true' : 'false'));
+      const v = bt.dataset.v!;
+      if (g.dataset.group === 's') S = Number(v); else if (g.dataset.group === 'd') srv = v === 'srv'; else ov = v === '1';
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-epsweep]').forEach(init);
+</script>

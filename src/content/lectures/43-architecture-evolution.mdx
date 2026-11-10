@@ -1,0 +1,135 @@
+---
+id: 43
+slug: architecture-evolution
+title: 架构演进对照
+chapter: 2
+part: 5
+problem: GPT-2、Llama、DeepSeek 到底改了什么
+prereqs: [32, 36, 37, 38, 39, 40, 41]
+level: 主线
+minutes: 20
+demos: [ArchCompare]
+video: ""
+formula: '骨架不变：嵌入 → [归一化 → 注意力 → 残差 → 归一化 → FFN → 残差] $\times L$ → 归一化 → 输出层'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import ArchCompare from '../../components/ArchCompare.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[32, 36, 37, 38, 39, 40, 41]} />
+
+第 5 篇前面几讲，一讲介绍一个改进：Pre-Norm 和 RMSNorm、RoPE、SwiGLU、GQA、MLA、MoE、长上下文。分开讲容易看清每个改进的细节，却不容易看清全貌：一个真实的模型到底用了哪些、为什么这样组合？
+
+这一讲把三代有代表性的模型并排放在一起：2019 年的 **GPT-2 XL**、2024 年的 **Llama-3-8B**、2024 年底的 **DeepSeek-V3**，逐项对照它们的差别。你会发现，五年里骨架几乎没变，变的是每个零件；而这些改动有一个清晰的主线。
+
+## 逐项对照
+
+下面的表格把三个模型的主要配置列在一起，和左边一列不同的格子标成了绿色。点任意一行，下方会写出这一项为什么改、对应哪一讲。
+
+<ArchCompare caption="图 43-1　GPT-2 XL、Llama-3-8B、DeepSeek-V3 逐项对照。绿色是和前一代不同的地方。点一行看这一项的变化和对应的讲。" />
+
+先看没有变的。三个模型都是第 32 讲那个“仅解码器”的结构：词嵌入进去，叠很多层，每层两个子层（注意力和 FFN），各带残差连接，最后一个归一化、一个输出层，训练目标都是第 23 讲的“预测下一个 token”。GPT-2 甚至已经用上了 Pre-Norm。如果把 2017 年的原始 Transformer、2019 年的 GPT-2 和 2024 年的 DeepSeek-V3 的结构图放在一起，第一眼看到的是相同，而不是不同。
+
+## 主线一：让每一层更好用
+
+有一类改动，目的是让同样大小的模型效果更好，或者训练更稳：
+
+- **归一化**：LayerNorm 换成 RMSNorm（第 36 讲）。效果相当，计算更省。
+- **位置**：可学习的绝对位置嵌入换成 RoPE（第 37 讲）。位置信息直接作用在注意力打分上，而且是相对位置；GPT-2 的位置嵌入表只有 1024 行，超过就没法用，RoPE 没有这个硬限制。
+- **FFN**：GELU 换成门控的 SwiGLU（第 38 讲）。同样的参数，效果更好。
+- **去掉偏置**：GPT-2 的线性层都带偏置，Llama 和 DeepSeek 都去掉了。对效果几乎没影响，实现更简单。
+
+这些改动在 2020–2023 年间陆续被验证，到了 Llama 系列，已经成了开源大模型的“标准配置”。今天的大多数开源模型，结构上都和 Llama 差不多。
+
+## 主线二：让推理更省
+
+另一类改动的目的更直接：让模型**推理起来更便宜**。这正是这门课最关心的方向。
+
+**KV Cache 一路变小。**下面的代码算了三个模型每个 token 的 KV Cache（16 位精度）：
+
+| 模型 | 注意力 | 每 token 的 KV Cache |
+| --- | --- | --- |
+| GPT-2 XL | MHA，25 个头 × 64 维 | 300 KiB |
+| Llama-3-8B | GQA，8 组 × 128 维 | 128 KiB |
+| DeepSeek-V3 | MLA，512 + 64 维 | 68.6 KiB |
+
+模型从 15.6 亿参数涨到了 6710 亿，大了 400 多倍，每个 token 的 KV Cache 反而越来越小。GQA（第 39 讲）和 MLA（第 40 讲）的出发点都是推理：KV Cache 决定了一张卡能同时服务多少请求、能支持多长的上下文。
+
+**参数和计算脱钩。**DeepSeek-V3 用 MoE（第 41 讲）把总参数做到 6710 亿，每个 token 却只激活约 370 亿。它的知识容量远大于 Llama-3-8B，每个 token 的计算量只是它的四倍多。
+
+**更低的精度。**DeepSeek-V3 在训练时就大量使用 FP8（第 10 讲），推理时可以直接用 FP8 权重，比 BF16 省一半的显存和带宽。
+
+所以，从 Llama 到 DeepSeek-V3 的改动，很大程度上是**推理成本驱动的架构设计**：模型结构反过来迁就硬件和推理系统的瓶颈。这也是为什么做 AI Infra 的人必须懂模型结构：很多最有效的“推理优化”，是在设计模型时就做下的。
+
+<Note kind="point">五年来 Transformer 的骨架没变，变的是零件。一条主线让每一层更好用（RMSNorm、RoPE、SwiGLU），另一条主线让推理更省（GQA、MLA 压缩 KV Cache，MoE 让参数和计算脱钩，FP8）。</Note>
+
+## 用代码复现
+
+下面的代码按 GPT-2 的结构（线性层带偏置、可学习位置嵌入、输出层共享嵌入）算出 GPT-2 XL 的参数，用第 35 讲的公式算 Llama-3-8B 的参数，再算三个模型每个 token 的 KV Cache。
+
+```python
+# 1. GPT-2 XL（2019）：48 层，d = 1600，25 个头，GELU FFN（4 倍），线性层带偏置，可学习位置嵌入 1024 个，输出层与嵌入共享
+d, L, V, ctx = 1600, 48, 50257, 1024
+attn = (3 * d * d + 3 * d) + (d * d + d)                 # q、k、v 合在一起的投影 + 输出投影，都带偏置
+mlp = (d * 4 * d + 4 * d) + (4 * d * d + d)              # 升维 + 降维，带偏置
+ln = 2 * (2 * d)                                         # 两个 LayerNorm，各有 γ、β
+gpt2 = V * d + ctx * d + L * (attn + mlp + ln) + 2 * d   # 嵌入 + 位置嵌入 + 48 层 + 最后的 LayerNorm（输出层共享嵌入）
+print(f"GPT-2 XL：每层 {attn + mlp + ln:,}，合计 {gpt2:,}")
+
+# 2. Llama-3-8B（2024）：第 35 讲的公式
+d, L, V, kv, f = 4096, 32, 128256, 1024, 14336
+llama = V * d + L * (2 * d * d + 2 * d * kv + 3 * d * f + 2 * d) + d + V * d
+print(f"Llama-3-8B：合计 {llama:,}")
+
+# 3. 每个 token 的 KV Cache（16 位精度）：模型越来越大，每个 token 的缓存反而越来越小
+kv_bytes = {
+    "GPT-2 XL（MHA，25 头 × 64 维）": 2 * 48 * 1600 * 2,
+    "Llama-3-8B（GQA，8 组 × 128 维）": 2 * 32 * 8 * 128 * 2,
+    "DeepSeek-V3（MLA，512 + 64）": 61 * (512 + 64) * 2,
+}
+for name, b in kv_bytes.items():
+    print(f"{name}：每 token {b / 1024:.1f} KiB")
+print("DeepSeek-V3：总参数约 671B，每 token 激活约 37B（官方公布）")
+```
+
+输出：
+
+```text
+GPT-2 XL：每层 30,740,800，合计 1,557,611,200
+Llama-3-8B：合计 8,030,261,248
+GPT-2 XL（MHA，25 头 × 64 维）：每 token 300.0 KiB
+Llama-3-8B（GQA，8 组 × 128 维）：每 token 128.0 KiB
+DeepSeek-V3（MLA，512 + 64）：每 token 68.6 KiB
+DeepSeek-V3：总参数约 671B，每 token 激活约 37B（官方公布）
+```
+
+GPT-2 XL 每层 30,740,800 个参数，合计 1,557,611,200（公开的数字是 15.6 亿）；Llama-3-8B 是 8,030,261,248。下面三行是每个 token 的 KV Cache：300 KiB、128 KiB、68.6 KiB。DeepSeek-V3 的结构有 MLA、MoE、多 token 预测等很多细节，这里直接引用官方公布的参数。
+
+## 到了大模型里：读一个新模型的 config
+
+学完第 4、5 篇，拿到任何一个新模型的 `config.json`，都可以快速判断它的推理特点。几个最关键的字段：
+
+| 字段（以 Hugging Face 的写法为例） | 看什么 | 影响 |
+| --- | --- | --- |
+| `hidden_size`、`num_hidden_layers` | 宽度和深度 | 参数量、每 token 计算量（第 35 讲） |
+| `num_attention_heads`、`num_key_value_heads` | 是否 GQA，几组 | KV Cache 大小（第 39 讲） |
+| `kv_lora_rank`（如果有） | 是否 MLA | KV Cache 大小、需要专门的算子（第 40 讲） |
+| `intermediate_size`、`hidden_act` | FFN 宽度、是否门控 | 参数、计算（第 31、38 讲） |
+| `num_experts`、`num_experts_per_tok`（名字各家不同） | 是否 MoE | 总参数 vs 激活参数、通信（第 41 讲） |
+| `rope_theta`、`rope_scaling`、`max_position_embeddings` | 位置编码、上下文 | 能支持多长（第 37、42 讲） |
+| `vocab_size`、`tie_word_embeddings` | 词表、是否共享 | 嵌入和输出层的大小（第 21、33 讲） |
+| `torch_dtype` | 发布的精度 | 权重显存（第 10 讲） |
+
+把这些数代进第 35 讲的计算器，就能估出参数、显存、每 token 的计算量和 KV Cache。这是第三章开始推理系统设计的第一步。
+
+## 容易混淆的地方
+
+1. **“8B”和“671B”不能直接比计算量。**稠密模型每个 token 用全部参数，MoE 只用激活的那部分。比较推理成本时，要看激活参数和 KV Cache，而不只是总参数。
+2. **同一个名字的模型，不同版本结构可能不同。**Llama-2-7B 用的是 MHA，Llama-2-70B 才用 GQA；Llama-3 全系列都用 GQA。看结构要看具体版本的 config。
+3. **表里没列出的细节还有很多。**比如 DeepSeek-V3 的多 token 预测、负载均衡的具体做法，Llama-3 的 RoPE 缩放方式等。这一讲只对照最影响结构和推理成本的那些。
+
+## 回顾
+
+把 GPT-2 XL、Llama-3-8B、DeepSeek-V3 放在一起看：仅解码器、Pre-Norm、残差、预测下一个 token 的骨架五年没变。变的零件有两条主线：一条让每层更好用（LayerNorm → RMSNorm，绝对位置 → RoPE，GELU → SwiGLU，去掉偏置）；另一条让推理更省（MHA → GQA → MLA，每 token 的 KV Cache 从 300 KiB 降到 68.6 KiB；稠密 → MoE，参数和计算脱钩；更低的训练和推理精度）。读一个新模型的 config，就能从这几个字段判断它的推理成本。
+
+这些改进都没有动注意力最根本的一点：每个 token 要和前面所有 token 打分，计算随长度平方增长，KV Cache 随长度线性增长。有没有从根本上更省的结构？下一讲（选读）：**混合架构与线性注意力**。

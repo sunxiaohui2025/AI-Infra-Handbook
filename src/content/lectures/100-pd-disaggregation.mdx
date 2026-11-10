@@ -1,0 +1,297 @@
+---
+id: 100
+slug: pd-disaggregation
+title: PD 分离
+chapter: 4
+part: 13
+problem: 为什么把 prefill 和 decode 拆到不同机器
+prereqs: [60, 62, 69, 73, 98, 99]
+level: 主线
+minutes: 35
+demos: [PDCompare, PDRatioGrid]
+video: ""
+formula: 'prefill 实例只做 prefill，decode 实例只做 decode，中间传一次 KV Cache；两边各自选卡数和并行方式，decode 不再被 prefill 打断'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import PDCompare from '../../components/PDCompare.astro';
+import PDRatioGrid from '../../components/PDRatioGrid.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[60, 62, 69, 73, 98, 99]} />
+
+第 60 讲就说过，prefill 和 decode 是两种性质完全不同的工作：prefill 一次处理成百上千个 token，计算受限；decode 每步每个请求只处理 1 个 token，带宽受限。可到目前为止，它们一直挤在同一张卡上。第 69 讲的分块 prefill 让两者和平共处，但只是缓解，并没有消除互相干扰：带着 prefill 块的那一步，总比纯 decode 的步要长。
+
+**PD 分离**（prefill-decode disaggregation）的想法很直接：**把 prefill 和 decode 放到不同的卡、甚至不同的机器上**。prefill 实例算完一个请求的提示，把它的 KV Cache 传给 decode 实例，由后者接着生成。这一讲看它解决了什么、付出了什么，以及什么时候值得这么做。
+
+## 混在一起的问题
+
+回顾混合部署的两个问题：
+
+**互相干扰。**用分块 prefill（每步预算 2048 个 token），一步里有 prefill 块时，耗时从 5 ms 左右变成 30 ms 左右（第 69 讲）。正在 decode 的请求，每遇到这样一步，就卡一下。负载越高，长提示越多，卡顿越频繁，TPOT 的尾延迟越差。
+
+**没法各取所需。**prefill 喜欢大算力，并行方式上偏好能把计算摊开的方式（比如更大的张量并行）；decode 喜欢大带宽和大显存（放更多 KV、更大的批），第 99 讲的 MoE decode 甚至要几百张卡做专家并行。混在一起时，只能选一套折中的配置。
+
+## 分开之后
+
+PD 分离的系统由三部分组成：
+
+1. **prefill 实例**：只做 prefill。可以用大的批、大的 token 预算，追求计算效率；不用担心打断谁。
+2. **decode 实例**：只做 decode。每一步都是纯粹的 decode，耗时平稳，TPOT 可预测。
+3. **KV 传输**：prefill 完成后，把这个请求的 KV Cache 从 prefill 实例的显存传到 decode 实例的显存，通常走 RDMA 网络（下一讲细说）。
+
+两边的卡数可以独立调整，比如 1 台 prefill 配 3 台 decode（记作 1P3D），按负载的特点决定比例；两边也可以用不同的并行方式，甚至不同型号的卡。
+
+## 模拟一下
+
+代码模拟了 4 张 H100 跑 Llama-3-8B：请求按泊松过程到达，提示 1000 到 3000 个 token，输出 100 到 300 个。比较三种部署：
+
+- **混合部署**：4 张卡各自做 prefill 和 decode（分块 prefill，预算 2048）；
+- **PD 分离 1P+3D**：1 张卡做 prefill，3 张做 decode；
+- **PD 分离 2P+2D**：各 2 张。
+
+每秒 12 个请求时：
+
+- **混合部署**：TTFT 中位 36 ms、P99 70 ms；token 间隔中位 5.1 ms，但 **P99 23.7 ms、最长 32.7 ms**。
+- **1P+3D**：token 间隔 P99 5.5 ms、最长 5.6 ms，非常平稳；但只有一张卡做 prefill，长提示要排队，**TTFT 的 P99 涨到 120 ms**。
+- **2P+2D**：token 间隔 P99 5.8 ms、最长 5.9 ms；TTFT P99 77 ms，和混合部署相当。
+
+三种部署的吞吐几乎一样（约 2360 tok/s）。PD 分离换来的是 decode 的**平稳**：token 间隔的尾延迟从 23.7 ms 降到 6 ms 以内。比例选错了（1P+3D），prefill 成了瓶颈，TTFT 变差。
+
+下面的演示是一个更小的场景：两张卡，16 个请求在 decode，先后来了三个长提示。
+
+<PDCompare caption="图 100-1　混合部署与 PD 分离。混合部署时，长提示的分块挤进 decode 的步里（琥珀色），被跟踪的请求每隔一阵就卡一下；PD 分离后 decode 卡的每一步都很短。代价是 prefill 卡要排队：后到的长提示 TTFT 变长。" />
+
+<Note kind="point">PD 分离把 prefill 和 decode 放到不同的实例上，prefill 完成后把 KV Cache 传给 decode 实例。decode 不再被 prefill 打断，token 间隔平稳；两边可以独立选择卡数、并行方式和硬件。代价是一次 KV 传输，以及要把 prefill 和 decode 的卡数比例配好，否则一边会成为瓶颈。</Note>
+
+## 代价：KV 要搬一次
+
+一个 2000 token 的提示，Llama-3-8B 的 KV Cache 有 **262 MB**，经 50 GB/s 的网络传输约 **5.2 ms**。和 prefill 本身（约 30 ms）相比不大，而且可以**逐层传输**：prefill 算完第 1 层，就开始传第 1 层的 KV，同时算第 2 层，传输大部分能和计算重叠。
+
+可模型越大、提示越长，KV 越多：Llama-3.1-70B 每个 token 320 KiB，一个 32K 的提示就是 10 GB，要传零点几秒。所以 PD 分离依赖高带宽的 RDMA 网络，也让 KV 小的模型（GQA、MLA，第 39、40 讲）更占优势。
+
+## 比例怎么配
+
+prefill 和 decode 的负载比，取决于请求的形状：提示越长、输出越短，prefill 越重；反之 decode 越重。代码里 1P+3D 的 prefill 成了瓶颈，2P+2D 刚好。实际系统会根据流量动态调整 P 和 D 的数量，甚至让一部分实例在两种角色之间切换。
+
+DistServe（2024 年）的论文把这个问题表述为：在给定的 TTFT 和 TPOT 目标下，**最大化每张卡的 goodput**（第 73 讲）。因为两种 SLO 分别由两类实例负责，可以分别优化。
+
+## 交接的细节：搬多久，占多少地方
+
+上面的模拟只给了一个总数。把一次交接拆开看，它有三件事要算清楚：字节数、两端的内存、谁先谁后。
+
+**字节数。**换一个更长的请求：Qwen3-8B（36 层、8 个 KV 头、头维度 128，BF16），输入 8192 个 token。每个 token 的 KV 是 2 × 36 × 8 × 128 × 2 字节 = 144 KiB，整个输入是 **1.125 GiB**。两台服务器之间按一张 200 Gbit/s 的网卡、实际 25 GB/s 算，纯传输约 **48.3 ms**；每次传输的启动开销按 5 μs 算，只占万分之一。PD 交接是一次搬一大块，拼的是带宽，不是延迟。换成 DeepSeek-V3 的 MLA（每 token 每层只存 512 + 64 个数），同样 8192 个 token 只有 549 MiB，传输时间减半。
+
+**两端同时占内存。**最简单的做法是整份双缓冲：传输结束之前，prefill 一端要保留完整的 KV，decode 一端也要先分配同样大的接收空间。传输期间这份状态占了两份内存，GQA 一共 2.25 GiB。分块传输能缩短重叠的时间：decode 端确认收到哪一块，prefill 端就释放哪一块。
+
+**谁先谁后。**decode 端不能一看到数据开始到达就读：要等 prefill 端发出“写完了”的完成标记，才能开始用这份状态；执行权交给 decode 之后，prefill 端才能释放源缓冲。标记本身不搬数据，只规定“先写完、后使用”的顺序。
+
+**持续到达时的总流量。**每秒 8 次这样的交接要约 9.7 GB/s；一个 100 GbE 端口（每方向 12.5 GB/s）能撑住平均流量，但每份要 96.6 ms 才传完。每秒 16 次就要约 19.3 GB/s，超过了端口的能力：即使两个池的计算都有空闲，网络队列也会一直变长。换成 MLA，同一个端口能撑住每秒 16 次。所以交接是否成为瓶颈，由每份的字节数和链路带宽一起决定。
+
+## 不同的卡做不同的阶段
+
+PD 分离在同一种卡上，收益主要是延迟稳定。如果手里有两种卡，它还能提高吞吐，因为每种卡可以只做自己擅长的阶段。
+
+设想一个具体的部署：一台服务器有 4 张 A100 80GB，另一台有 4 张 H20 96GB，跑 Qwen3-8B，每秒来 3.5 个请求，每个输入 8192 个 token、输出 1025 个 token（带推理过程的请求，输出比较长）。两种卡的峰值很不一样：
+
+| 卡 | BF16 稠密算力 | 显存带宽 |
+| --- | --- | --- |
+| A100 80GB SXM | 312 TFLOP/s | 2039 GB/s |
+| H20 96GB | 148 TFLOP/s | 4096 GB/s |
+
+H20 的算力不到 A100 的一半，带宽却是它的两倍。实际 kernel 达不到峰值，这里两项都按 50% 算。
+
+**prefill 一个请求要多久。**8192 个 token 的 prefill 是计算受限的：线性层 2 × 69.5 亿参数 × 8192，加上因果注意力，共约 133.6 TFLOPs。A100 要 **0.856 s**，H20 要 **1.805 s**。
+
+**decode 一个请求占多少 GPU 秒。**decode 按批 32 算，一步要读 15.1 GB 权重和 32 个请求的 KV（平均上下文 8192 + 512 个 token），带宽受限。A100 一步约 55 ms，H20 约 27 ms。一个请求 1024 步，一步由 32 个请求分摊，A100 占 **1.764 GPU 秒**，H20 占 **0.878 GPU 秒**。
+
+两种卡正好相反：A100 的 prefill 快一倍多，H20 的 decode 快一倍。
+
+**共置。**每张卡两个阶段都做，A100 每请求占 0.856 + 1.764 = 2.62 GPU 秒，H20 占 2.68。八张卡合计每秒 **3.02** 个请求，比到达的 3.5 个少，队列会一直变长。
+
+**PD 分离。**4 张 A100 做 P，每秒能 prefill 4 ÷ 0.856 = 4.67 个请求；4 张 H20 做 D，每秒能 decode 4 ÷ 0.878 = 4.55 个。链路每秒能交接 25 GB/s ÷ 1.125 GiB ≈ 20.7 份。整体的上限是三者中最小的：
+
+<div class="ai-formula">μ = min(μ_P, μ_D, 链路带宽 ÷ 每请求 KV) = min(4.67, 4.55, 20.7) = 4.55 请求/s</div>
+
+是共置的 1.51 倍，够处理每秒 3.5 个请求。计算量一点没少，变的只是谁来做。角色对调（H20 做 P、A100 做 D）则只有 **2.22** 请求/s，不到正确分工的一半。
+
+链路什么时候会成为瓶颈？4.55 请求/s 时，GQA 的 KV 需要链路至少 **5.5 GB/s**，MLA 只要 **2.6 GB/s**。高于这个值，再加带宽不会提高吞吐。
+
+**同一种卡呢？**8 张 A100 共置是 3.05 请求/s；分成 3 张做 P、5 张做 D，P 池 3.50、D 池 2.83，上限反而降到 **2.83**。每个请求消耗的 GPU 秒没变，卡数又只能按整数分，总有一边的能力闲着。对比一下第 69 讲的分块 prefill：A100 decode 一步 55 ms 里，矩阵计算只用了约 4 ms，剩下的算力足够把 prefill 切成小块捎带进去。如果捎带的计算能完全藏在读显存的时间里，八张卡的上限只受 decode 限制，是 8 ÷ 1.764 = **4.53** 请求/s。所以在同构集群上，追求吞吐先用分块 prefill；PD 分离的价值是两个阶段各选各的并行方式和批大小，并彻底隔开彼此的排队。H20 decode 一步本来就短，空闲的算力很少，分块捎带帮不上忙，异构集群的收益来自硬件本身的差异，分块替代不了。
+
+## 请求一变，配比就变
+
+最优的配比不是固定的。下面的演示可以改输入长度、前缀命中、输出长度和链路带宽，看 25 种分法各自的上限。
+
+<PDRatioGrid caption="图 100-2　4 张 A100 + 4 张 H20 的 25 种分法（Qwen3-8B，效率按峰值 50%）。每格是 min(P 池, D 池, 链路) 的请求率上限，橙框是最优配比。默认的 8K 输入、1025 输出时，4 张 A100 做 P、4 张 H20 做 D 最好，4.55 请求/s。" />
+
+**前缀命中。**前 6144 个 token 已经有缓存，P 只需处理 2048 个。A100 的 prefill 从 0.856 s 降到 0.238 s，4 张 A100 做 P 太多了。最优配比变成 **2 张 A100 做 P**，另外 2 张 A100 和 4 张 H20 做 D，上限升到 **5.69** 请求/s。注意 decode 一端没有缓存，交接的 KV 仍是完整的 1.125 GiB。
+
+**输出变短。**恢复完整输入，输出只有 129 个 token（普通对话）。D 几乎不再是瓶颈，最优配比变成 **4 张 A100 + 3 张 H20 做 P**，只留 1 张 H20 做 D，上限 **6.33** 请求/s。这时共置已经有 5.84 请求/s，分离只多了 8%。
+
+三种请求下，最合适的 P 卡数分别是 4、2、7 张。前缀命中让 P 的工作变少，把卡推向 D；输出变短让 D 的工作变少，把卡推向 P。推理模型的输出越长，D 的比重越大，H20 这类带宽强、算力弱的卡越有价值。实际系统因此要在两个时间尺度上调度：请求到达时选进哪个队列，负载分布慢慢变化时调整两个池的大小。
+
+## 到了大模型里
+
+**大规模部署的常见架构。**DeepSeek-V3 的推理就是 PD 分离的：prefill 用 32 卡的单元，decode 用 320 卡的单元（第 96 讲），两边的并行方式完全不同。月之暗面的 Mooncake 系统也是以 PD 分离和 KV Cache 为中心设计的。vLLM、SGLang 都提供 PD 分离的部署方式，配合 NIXL、Mooncake Transfer Engine 等传输库。
+
+**不是所有场景都需要。**规模小、提示短、对 TPOT 尾延迟不敏感的服务，混合部署加分块 prefill 已经够好，PD 分离反而增加了系统的复杂度（两类实例、KV 传输、路由）。PD 分离的收益在**大规模、长提示、严格的 TPOT 要求**下最明显。
+
+**和前缀缓存的配合。**多轮对话里，上一轮的 KV 在 decode 实例上，下一轮的 prefill 却在 prefill 实例上做。要想命中缓存，就得把 KV 存在两边都能访问的地方，或者把请求路由到有缓存的实例（第 101、102 讲）。
+
+## 用代码复现
+
+下面的代码模拟 4 张 H100、Llama-3-8B 的三种部署：混合部署（分块 prefill）、PD 分离 1P+3D 和 2P+2D，在每秒 6 个和 12 个请求下，统计 TTFT、token 间隔（第 2 个 token 以后）的中位数、P99 和最大值，以及吞吐；最后算一个 2000 token 提示的 KV 传输时间。每步耗时用第 60 讲的估算。
+
+```python
+import math
+# 4 张 H100 跑 Llama-3-8B。混合部署：4 张卡各自既做 prefill 也做 decode（分块 prefill，每步预算 2048）；
+# PD 分离：P 张卡只做 prefill，其余只做 decode，prefill 完的 KV 经 50 GB/s 网络传给 decode 卡
+N, NE, L, d, W, KV, F, BW = 8.03e9, 128256 * 4096, 32, 4096, 16.06e9, 131072, 989e12, 3.35e12
+
+def step_time(work):                                     # work：[(新 token 数, 前面已有的 token 数)]，第 60 讲的估算
+    flops = sum(2 * (N - NE) * c + 4 * L * d * c * (p + c / 2) for c, p in work)
+    return max(flops / F, (W + KV * sum(p + c for c, p in work)) / BW)
+
+def lcg(seed):
+    while True: seed = (seed * 1103515245 + 12345) % 2**31; yield seed / 2**31
+
+def workload(rate, n=400):
+    r, t, out = lcg(7), 0.0, []
+    for _ in range(n):
+        t += -math.log(1 - next(r)) / rate
+        out.append(dict(at=t, p=1000 + int(next(r) * 2000), o=100 + int(next(r) * 200)))
+    return out
+
+def run(reqs, n_prefill):
+    gpus = [dict(kind="mixed" if n_prefill == 0 else ("prefill" if g < n_prefill else "decode"), free=0.0, q=[], run=[]) for g in range(4)]
+    pending = sorted(reqs, key=lambda q: q["at"]); handoff = []          # handoff：(到达 decode 卡的时间, 请求)
+    for q in reqs: q.update(done=0, gen=0, times=[])
+    while pending or handoff or any(g["q"] or g["run"] for g in gpus):
+        g = min(gpus, key=lambda g: g["free"]); now = g["free"]
+        while pending and pending[0]["at"] <= now:                        # 新请求：混合部署给最空闲的卡；分离时给 prefill 卡
+            q = pending.pop(0)
+            cand = [x for x in gpus if x["kind"] in ("mixed", "prefill")]
+            min(cand, key=lambda x: len(x["q"]) + len(x["run"]))["q"].append(q)
+        for h in [h for h in handoff if h[0] <= now]:                     # KV 传到了：放进 decode 卡
+            handoff.remove(h); min([x for x in gpus if x["kind"] == "decode"], key=lambda x: len(x["run"]))["run"].append(h[1])
+        work, budget = [], (2048 if g["kind"] == "mixed" else 8192)
+        if g["kind"] in ("mixed", "decode"):
+            for q in g["run"]: work.append((q, 1)); budget -= 1
+        if g["kind"] in ("mixed", "prefill"):
+            for q in g["q"]:
+                if budget <= 0: break
+                c = min(budget, q["p"] - q["done"]); work.append((q, c)); budget -= c
+        if not work:                                                     # 没活：等下一个事件
+            nxt = [x["at"] for x in pending[:1]] + [h[0] for h in handoff] + [x["free"] for x in gpus if x is not g and (x["q"] or x["run"])]
+            g["free"] = max(now + 1e-4, min(nxt)) if nxt else now + 1e-3; continue
+        dt = step_time([(c, q["done"] + q["gen"]) for q, c in work]); g["free"] = now + dt
+        for q, c in work:
+            if q["done"] < q["p"]:
+                q["done"] += c
+                if q["done"] < q["p"]: continue
+                g["q"].remove(q); q["gen"] = 1; q["times"].append(g["free"])  # prefill 完成，出第一个 token
+                if g["kind"] == "prefill": handoff.append((g["free"] + q["p"] * KV / 50e9, q))
+                else: g["run"].append(q)
+            else:
+                q["gen"] += 1; q["times"].append(g["free"])
+                if q["gen"] == q["o"]: g["run"].remove(q)
+    return reqs
+
+def pct(xs, p): xs = sorted(xs); return xs[min(len(xs) - 1, int(p / 100 * len(xs)))]
+for rate in [6, 12]:
+    for name, P in [("混合部署 4 卡", 0), ("PD 分离 1P+3D", 1), ("PD 分离 2P+2D", 2)]:
+        rs = run(workload(rate), P)
+        ttft = [(q["times"][0] - q["at"]) * 1e3 for q in rs]
+        gaps = [(b - a) * 1e3 for q in rs for a, b in zip(q["times"][1:], q["times"][2:])]   # 第 2 个 token 以后的间隔
+        span = max(q["times"][-1] for q in rs) - rs[0]["at"]
+        print(f"每秒 {rate} 个请求，{name}：TTFT 中位 {pct(ttft, 50):5.0f} / P99 {pct(ttft, 99):5.0f} ms；"
+              f"token 间隔 中位 {pct(gaps, 50):4.1f} / P99 {pct(gaps, 99):5.1f} / 最大 {max(gaps):5.1f} ms；吞吐 {sum(q['o'] for q in rs) / span:5.0f} tok/s")
+print(f"一个 2000 token 的提示，KV 有 {2000 * KV / 1e6:.0f} MB，经 50 GB/s 网络传输约 {2000 * KV / 50e9 * 1e3:.1f} ms")
+```
+
+输出：
+
+```text
+每秒 6 个请求，混合部署 4 卡：TTFT 中位    35 / P99    65 ms；token 间隔 中位  5.0 / P99   5.2 / 最大  32.2 ms；吞吐  1204 tok/s
+每秒 6 个请求，PD 分离 1P+3D：TTFT 中位    33 / P99    83 ms；token 间隔 中位  5.0 / P99   5.2 / 最大   5.2 ms；吞吐  1204 tok/s
+每秒 6 个请求，PD 分离 2P+2D：TTFT 中位    33 / P99    75 ms；token 间隔 中位  5.1 / P99   5.4 / 最大   5.5 ms；吞吐  1203 tok/s
+每秒 12 个请求，混合部署 4 卡：TTFT 中位    36 / P99    70 ms；token 间隔 中位  5.1 / P99  23.7 / 最大  32.7 ms；吞吐  2359 tok/s
+每秒 12 个请求，PD 分离 1P+3D：TTFT 中位    38 / P99   120 ms；token 间隔 中位  5.2 / P99   5.5 / 最大   5.6 ms；吞吐  2362 tok/s
+每秒 12 个请求，PD 分离 2P+2D：TTFT 中位    35 / P99    77 ms；token 间隔 中位  5.4 / P99   5.8 / 最大   5.9 ms；吞吐  2360 tok/s
+一个 2000 token 的提示，KV 有 262 MB，经 50 GB/s 网络传输约 5.2 ms
+```
+
+每秒 6 个请求时差别还不大，只有混合部署的最长间隔（32.2 ms）明显偏高。每秒 12 个请求时，混合部署 token 间隔的 P99 涨到 23.7 ms，PD 分离始终在 6 ms 以内；1P+3D 的 TTFT P99 是 120 ms，2P+2D 是 77 ms。
+
+这个模拟不考虑 KV 传输和 prefill 的重叠、显存上限和抢占，负载均衡也很简单，只用来说明趋势。
+
+下面的代码复现异构集群的配比：由峰值和 50% 的效率推出两种卡在两个阶段的时间，算共置、PD 最优配比、角色对调、同构集群和两种请求变化下的上限。
+
+```python
+# Qwen3-8B（BF16）在 A100 与 H20 上：两个阶段每个请求各占多少 GPU 秒，PD 分离后怎么配比
+L, d, ffn, nq, nkv, hd, vocab = 36, 4096, 12288, 32, 8, 128, 151936
+lin = L * (d * (nq + 2 * nkv) * hd + nq * hd * d + 3 * d * ffn)   # 每层线性层参数 × 层数
+W = 2 * (lin + vocab * d)                                          # decode 每步读的权重（含输出层）
+KV = 2 * L * nkv * hd * 2                                          # 每 token 的 KV：144 KiB
+GPU = {"A100": (312e12, 2039e9), "H20": (148e12, 4096e9)}           # BF16 稠密算力、显存带宽（峰值）
+EFF, BATCH = 0.5, 32                                               # 实际只发挥峰值的 50%；decode 批 32
+
+def need(gpu, prompt, cached, out):            # 一个请求在这张卡上的 prefill 秒数、decode GPU 秒数
+    flops, bw = GPU[gpu][0] * EFF, GPU[gpu][1] * EFF
+    new = prompt - cached
+    f = 2 * lin * new + 4 * nq * hd * L * (prompt**2 - cached**2) / 2   # 线性层 + 因果注意力
+    step = (W + BATCH * (prompt + out / 2) * KV) / bw                  # 一步 decode：读权重 + 32 个请求的 KV
+    return f / flops, (out - 1) * step / BATCH
+
+def best(prompt, cached, out, link=25e9):
+    a, h = need("A100", prompt, cached, out), need("H20", prompt, cached, out)
+    co = 4 / sum(a) + 4 / sum(h)                                       # 共置：每张卡两个阶段都做
+    grid = {(i, j): min(i / a[0] + j / h[0], (4 - i) / a[1] + (4 - j) / h[1], link / (prompt * KV))
+            for i in range(5) for j in range(5)}                       # i 张 A100、j 张 H20 做 P，其余做 D
+    (i, j), mu = max(grid.items(), key=lambda kv: kv[1])
+    return a, h, co, grid, i, j, mu
+
+print(f"每步读权重 {W/1e9:.1f} GB，每 token KV {KV/1024:.0f} KiB，8192 token 的 KV {8192*KV/2**30:.3f} GiB")
+a, h, co, grid, i, j, mu = best(8192, 0, 1025)
+print(f"A100：prefill {a[0]:.3f} s，decode {a[1]:.3f} GPU 秒；H20：prefill {h[0]:.3f} s，decode {h[1]:.3f} GPU 秒")
+print(f"共置（8 张卡都做两个阶段）：{co:.2f} 请求/s")
+print(f"PD 最佳：{i} 张 A100 + {j} 张 H20 做 P，{mu:.2f} 请求/s；角色对调：{grid[(0, 4)]:.2f} 请求/s")
+print(f"链路要至少 {mu * 8192 * KV / 1e9:.1f} GB/s 才不成为瓶颈（MLA 的 549 MiB 只要 {mu * 549 * 2**20 / 1e9:.1f} GB/s）")
+# 同构：8 张 A100
+pa, da = a
+print(f"8 张 A100：共置 {8/(pa+da):.2f}，3P5D {min(3/pa, 5/da):.2f}，分块捎带的理想上限 {8/da:.2f} 请求/s")
+for name, args in [("前缀命中 6144", (8192, 6144, 1025)), ("输出只有 129", (8192, 0, 129))]:
+    a, h, co, grid, i, j, mu = best(*args)
+    print(f"{name}：最佳 {i} 张 A100 + {j} 张 H20 做 P，{mu:.2f} 请求/s（共置 {co:.2f}）")
+```
+
+输出：
+
+```text
+每步读权重 15.1 GB，每 token KV 144 KiB，8192 token 的 KV 1.125 GiB
+A100：prefill 0.856 s，decode 1.764 GPU 秒；H20：prefill 1.805 s，decode 0.878 GPU 秒
+共置（8 张卡都做两个阶段）：3.02 请求/s
+PD 最佳：4 张 A100 + 0 张 H20 做 P，4.55 请求/s；角色对调：2.22 请求/s
+链路要至少 5.5 GB/s 才不成为瓶颈（MLA 的 549 MiB 只要 2.6 GB/s）
+8 张 A100：共置 3.05，3P5D 2.83，分块捎带的理想上限 4.53 请求/s
+前缀命中 6144：最佳 2 张 A100 + 0 张 H20 做 P，5.69 请求/s（共置 4.90）
+输出只有 129：最佳 4 张 A100 + 3 张 H20 做 P，6.33 请求/s（共置 5.84）
+```
+
+对照正文：A100 的 prefill 0.856 s、decode 1.764 GPU 秒，H20 为 1.805 s、0.878 GPU 秒；共置 3.02，PD 4.55，对调 2.22 请求/s；8 张 A100 时共置 3.05、3P5D 2.83、分块捎带的理想上限 4.53；前缀命中后 2 张 A100 做 P 得 5.69，输出变短后 7 张卡做 P 得 6.33。
+
+## 容易混淆的地方
+
+1. **PD 分离不提高单个请求的速度。**prefill 和 decode 的计算量一点没少，还多了一次传输。它改善的是延迟的**稳定性**和资源的**匹配度**。
+2. **分块 prefill 和 PD 分离不矛盾。**分块 prefill 是“混在一起时减少干扰”，PD 分离是“干脆分开”。PD 分离的 prefill 实例上，长提示依然可以分块，以便和 KV 传输流水起来。
+3. **PD 分离的 TTFT 不一定更好。**prefill 实例不够时，请求要排队，TTFT 反而变差；KV 传输也会让第 2 个 token 来得晚一点。
+
+4. **同构集群上，PD 分离不提高吞吐。**每个请求消耗的 GPU 秒不变，卡数还只能按整数分。提高吞吐要靠分块 prefill 把空闲的算力用起来；PD 分离换来的是隔离。异构集群不同，每种卡做擅长的阶段，吞吐能提高一半。
+
+## 回顾
+
+prefill 计算受限、decode 带宽受限，混在一起时，prefill 会打断 decode，两者也没法各自选择最合适的配置。PD 分离把它们放到不同的实例上，prefill 完成后把 KV Cache 传给 decode 实例。模拟的 4 卡、每秒 12 个请求下，混合部署 token 间隔 P99 23.7 ms、最长 32.7 ms；2P+2D 的 PD 分离 P99 5.8 ms，TTFT 相当，吞吐不变；1P+3D 则 prefill 不够，TTFT P99 涨到 120 ms。代价是 KV 传输（2000 token 的 8B 模型约 262 MB、5.2 ms，可逐层重叠）和配比的调优。它在大规模、长提示、严格 TPOT 要求的场景收益最大。
+
+换一个更具体的场景：Qwen3-8B 的 8K 请求每次交接 1.125 GiB、在 25 GB/s 链路上约 48.3 ms，传输期间两端各占一份。4 张 A100 加 4 张 H20 时，共置只有 3.02 请求/s；A100 做 prefill、H20 做 decode 是 4.55 请求/s，对调后只有 2.22。最优配比随请求变化：前缀命中时 2 张卡做 P，输出变短时 7 张卡做 P。
+
+PD 分离让 KV Cache 不再只待在一张卡的显存里：它要在机器之间传递，还可能被存下来给以后的请求复用。显存放不下的 KV 能不能放到 CPU 内存、SSD 里？从哪里读回来比重新计算更划算？下一讲：**KV Cache 传输与分层存储**。

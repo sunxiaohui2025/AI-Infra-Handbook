@@ -1,0 +1,51 @@
+---
+// 按分布抽样（分布默认取 TinyLM 读到“我”之后的概率，与第 7 讲的代码相同）。
+// 抽样方法：把 [0, 1) 按概率切成几段（累积概率），抽一个均匀的随机数 u，看它落在哪一段。随机数用固定种子的生成器，重置后序列相同。
+// 读者可以：抽 1 次（看 u 落在哪里）、抽 100 次、抽 1000 次、重置；直方图对比实际频率（实心）和概率（虚线框）。
+interface Props { title?: string; caption?: string }
+const { title = '按概率抽一个词', caption } = Astro.props;
+const VOCAB = ['我', '爱', '学', 'AI', '推理', '<eos>'];
+const P = [0.4666, 0.2076, 0.0613, 0.0764, 0.0571, 0.131];
+---
+<figure class="ai-gt ai-sh" data-samplehist data-v={JSON.stringify(VOCAB)} data-p={JSON.stringify(P)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets"><button data-n="1">抽 1 次</button><button data-n="100">抽 100 次</button><button data-n="1000">抽 1000 次</button><button data-n="0">重置</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const V: string[] = JSON.parse(fig.dataset.v!), P: number[] = JSON.parse(fig.dataset.p!);
+    const cdf = P.map((_, i) => P.slice(0, i + 1).reduce((a, b) => a + b, 0));
+    let seed = 7, counts = Array(V.length).fill(0), total = 0, lastU = -1, lastI = -1;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const pick = (u: number) => { const i = cdf.findIndex((c) => u < c); return i < 0 ? V.length - 1 : i; };
+    const esc = (s: string) => s.replace('<', '&lt;');
+    function draw() {
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 220"><text class="ai-np-ptitle" x="20" y="12">累积概率：[0, 1) 按概率切成 6 段</text>';
+      let x0 = 20;
+      P.forEach((p, i) => { const w = p * 560; s += `<rect class="ai-sh-seg${i === lastI ? ' is-hit' : ''}" style="--h:${i * 55}" x="${x0}" y="20" width="${w}" height="26"/><text class="ai-al-gl" x="${x0 + w / 2}" y="37" text-anchor="middle">${w > 26 ? esc(V[i]) : ''}</text>`; x0 += w; });
+      [0, 0.25, 0.5, 0.75, 1].forEach((t) => { s += `<text class="ai-al-gl" x="${20 + t * 560}" y="60" text-anchor="middle">${t}</text>`; });
+      if (lastU >= 0) s += `<line class="ai-sh-u" x1="${20 + lastU * 560}" x2="${20 + lastU * 560}" y1="14" y2="52"/>`;
+      const mx = Math.max(...P, ...counts.map((c) => (total ? c / total : 0)));
+      s += `<text class="ai-np-ptitle" x="20" y="84">已抽 ${total} 次的频率（实心）与概率（虚线框）</text>`;
+      V.forEach((w, i) => { const x = 40 + i * 92, f = total ? counts[i] / total : 0, hf = (f / mx) * 100, hp = (P[i] / mx) * 100; s += `<rect class="ai-sh-f" x="${x}" y="${200 - hf}" width="60" height="${hf}"/><rect class="ai-sh-p" x="${x}" y="${200 - hp}" width="60" height="${hp}"/><text class="ai-al-gl" x="${x + 30}" y="214" text-anchor="middle">${esc(w)}</text><text class="ai-al-gl" x="${x + 30}" y="${196 - Math.max(hf, hp)}" text-anchor="middle">${total ? (f * 100).toFixed(1) + '%' : ''}</text>`; });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const dev = total ? Math.max(...P.map((p, i) => Math.abs(counts[i] / total - p))) : 0;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = (lastU >= 0 ? `上一次：u = ${lastU.toFixed(3)}，落在“${esc(V[lastI])}”那一段（${lastI ? cdf[lastI - 1].toFixed(4) : '0'} ≤ u < ${cdf[lastI].toFixed(4)}）。` : '点“抽 1 次”开始。')
+        + (total ? `<br>一共抽了 ${total} 次，频率和概率最大相差 ${(dev * 100).toFixed(1)} 个百分点。` : '')
+        + '<br><span class="ai-faint">抽的次数少时，频率和概率可能差得很多；次数越多，频率越接近概率（大数定律）。</span>';
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-n]'); if (!b) return;
+      const n = Number(b.dataset.n);
+      if (n === 0) { seed = 7; counts = Array(V.length).fill(0); total = 0; lastU = -1; lastI = -1; }
+      else for (let k = 0; k < n; k++) { lastU = rnd(); lastI = pick(lastU); counts[lastI]++; total++; }
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-samplehist]').forEach(init);
+</script>

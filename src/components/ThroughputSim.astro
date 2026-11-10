@@ -1,0 +1,61 @@
+---
+// 并发数 b 对 decode 的影响（Llama-3-8B BF16，一张 80 GB 的 H100）。每个请求长度 T，提示和生成各一半，decode 时平均上下文 0.75T。
+// 一步 decode：计算 = (2 × 非嵌入参数 + 4·L·d·上下文) × b；读写 = 权重 16 GB + 每请求 KV Cache；耗时取两者较大的（与第 62 讲的代码一致）。
+// 读者可以：调并发数和请求长度，看 TPOT（每个 token 的间隔）、每个请求的速度、总吞吐，以及显存是否放得下。
+interface Props { title?: string; caption?: string }
+const { title = '并发越多，单个请求越慢，总吞吐越高', caption } = Astro.props;
+---
+<figure class="ai-gt ai-tp" data-tput>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>并发请求数 b = <b data-bv></b></span><input type="range" min="0" max="9" step="1" value="6" data-b /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="t"><span class="ai-tl-k">每个请求长度</span>{[512, 2048, 8192, 32768].map((v) => <button data-v={v} aria-pressed={v === 2048 ? 'true' : 'false'}>{v}</button>)}</div>
+  </div>
+  <svg class="ai-tl-svg" viewBox="0 0 560 210" data-svg role="img" aria-label="TPOT 与吞吐随并发数变化"></svg>
+  <div class="ai-mc-cards" data-cards></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const N = 8.03e9, NE = 128256 * 4096, L = 32, D = 4096, WB = N * 2, KV = 2 * 32 * 8 * 128 * 2, F = 989e12, BW = 3.35e12, MEM = 80e9;
+  const BS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512];
+  function init(fig: HTMLElement) {
+    let T = 2048;
+    const bIn = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    const stepMs = (b: number) => { const ctx = 0.75 * T, fl = (2 * (N - NE) + 4 * L * D * ctx) * b, by = WB + KV * ctx * b; return [Math.max(fl / F, by / BW) * 1e3, fl / by]; };
+    function draw() {
+      const b = BS[Number(bIn.value)];
+      fig.querySelector('[data-bv]')!.textContent = String(b);
+      const L0 = 50, R = 510, Tp = 14, B = 180, X = (i: number) => L0 + i / 9 * (R - L0);
+      const tp = BS.map((x) => stepMs(x)[0]), th = BS.map((x, i) => x * 1000 / tp[i]);
+      const tMax = Math.max(...tp) * 1.1, hMax = Math.max(...th) * 1.1;
+      const Y1 = (v: number) => B - v / tMax * (B - Tp), Y2 = (v: number) => B - v / hMax * (B - Tp);
+      const bMax = Math.floor((MEM - WB) / (KV * T));
+      let s = '<g class="ai-vp-grid">' + BS.map((_, i) => `<line x1="${X(i)}" y1="${Tp}" x2="${X(i)}" y2="${B}"/>`).join('') + '</g>';
+      s += '<g class="ai-vp-tick">' + BS.map((x, i) => `<text x="${X(i)}" y="${B + 14}" text-anchor="middle">${x}</text>`).join('') + `<text x="${L0 - 4}" y="${Y1(tMax / 1.1) + 3}" text-anchor="end">${(tMax / 1.1).toFixed(0)} ms</text><text x="${R + 4}" y="${Y2(hMax / 1.1) + 3}">${Math.round(hMax / 1.1 / 1000)}K</text></g>`;
+      // 显存放不下的区域
+      const over = BS.findIndex((x) => x > bMax);
+      if (over >= 0) { const x0 = X(Math.max(0, over - 1 + (bMax - BS[over - 1]) / (BS[over] - BS[over - 1]))); s += `<rect class="ai-tp-over" x="${x0}" y="${Tp}" width="${R - x0}" height="${B - Tp}"/><text class="ai-al-gl" x="${x0 + 4}" y="${Tp + 12}">显存放不下（上限约 ${bMax}）</text>`; }
+      s += `<path class="ai-tp-tpot" d="${tp.map((v, i) => `${i ? 'L' : 'M'}${X(i)} ${Y1(v)}`).join(' ')}"/><path class="ai-tp-th" d="${th.map((v, i) => `${i ? 'L' : 'M'}${X(i)} ${Y2(v)}`).join(' ')}"/>`;
+      const bi = Number(bIn.value);
+      s += `<line class="ai-al-zl" x1="${X(bi)}" y1="${Tp}" x2="${X(bi)}" y2="${B}"/><circle class="ai-tp-d1" cx="${X(bi)}" cy="${Y1(tp[bi])}" r="4.5"/><circle class="ai-tp-d2" cx="${X(bi)}" cy="${Y2(th[bi])}" r="4.5"/>`;
+      s += `<text class="ai-al-lab" x="${L0 + 4}" y="${Tp + 26}"><tspan class="c-key">— TPOT（左轴）</tspan>　<tspan class="c-accent">— 总吞吐 token/s（右轴）</tspan></text><text class="ai-al-gl" x="${R}" y="${B + 28}" text-anchor="end">并发请求数 b →</text>`;
+      fig.querySelector('[data-svg]')!.innerHTML = s;
+      const [t, ai] = stepMs(b), fits = b <= bMax;
+      fig.querySelector<HTMLElement>('[data-cards]')!.innerHTML =
+        `<div><span>TPOT（每个 token 的间隔）</span><b>${t.toFixed(2)} ms</b><small>每个请求每秒 ${(1000 / t).toFixed(0)} 个 token</small></div>`
+        + `<div><span>总吞吐</span><b>${Math.round(b * 1000 / t).toLocaleString()} token/s</b><small>${b} 个请求一起，算术强度 ${ai.toFixed(1)}（H100 的分界线是 295）</small></div>`
+        + `<div><span>显存</span><b>${((WB + KV * T * b) / 1e9).toFixed(1)} GB</b><small>${fits ? `权重 16.1 GB + KV Cache；最多约 ${bMax} 个请求` : '超过 80 GB，放不下'}</small></div>`;
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-group="t"] [data-v]');
+      if (!btn) return;
+      T = Number(btn.dataset.v);
+      fig.querySelectorAll('[data-group="t"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-tput]').forEach(init);
+</script>

@@ -1,0 +1,84 @@
+---
+// 约束解码（规则、手写的“模型”打分与第 71 讲的代码完全相同，数据由 l71.py 导出）。
+// 格式：{"name": "<不含引号的非空字符串>", "age": <非负整数>}，拆成 5 段，逐字符检查（一个小的有限状态机）。
+// 每一步：模型给出几个候选 token 的打分 → 加约束时，把读进去会让格式不合法的 token 屏蔽（✗，概率置 0）→ 剩下的重新归一化，选最大的。
+// 读者可以：切换有无约束，拖动或单步看每一步的候选、屏蔽和选择；下方显示当前处在格式的哪一段。
+interface Props { title?: string; caption?: string }
+const { title = '每一步屏蔽不合法的 token', caption } = Astro.props;
+const DATA = {"before": {"": [["好的，", 3.0], ["JSON：", 2.5], ["{", 2.0]], "好的，": [["JSON：", 3.0], ["{", 2.5]], "好的，JSON：": [["{", 4.0]]}, "table": {"": [["\"name\"", 4.0], ["\"", 1.0]], "\"name\"": [[": ", 4.0], [":", 2.0]], "\"name\": ": [["\"", 4.0]], "\"name\": \"": [["小明", 3.5], ["小红", 3.0]], "\"name\": \"小明": [["\", ", 4.0], ["\"", 2.0]], "\"name\": \"小明\", ": [["\"age\"", 4.0]], "\"name\": \"小明\", \"age\"": [[": ", 4.0]], "\"name\": \"小明\", \"age\": ": [["\"", 3.0], ["十二", 2.2], ["12", 1.5]], "\"name\": \"小明\", \"age\": \"": [["十二", 3.0], ["12", 1.0]], "\"name\": \"小明\", \"age\": \"十二": [["岁", 2.5], ["\"", 2.0]], "\"name\": \"小明\", \"age\": \"十二岁": [["\"", 4.0]], "\"name\": \"小明\", \"age\": \"十二岁\"": [["}", 4.0]], "\"name\": \"小明\", \"age\": 12": [["岁", 2.4], ["}", 2.0], ["0", 0.5]], "\"name\": \"小明\", \"age\": \"十二岁\"}": [["。", 3.0], ["<结束>", 2.5]], "\"name\": \"小明\", \"age\": 12}": [["。", 3.0], ["<结束>", 2.5]]}};
+---
+<figure class="ai-gt ai-cd" data-constrain data-model={JSON.stringify(DATA)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="1" aria-pressed="true">加约束</button><button data-v="0" aria-pressed="false">不加约束</button></div>
+    <label class="ai-tl-lr"><span>第 <b data-tv></b> 步</span><input type="range" min="1" max="11" step="1" value="1" data-t /></label>
+  </div>
+  <div class="ai-cd-out" data-out></div>
+  <div class="ai-cd-cands" data-cands></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type C = [string, number];
+  const SEGS: [string, string | null][] = [['lit', '{"name": "'], ['str', null], ['lit', '", "age": '], ['num', null], ['lit', '}']];
+  const SEGNAME = ['开头 {"name": "', '名字（不含引号的字符串）', '中间 ", "age": ', '年龄（数字）', '结尾 }', '格式已完整，只能结束'];
+  type St = [number, number] | null;
+  function adv(st: St, ch: string): St {
+    if (!st) return null; const [i, k] = st;
+    if (i === SEGS.length) return null;
+    const [kind, lit] = SEGS[i];
+    if (kind === 'lit') { if (lit![k] !== ch) return null; return k + 1 === lit!.length ? [i + 1, 0] : [i, k + 1]; }
+    const ok = kind === 'str' ? ch !== '"' : /[0-9]/.test(ch);
+    if (ok) return [i, k + 1];
+    return k >= 1 ? adv([i + 1, 0], ch) : null;
+  }
+  function allowed(st: St, tok: string) {
+    if (tok === '<结束>') return !!st && st[0] === SEGS.length;
+    for (const ch of Array.from(tok)) { st = adv(st, ch); if (!st) return false; }
+    return true;
+  }
+  function init(fig: HTMLElement) {
+    const M = JSON.parse(fig.dataset.model!);
+    const model = (text: string): C[] => text.includes('{') ? (M.table[text.slice(text.indexOf('{') + 1)] ?? [['<结束>', 3]]) : M.before[text];
+    let cons = true;
+    const tIn = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    function run() {
+      const steps: { text: string; st: St; cands: C[]; tok: string }[] = []; let text = '', st: St = [0, 0];
+      for (let n = 0; n < 30; n++) {
+        const cands = model(text), ok = cands.filter(([t]) => !cons || allowed(st, t));
+        const tok = ok.reduce((a, b) => (b[1] > a[1] ? b : a))[0];
+        steps.push({ text, st, cands, tok });
+        if (tok === '<结束>') break;
+        text += tok; if (cons) for (const ch of Array.from(tok)) st = adv(st, ch);
+      }
+      return steps;
+    }
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\n/g, '↵');
+    function draw() {
+      const steps = run(); tIn.max = String(steps.length);
+      const T = Math.min(Number(tIn.value), steps.length); tIn.value = String(T);
+      fig.querySelector('[data-tv]')!.textContent = `${T} / ${steps.length}`;
+      const s = steps[T - 1], after = s.tok === '<结束>' ? s.text : s.text + s.tok;
+      fig.querySelector<HTMLElement>('[data-out]')!.innerHTML = `<span class="ai-tl-k">已生成：</span><code>${esc(s.text)}<mark>${s.tok === '<结束>' ? '⟨结束⟩' : esc(s.tok)}</mark></code>`;
+      const z = s.cands.reduce((a, [, v]) => a + Math.exp(v), 0);
+      const okc = s.cands.filter(([t]) => !cons || allowed(s.st, t)), z2 = okc.reduce((a, [, v]) => a + Math.exp(v), 0);
+      fig.querySelector<HTMLElement>('[data-cands]')!.innerHTML = s.cands.map(([t, v]) => {
+        const bad = cons && !allowed(s.st, t), p = Math.exp(v) / z, p2 = bad ? 0 : Math.exp(v) / (cons ? z2 : z);
+        return `<div class="ai-cd-row${bad ? ' is-bad' : ''}${t === s.tok ? ' is-pick' : ''}"><code>${esc(t)}</code><span class="ai-cd-bar"><i style="width:${p * 100}%"></i></span><span>${Math.round(p * 100)}%</span><span>${bad ? '✗ 屏蔽' : cons ? `→ ${Math.round(p2 * 100)}%` : ''}</span></div>`;
+      }).join('');
+      const where = cons && s.st ? SEGNAME[s.st[0]] : '';
+      let eq = cons ? `这一步之前处在格式的：<b>${where}</b>。模型原来的打分 → 屏蔽读进去会出错的 token → 剩下的重新归一化，选概率最大的 <code>${esc(s.tok)}</code>。`
+        : `不加约束：直接选模型打分最高的 <code>${esc(s.tok)}</code>。`;
+      if (T === steps.length) { let okJson = true; try { JSON.parse(after); } catch { okJson = false; } eq += `<br>最终输出：<code>${esc(after)}</code> → ${okJson ? '是合法的 JSON' : '<b>不是</b>合法的 JSON'}`; }
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = eq;
+    }
+    tIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group="m"] [data-v]'); if (!b) return;
+      cons = b.dataset.v === '1'; fig.querySelectorAll('[data-group="m"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-constrain]').forEach(init);
+</script>

@@ -1,0 +1,62 @@
+---
+// 形状追踪器（步骤与第 5 讲的代码相同）：一批句子从编号到注意力打分，每一步的运算和形状。
+// TinyLM：b = 2 句、s = 4 个词、d = 4、h = 2 个头、每头 2 维；Llama-3-8B：b = 8、s = 2048、d = 4096、h = 32、每头 128 维。
+// 读者可以：切换尺寸，点一步看输入、输出的形状、元素个数和 BF16 占的字节；TinyLM 尺寸下会把输出画成一格一格的小方块。
+interface Props { title?: string; caption?: string }
+const { title = '每一步之后，形状怎么变', caption } = Astro.props;
+---
+<figure class="ai-gt ai-st" data-shapetracker>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="t" aria-pressed="true">TinyLM 尺寸</button><button data-v="l" aria-pressed="false">Llama-3-8B 尺寸</button></div>
+  <div class="ai-st-wrap"><ol class="ai-st-steps" data-steps></ol><div data-pic></div></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Dims = Record<string, number>;
+  const SIZES: Record<string, Dims> = { t: { b: 2, s: 4, d: 4, h: 2, dh: 2, V: 6 }, l: { b: 8, s: 2048, d: 4096, h: 32, dh: 128, V: 128256 } };
+  const STEPS: { op: string; inp: string[]; out: string[]; note: string }[] = [
+    { op: '分词得到编号 ids', inp: [], out: ['b', 's'], note: '一批 b 句话，每句 s 个 token，每个位置是一个整数编号。' },
+    { op: 'x = E[ids]（查嵌入表）', inp: ['b', 's'], out: ['b', 's', 'd'], note: '每个编号换成嵌入表里的一行，多出最后一维 d。[b, s, d] 是大模型里最常见的形状。' },
+    { op: 'q = x @ W', inp: ['b', 's', 'd'], out: ['b', 's', 'd'], note: '矩阵乘法只作用在最后一维：[..., d] @ [d, d] → [..., d]，前面的 b、s 原样保留，每个 token 各自被变换。' },
+    { op: 'q.reshape(b, s, h, dh)', inp: ['b', 's', 'd'], out: ['b', 's', 'h', 'dh'], note: '把 d 拆成 h 个头 × 每头 dh 维（d = h·dh）。数据一个没动，只是换了一种看法。' },
+    { op: '.transpose(1, 2)', inp: ['b', 's', 'h', 'dh'], out: ['b', 'h', 's', 'dh'], note: '交换 s 和 h 两维，让每个头的 s 个向量排在一起，方便各个头独立计算。' },
+    { op: 'scores = q @ kᵀ', inp: ['b', 'h', 's', 'dh'], out: ['b', 'h', 's', 's'], note: '最后两维做矩阵乘法 [s, dh] @ [dh, s] → [s, s]，前面的 b、h 是“批”维度，一一对应地算。每个头里 s × s 个打分。' },
+    { op: 'q + bias（广播）', inp: ['b', 's', 'd'], out: ['b', 's', 'd'], note: '形状 [d] 的 bias 自动复制到 b × s 个位置上再相加。广播从最后一维开始对齐。' },
+    { op: 'x.sum(axis=-1)', inp: ['b', 's', 'd'], out: ['b', 's'], note: '沿哪一维求和，哪一维就消失。' },
+  ];
+  function init(fig: HTMLElement) {
+    let m = 't', sel = 5;
+    function draw() {
+      const D = SIZES[m], val = (k: string) => D[k], fmt = (ks: string[]) => (ks.length ? `[${ks.map((k) => `${k}=${val(k).toLocaleString()}`).join(', ')}]` : '—');
+      fig.querySelector<HTMLElement>('[data-steps]')!.innerHTML = STEPS.map((s, i) => `<li class="${i === sel ? 'is-sel' : ''}" data-i="${i}"><code>${s.op}</code><span>${fmt(s.out)}</span></li>`).join('');
+      const st = STEPS[sel], n = st.out.reduce((a, k) => a * val(k), 1);
+      // 画 TinyLM 尺寸的输出
+      let pic = '';
+      if (m === 't') {
+        const dims = st.out.map(val), last2 = dims.slice(-2), outer = dims.slice(0, -2), blocks = outer.reduce((a, b) => a * b, 1);
+        const [r, c] = last2.length === 2 ? last2 : [1, last2[0]], cs = 12;
+        pic = `<svg class="ai-tl-svg" viewBox="0 0 230 ${Math.ceil(blocks / 4) * (r * cs + 22) + 10}">`;
+        for (let k = 0; k < blocks; k++) {
+          const bx = 6 + (k % 4) * 56, by = 6 + Math.floor(k / 4) * (r * cs + 22);
+          const idx = outer.length ? outer.map((_, j) => Math.floor(k / outer.slice(j + 1).reduce((a, b) => a * b, 1)) % outer[j]) : [];
+          for (let i = 0; i < r; i++) for (let j = 0; j < c; j++) pic += `<rect class="ai-st-c" style="--h:${(idx[0] ?? 0) * 140 + (idx[1] ?? 0) * 40}" x="${bx + j * cs}" y="${by + i * cs}" width="${cs - 1}" height="${cs - 1}"/>`;
+          if (idx.length) pic += `<text class="ai-al-gl" x="${bx}" y="${by + r * cs + 11}">[${idx.join(', ')}]</text>`;
+        }
+        pic += '</svg>';
+      } else pic = `<div class="ai-st-big">${st.out.map((k) => `<span><b>${val(k).toLocaleString()}</b><small>${k}</small></span>`).join('<i>×</i>')}</div>`;
+      fig.querySelector<HTMLElement>('[data-pic]')!.innerHTML = pic;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${st.op}</b>：${fmt(st.inp)} → ${fmt(st.out)}，共 ${n.toLocaleString()} 个数${n > 1000 ? `，BF16 占 ${n * 2 >= 1e9 ? (n * 2 / 1e9).toFixed(2) + ' GB' : (n * 2 / 1e6).toFixed(1) + ' MB'}` : ''}。<br>${st.note}`
+        + (m === 't' ? '<br><span class="ai-faint">右图：每个小方块是一个数，最后两维画成一张表，前面的维度画成并排的几张表，标着它们的下标。</span>' : '');
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, b = t.closest<HTMLElement>('[data-group] [data-v]'), li = t.closest<HTMLElement>('[data-i]');
+      if (b) { m = b.dataset.v!; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); }
+      else if (li) sel = Number(li.dataset.i); else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-shapetracker]').forEach(init);
+</script>

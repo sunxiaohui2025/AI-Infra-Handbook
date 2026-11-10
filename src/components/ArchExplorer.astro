@@ -1,0 +1,74 @@
+---
+// Transformer 结构图：从输入的词到下一个词的概率，每个部件一个方框。
+// 读者可以：切换“TinyLM（原始 Transformer，Post-Norm）”和“Llama-3-8B（现代结构，Pre-Norm）”；
+//   点任意方框，下方显示它做什么、形状、参数量，以及讲它的那一讲（链接）。
+// 参数量：TinyLM 由 d=4、d_ff=8、V=6、2 层算出；Llama-3-8B 由 d=4096、d_ff=14336、32 个 Q 头 / 8 个 KV 头、V=128256、32 层算出。
+interface Props { model?: 'tiny' | 'llama'; title?: string; caption?: string }
+const { model = 'tiny', title = 'Transformer 的结构：点一个部件看看', caption } = Astro.props;
+type Box = { id: string; name: string; lec: number[]; shape: [string, string]; params: [number, number]; note: [string, string]; inBlock?: boolean };
+const d = [4, 4096], f = [8, 14336], V = [6, 128256];
+const BOXES: Box[] = [
+  { id: 'tok', name: '输入的 token', lec: [21], shape: ['[4]：我 爱 学 AI', '[s]：分词后的编号'], params: [0, 0], note: ['4 个编号', '字节级 BPE，词表 128256'] },
+  { id: 'emb', name: '词嵌入', lec: [22], shape: ['[4] → [4, 4]', '[s] → [s, 4096]'], params: [V[0] * d[0], V[1] * d[1]], note: ['查表：编号 → 嵌入表的一行', '同左'] },
+  { id: 'pos', name: '位置编码', lec: [25, 37], shape: ['+ [4, 4]', '（不在这里加）'], params: [0, 0], note: ['加上正弦位置编码', '用 RoPE：在注意力里旋转 Q、K，不加到输入上'] },
+  { id: 'attn', name: '多头自注意力', lec: [26, 27, 28, 39], shape: ['[4, 4] → [4, 4]，2 头 × 2 维', '[s, 4096] → [s, 4096]，32 个 Q 头 × 128 维，8 个 KV 头'], params: [4 * d[0] * d[0], 2 * d[1] * d[1] + 2 * d[1] * 1024], note: ['W_q、W_k、W_v、W_o 各 4 × 4，带因果掩码', 'W_q、W_o 4096 × 4096，W_k、W_v 4096 × 1024（GQA），因果掩码'], inBlock: true },
+  { id: 'res1', name: '残差相加', lec: [29], shape: ['[4, 4] + [4, 4]', '[s, 4096] + [s, 4096]'], params: [0, 0], note: ['x + 注意力(x)', 'x + 注意力(RMSNorm(x))'], inBlock: true },
+  { id: 'ln1', name: '归一化', lec: [30, 36], shape: ['[4, 4] → [4, 4]', '[s, 4096] → [s, 4096]'], params: [0, d[1]], note: ['LayerNorm，放在残差之后（Post-Norm）；γ、β 不训练', 'RMSNorm，放在注意力之前（Pre-Norm），只有 γ'], inBlock: true },
+  { id: 'ffn', name: '前馈网络 FFN', lec: [31, 38], shape: ['[4, 4] → [4, 8] → [4, 4]', '[s, 4096] → [s, 14336] → [s, 4096]'], params: [2 * d[0] * f[0], 3 * d[1] * f[1]], note: ['升维 W_1、ReLU、降维 W_2', 'SwiGLU：gate、up、down 三个矩阵'], inBlock: true },
+  { id: 'res2', name: '残差相加', lec: [29], shape: ['[4, 4] + [4, 4]', '[s, 4096] + [s, 4096]'], params: [0, 0], note: ['x + FFN(x)', 'x + FFN(RMSNorm(x))'], inBlock: true },
+  { id: 'ln2', name: '归一化', lec: [30, 36], shape: ['[4, 4] → [4, 4]', '[s, 4096] → [s, 4096]'], params: [0, d[1]], note: ['LayerNorm（这一层的输出）', 'RMSNorm，放在 FFN 之前'], inBlock: true },
+  { id: 'lnf', name: '最后的归一化', lec: [36], shape: ['（没有）', '[s, 4096] → [s, 4096]'], params: [0, d[1]], note: ['Post-Norm 每层已经以归一化结束', 'Pre-Norm 的残差流没归一化，输出前补一个 RMSNorm'] },
+  { id: 'head', name: '输出层 lm_head', lec: [33], shape: ['[4, 4] → [4, 6]', '[s, 4096] → [s, 128256]'], params: [d[0] * V[0], d[1] * V[1]], note: ['给词表里每个词打分（logits）', '同左；Llama-3-8B 不和嵌入表共享'] },
+  { id: 'soft', name: 'softmax → 下一个词', lec: [6, 23, 24], shape: ['[4, 6]，每行和为 1', '[s, 128256]'], params: [0, 0], note: ['推理时只用最后一行', '同左；再按解码策略选词（第 65 讲）'] },
+];
+const LAYERS = [2, 32];
+---
+<figure class="ai-gt ai-arch" data-arch data-cfg={JSON.stringify({ boxes: BOXES, layers: LAYERS, model })}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="tiny" aria-pressed={model === 'tiny' ? 'true' : 'false'}>TinyLM（原始结构，Post-Norm）</button><button data-v="llama" aria-pressed={model === 'llama' ? 'true' : 'false'}>Llama-3-8B（现代结构，Pre-Norm）</button></div>
+  <div class="ai-arch-body">
+    <div class="ai-arch-flow" data-flow></div>
+    <div class="ai-arch-side"><div class="ai-vp-read" data-read></div><div class="ai-arch-total" data-total></div></div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Box = { id: string; name: string; lec: number[]; shape: [string, string]; params: [number, number]; note: [string, string]; inBlock?: boolean };
+  const num = (n: number) => (n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n.toLocaleString('en-US'));
+  function init(fig: HTMLElement) {
+    const C = JSON.parse(fig.dataset.cfg!), B: Box[] = C.boxes;
+    let m = C.model === 'llama' ? 1 : 0, sel = 'attn';
+    // Llama 的块内顺序：归一化 → 注意力 → 残差 → 归一化 → FFN → 残差
+    const order = () => (m === 0 ? ['tok', 'emb', 'pos', '|', 'attn', 'res1', 'ln1', 'ffn', 'res2', 'ln2', '|', 'head', 'soft'] : ['tok', 'emb', '|', 'ln1', 'attn', 'res1', 'ln2', 'ffn', 'res2', '|', 'lnf', 'head', 'soft']);
+    const byId = Object.fromEntries(B.map((b) => [b.id, b]));
+    function draw() {
+      const ids = order();
+      let h = '', inside = false;
+      for (const id of ids) {
+        if (id === '|') { h += inside ? `<div class="ai-arch-rep">× ${C.layers[m]} 层</div></div>` : '<div class="ai-arch-block"><div class="ai-arch-blabel">一层 Transformer Block</div>'; inside = !inside; continue; }
+        const b = byId[id];
+        h += `<button class="ai-arch-box${id === sel ? ' is-sel' : ''}${id.startsWith('res') ? ' is-add' : ''}${id.startsWith('ln') ? ' is-norm' : ''}" data-id="${id}"><b>${id === 'ln1' || id === 'ln2' || id === 'lnf' ? (m ? 'RMSNorm' : 'LayerNorm') : b.name}</b><small>${b.shape[m]}</small></button>`;
+      }
+      fig.querySelector<HTMLElement>('[data-flow]')!.innerHTML = h;
+      const b = byId[sel];
+      fig.querySelector<HTMLElement>('[data-read]')!.innerHTML = `<div class="ai-vp-row"><span>部件</span><div><b>${b.name}</b>${b.inBlock ? `（每层一个，共 ${C.layers[m]} 个）` : ''}</div></div>`
+        + `<div class="ai-vp-row"><span>做什么</span><div>${b.note[m]}</div></div>`
+        + `<div class="ai-vp-row"><span>形状</span><div>${b.shape[m]}</div></div>`
+        + `<div class="ai-vp-row"><span>参数</span><div>${b.params[m] ? num(b.params[m]) + (b.inBlock ? `（每层）× ${C.layers[m]} = ${num(b.params[m] * C.layers[m])}` : '') : '没有可训练的参数'}</div></div>`
+        + `<div class="ai-vp-row"><span>详见</span><div>${b.lec.map((n) => `<a href="/l/${n}">第 ${n} 讲</a>`).join('、')}</div></div>`;
+      const tot = B.reduce((s, x) => s + x.params[m] * (x.inBlock ? C.layers[m] : 1), 0);
+      const blk = B.filter((x) => x.inBlock).reduce((s, x) => s + x.params[m], 0);
+      fig.querySelector<HTMLElement>('[data-total]')!.innerHTML = `每层 ${num(blk)} 个参数 × ${C.layers[m]} 层 + 嵌入表和输出层 = <b>${num(tot)}</b> 个参数`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, box = t.closest<HTMLElement>('[data-id]'), mb = t.closest<HTMLElement>('[data-group="m"] [data-v]');
+      if (box) sel = box.dataset.id!;
+      else if (mb) { m = mb.dataset.v === 'llama' ? 1 : 0; fig.querySelectorAll('[data-group="m"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === mb ? 'true' : 'false')); if (m === 0 && sel === 'lnf') sel = 'head'; }
+      else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-arch]').forEach(init);
+</script>

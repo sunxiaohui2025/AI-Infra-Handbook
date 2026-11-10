@@ -1,0 +1,83 @@
+---
+id: 119
+slug: other-engines-at-scale
+title: 其他引擎与规模化部署
+chapter: 5
+part: 16
+problem: TensorRT-LLM、LMDeploy、llama.cpp；PD 分离、大规模 EP 怎么落地
+prereqs: [96, 99, 100, 101, 102, 117, 118]
+level: 主线
+demos: [EngineMatrix, CodeWalk]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineMatrix from '../../components/EngineMatrix.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[96, 99, 100, 101, 102, 117, 118]} />
+
+前两讲读了 vLLM 和 SGLang 的单机结构。这一讲做两件事：一是看看其他几个常见引擎各自的定位，知道什么场景该选什么；二是看第 13 篇讲过的 PD 分离、大规模专家并行，在真实的引擎里是从哪些接口接进来的。
+
+<Note kind="warn">这一讲关于各引擎特点的描述是定性的，来自各项目的公开文档和本篇读过的源码，不是本站测出来的性能排名。这些项目更新很快，选型时请以官方文档和自己的压测为准（第 120 讲讲怎么压测）。</Note>
+
+## 几个常见的引擎
+
+<EngineMatrix caption="图 119-1　六个引擎的定位。选一个部署场景，强调色的是适合的引擎，下方说明原因。" />
+
+按“它们在第 113 讲那张差距表上各自押注在哪一行”来理解，比记功能列表更有用：
+
+**TensorRT-LLM**（NVIDIA，Apache-2.0）押注在 **kernel**。它最初的思路是把模型“编译”成一个针对具体 GPU、具体 batch 形状优化好的引擎（TensorRT 的老路），后来改成以 PyTorch 为主的后端，调度部分（in-flight batching，即 continuous batching；分页 KV；分块 prefill；投机解码）和 vLLM 大同小异。它的优势在 NVIDIA 自家写的 kernel 和低精度支持：新一代 GPU 上的 FP8、FP4 矩阵乘、融合的注意力和 MoE kernel，往往在这里最先成熟。代价是只支持 NVIDIA 的卡，部署链路也更重。
+
+**LMDeploy**（书生 InternLM 团队）有两个引擎：C++ 写的 TurboMind，和一个纯 PyTorch 的引擎。TurboMind 押注在**量化**：4 位权重量化（AWQ 等）和 KV Cache 量化下的矩阵乘、注意力 kernel 是它的强项。第 111 讲我们亲手验证过，量化要快起来，必须有直接读低位宽权重的 kernel；TurboMind 就是这类 kernel 做得好的例子。PyTorch 引擎更容易扩展到新模型和昇腾等其他硬件。
+
+**llama.cpp**（C/C++）押注在**能在任何地方跑**。它用自己的 GGUF 格式存权重，内置十几种量化格式（如 Q4_K_M 这类 k-quant，按小块分组、每组带缩放），在 CPU（AVX、ARM NEON）、Apple 的 Metal、CUDA、Vulkan 上都有 kernel。它的目标是本地和端侧：单用户、低并发、内存紧，关心的是单请求的延迟和占用，而不是几百个请求的吞吐。Ollama、LM Studio 这类桌面工具都以它为内核。它也有 continuous batching 和多槽位的服务模式，但不是为大规模并发设计的。
+
+**MLC-LLM** 押注在**编译器**：用 TVM 为每种硬件生成 kernel，因此能部署到手机、浏览器（WebGPU）这类别的引擎去不了的地方。
+
+此外，各家国产加速卡厂商通常为 vLLM、SGLang 提供插件或分支（例如昇腾的 vllm-ascend），也有自己的推理服务（例如昇腾的 MindIE）。选型时先看自己的硬件上哪些引擎有官方支持。
+
+<Note kind="column" title="怎么快速判断一个引擎的定位">看三样东西：它的 kernel 是自己写的、调用的库，还是编译器生成的（决定在什么硬件上快）；它的调度器是 Python 还是 C++、有没有分页 KV 和前缀缓存（决定高并发时的吞吐）；它的服务层有没有 OpenAI 兼容接口、流式输出、监控指标（决定上线的成本）。第 105–113 讲的 miniinfer 在这三样上都是最简单的版本，用它当参照系，任何引擎的取舍都能看出来。</Note>
+
+## PD 分离：从调度器的一个接口接进来
+
+第 100 讲讲了 PD 分离的原理：prefill 和 decode 放在不同的实例上，prefill 算完的 KV 通过网络传给 decode 实例。落到引擎里，要解决三件事：
+
+1. decode 实例的调度器要知道：这个请求的前 N 个 token 的 KV **会从别处来**，不需要自己算，但要先给它们分好块；
+2. KV 要从 prefill 实例的块搬到 decode 实例的块里，搬的时候两边的块号不同；
+3. 搬完之前请求不能开始 decode，搬完之后 prefill 实例才能释放块。
+
+vLLM 把这些抽象成一个 **KV connector** 接口，调度器在几个固定的地方调用它。看等待队列里一个请求进来时的那一段：
+
+<CodeWalk file="third_party/vllm/vllm/v1/core/sched/scheduler.py" from={1170} to={1190} steps={[
+  { lines: [1170, 1181], title: '问 connector：外面还有多少个 token 的 KV', body: '<p>先在本地前缀缓存里查到命中的部分（按块对齐），再问 connector：除了本地命中的，<b>外部</b>还能提供多少个 token 的 KV，以及是不是要异步加载。外部可能是 prefill 实例（PD 分离），也可能是 CPU 内存或远端的 KV 池（第 101 讲的分层存储）。</p>' },
+  { lines: [1185, 1190], title: '还不知道就先跳过', body: '<p>connector 一时给不出答案（比如远端还没回复），这个请求这一步先不调度，留在队列里。</p>' },
+]} />
+
+接下来，`allocate_slots` 的 `num_external_computed_tokens` 参数（上一讲见过的那张块布局图里的 `ext_comp` 段）为这些外部 token 分好块；分完之后调用 `connector.update_state_after_alloc`（`scheduler.py` 第 1544 行），告诉 connector 这些 KV 要写进哪些块。异步加载的请求进入“等远端 KV”的状态，加载完成后才进入运行队列。请求结束时，`request_finished` 决定 prefill 一侧的块是否要等对方取走之后再释放。
+
+不同的传输方式就是不同的 connector 实现。在本篇读的 vLLM 提交里能看到 `NixlConnector`（用 NVIDIA 的 NIXL 库做 GPU 之间的点对点传输）、`MooncakeConnector`（Mooncake 的传输引擎）、`LMCacheMPConnector`（LMCache 的 KV 缓存层）等名字。SGLang 的做法类似：用 `disaggregation_mode` 区分 prefill 和 decode 实例，传输后端可以选 mooncake、nixl 等。
+
+在引擎之上，还需要一层编排：把请求先送到 prefill 实例，再把 decode 交给合适的 decode 实例，按负载伸缩两类实例的数量（第 104 讲的容量规划）。这一层常见的有 NVIDIA 的 Dynamo（后端可以是 vLLM、SGLang 或 TensorRT-LLM）、基于 Kubernetes 的 llm-d（以 vLLM 为后端），以及 SGLang 自己的路由器。第 102 讲的缓存感知路由也在这一层实现。
+
+## 大规模专家并行：几样东西拼起来
+
+第 99 讲讲过 DeepSeek 这类 MoE 模型的大规模部署：注意力部分用数据并行（每张卡处理不同的请求），专家部分用专家并行（每张卡放几个专家），两次 All-to-All 把 token 送到专家所在的卡再送回来（第 96 讲）。落到引擎里，是这几样东西拼起来：
+
+| 要解决的问题 | 做法 | 在源码里 |
+| --- | --- | --- |
+| 注意力用数据并行，各卡 batch 不一样大 | 每一步各卡同步 batch 大小，空闲的卡也要跑一个空 batch 陪着做 All-to-All | vLLM：`--data-parallel-size`、`v1/worker/gpu/dp_utils.py`；SGLang：DP 注意力（`managers/scheduler_components/dp_attn.py`） |
+| All-to-All 要快 | 专门的通信库（如 DeepSeek 开源的 DeepEP），prefill 用高吞吐的模式，decode 用低延迟的模式 | 两个引擎都把它作为 MoE 层的通信后端之一 |
+| 专家负载不均（第 96 讲） | EPLB：统计每个专家的负载，把热门专家复制到多张卡，周期性地重排 | vLLM：`v1/worker/gpu/eplb_utils.py` |
+| 通信时 GPU 空等 | 把一个 batch 切成两个微批，一个在通信时另一个在计算 | vLLM：`v1/worker/ubatching.py`（2 个微批）；SGLang：two-batch overlap（`managers/overlap_utils.py` 等） |
+| prefill 和 decode 互相干扰 | PD 分离，prefill 和 decode 各用不同的并行配置 | 见上一节 |
+
+这些单独看都不复杂，难在组合：DP 注意力要求各卡步调一致，微批重叠要求注意力和通信的时间配得上，EPLB 重排专家时不能打断服务，PD 分离要求两边的块大小、KV 布局能对上。这也是为什么大规模 MoE 部署往往有一份专门的、写死了各项参数的“部署方案”，而不是几个开关就能打开。
+
+<Note kind="point">选引擎先看它押注在哪：TensorRT-LLM 押 kernel（NVIDIA 新卡上的低精度），LMDeploy 押量化 kernel，llama.cpp 押“哪里都能跑”，MLC-LLM 押编译器，vLLM 和 SGLang 押通用的高并发服务。规模化部署是在引擎上“接”出来的：PD 分离靠调度器里的 KV connector 接口（问外部有多少 KV、分好块、搬完再跑），大规模专家并行靠 DP 注意力、All-to-All 通信库、EPLB 和微批重叠拼起来，再由上层的编排系统调度实例。</Note>
+
+## 回顾
+
+TensorRT-LLM、LMDeploy、llama.cpp、MLC-LLM 和 vLLM、SGLang 的调度骨架大同小异，区别在押注的方向：kernel、量化、硬件覆盖面还是编译器。PD 分离在 vLLM 里是一个 KV connector 接口：调度器在新请求进来时问它外部能提供多少 KV，`allocate_slots` 为这些 KV 分好块，connector 负责搬运和通知；不同的传输方式（NIXL、Mooncake、LMCache）是不同的实现。大规模专家并行则是 DP 注意力、DeepEP 这类通信库、EPLB 和微批重叠的组合。
+
+第五章的最后一讲，回到方法：面对 17 万行的 vLLM，怎么找到入口、怎么定位一个功能、怎么压测，怎么开始贡献代码。下一讲：**怎么读大型引擎的源码**。

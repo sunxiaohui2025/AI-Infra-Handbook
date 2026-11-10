@@ -1,0 +1,81 @@
+---
+// 直连环面 vs 交换网络（第 103 讲；第 56、57 讲可复用）。两种拓扑给每张卡同样的 6 个端口、每端口每方向 50 GB/s（TPU v4 的 ICI 配置）。
+// 左：三维环面的一层（k × k，k = 4 或 8），高亮从角上到中心的最远路径；右：交换网络，任意两卡之间两条链路加一次交换。
+// 计算（链路负载给出的下界，不含启动开销和排队；交换网络按无阻塞计）：
+//   均匀 All-to-All：每卡发 M 字节，环面上每份数据平均走 h̄ 跳（每一维平均 Σmin(i, k−i)/k 跳），所有链路共承载 h̄·n·M，摊到 6n 条有向链路
+//     → T_torus ≥ h̄·M/(6β)；交换网络每卡 6 个端口各发 M/6 → T_switch ≥ M/(6β)。
+//   沿维度的 All-Reduce：每步只在相邻卡之间传，两种拓扑都能用满 6 个端口，带宽下界相同 ≈ 2M/(6β)。
+//   每经过一颗中间芯片（环面的路由器、交换网络的交换芯片）加 200 ns（UALink 2.0 给交换芯片定的空载延迟目标）。
+// 读者可以：切换 64 / 512 卡、切换通信模式、调每卡数据量。
+interface Props { title?: string; caption?: string }
+const { title = '环面直连还是交换网络', caption } = Astro.props;
+---
+<figure class="ai-gt ai-tvs" data-tvs>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="k"><span class="ai-tl-k">规模：</span><button data-v="4" aria-pressed="true">64 卡（4×4×4）</button><button data-v="8" aria-pressed="false">512 卡（8×8×8）</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><span class="ai-tl-k">通信：</span><button data-v="a2a" aria-pressed="true">均匀 All-to-All（MoE 分发）</button><button data-v="ar" aria-pressed="false">沿维度的 All-Reduce</button></div>
+    <label class="ai-tl-lr"><span>每卡数据 <b data-mv></b> MiB</span><input type="range" min="0" max="6" step="1" value="5" data-m /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const MS = [1, 2, 4, 8, 16, 32, 64], BETA = 50e9, HOP = 200e-9;
+  function init(fig: HTMLElement) {
+    let k = 4, mode = 'a2a';
+    const mIn = fig.querySelector<HTMLInputElement>('[data-m]')!;
+    function draw() {
+      const M = MS[Number(mIn.value)] * 2 ** 20; fig.querySelector('[data-mv]')!.textContent = String(MS[Number(mIn.value)]);
+      const n = k ** 3, per = [...Array(k).keys()].reduce((a, i) => a + Math.min(i, k - i), 0) / k, avg = 3 * per, far = 3 * (k / 2);
+      const tT = mode === 'a2a' ? avg * M / 6 / BETA : 2 * M / 6 / BETA, tS = mode === 'a2a' ? M / 6 / BETA : 2 * M / 6 / BETA;
+      // 左：环面一层
+      const g = k === 4 ? 44 : 22, sz = k === 4 ? 24 : 14, x0 = 24, y0 = 30, h = k / 2;
+      const onPath = (i: number, j: number) => (j === 0 && i <= h) || (i === h && j <= h);
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 270">';
+      s += `<text class="ai-sa-tx" x="${x0}" y="18">三维环面的一层（${k} × ${k}，共 ${k} 层）：最远 ${far} 跳</text>`;
+      for (let j = 0; j < k; j++) for (let i = 0; i < k; i++) {
+        const x = x0 + i * g, y = y0 + j * g;
+        if (i < k - 1) s += `<line class="ai-sa-ln ici${j === 0 && i < h ? ' is-on' : ''}" x1="${x + sz}" y1="${y + sz / 2}" x2="${x + g}" y2="${y + sz / 2}"/>`;
+        if (j < k - 1) s += `<line class="ai-sa-ln ici${i === h && j < h ? ' is-on' : ''}" x1="${x + sz / 2}" y1="${y + sz}" x2="${x + sz / 2}" y2="${y + g}"/>`;
+      }
+      for (let j = 0; j < k; j++) for (let i = 0; i < k; i++) {
+        const x = x0 + i * g, y = y0 + j * g, end = (i === 0 && j === 0) || (i === h && j === h);
+        s += `<g class="ai-sa-b gpu${onPath(i, j) ? ' is-on' : ''}${end ? ' is-pick' : ''}"><rect x="${x}" y="${y}" width="${sz}" height="${sz}" rx="3"/></g>`;
+      }
+      // 右：交换网络
+      const rx = 380;
+      s += `<text class="ai-sa-tx" x="${rx}" y="18">交换网络：任意两卡 2 条链路 + 1 次交换</text>`;
+      s += `<g class="ai-sa-b sw is-on"><rect x="${rx + 20}" y="50" width="220" height="30" rx="3"/><text x="${rx + 130}" y="69" text-anchor="middle">交换层（${k === 4 ? '6 颗 64 端口芯片' : '两级，144 颗 64 端口芯片'}）</text></g>`;
+      for (let i = 0; i < 8; i++) {
+        const x = rx + 8 + i * 30, on = i === 0 || i === 6;
+        s += `<line class="ai-sa-ln nv${on ? ' is-on' : ''}" x1="${x + 11}" y1="150" x2="${x + 11}" y2="80"/>`;
+        s += `<g class="ai-sa-b gpu${on ? ' is-on is-pick' : ''}"><rect x="${x}" y="150" width="22" height="22" rx="3"/></g>`;
+      }
+      s += `<text class="ai-sa-tx" x="${rx + 130}" y="192" text-anchor="middle">（画出 8 张，实际 ${n} 张，每卡 6 个端口都接交换层）</text>`;
+      // 下：时间对比
+      const mx = Math.max(tT, tS), sx = 420 / mx, by = 214;
+      s += `<text class="ai-sa-tx" x="24" y="${by - 6}">${mode === 'a2a' ? '均匀 All-to-All' : '沿维度 All-Reduce'}，链路负载给出的最短时间</text>`;
+      s += `<text class="ai-al-gl" x="96" y="${by + 13}" text-anchor="end">环面</text><rect class="ai-sn-a" x="102" y="${by + 2}" width="${tT * sx}" height="14"/><text class="ai-al-gl" x="${106 + tT * sx}" y="${by + 13}">${(tT * 1e6).toFixed(0)} μs</text>`;
+      s += `<text class="ai-al-gl" x="96" y="${by + 33}" text-anchor="end">交换网络</text><rect class="ai-sn-b" x="102" y="${by + 22}" width="${tS * sx}" height="14"/><text class="ai-al-gl" x="${106 + tS * sx}" y="${by + 33}">${(tS * 1e6).toFixed(0)} μs</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const links = n * 6 / 2;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        (mode === 'a2a'
+          ? `环面：每份数据平均走 h̄ = 3 × ${per.toFixed(0)} = ${avg.toFixed(0)} 跳，所有链路共承载 ${avg.toFixed(0)} × ${n} × M，摊到 ${n * 6} 条有向链路 → T ≥ h̄·M/(6β) = ${avg.toFixed(0)} × ${MS[Number(mIn.value)]} MiB ÷ (6 × 50 GB/s) = ${(tT * 1e6).toFixed(0)} μs。交换网络：每卡 6 个端口各发 M/6 → ${(tS * 1e6).toFixed(0)} μs，快 ${(tT / tS).toFixed(0)} 倍。`
+          : `沿 x、y、z 三个方向分别做环形 Reduce-Scatter / All-Gather，每步只和邻居通信，6 个端口同时工作。两种拓扑的带宽下界都约为 2M/(6β) = ${(tT * 1e6).toFixed(0)} μs：规则的集合通信，环面不吃亏。`)
+        + `<br>最远一对卡：环面经过 ${far - 1} 颗中间芯片，交换网络 1 颗；按每颗 200 ns，环面每次多等 ${((far - 2) * HOP * 1e6).toFixed(1)} μs。硬件：环面 ${links} 条链路、不需要交换芯片；交换网络 ${n * 6}${k === 8 ? ' + 3072' : ''} 条链路，外加 ${k === 4 ? 6 : 144} 颗交换芯片。`
+        + '<br><span class="ai-faint">环面便宜、规则通信快；交换网络贵，但任意两卡等距，目的地任意的 All-to-All 快得多，规模越大差距越大。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      if (g.dataset.group === 'k') k = Number(bt.dataset.v); else mode = bt.dataset.v!; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-tvs]').forEach(init);
+</script>

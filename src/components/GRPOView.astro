@@ -1,0 +1,46 @@
+---
+// GRPO 示意：同一道题采样 8 个回答（示意文本），自动判分（答案对 = 1，错 = 0），
+// 优势 = (奖励 − 组内平均) / 组内标准差：高于平均的回答被推高，低于平均的被压低。
+// 读者可以：点任意一个回答切换它的对错，看平均、标准差和每个回答的优势怎么变；全对或全错时优势全为 0。
+interface Props { title?: string; caption?: string }
+const { title = '同一道题答 8 次，按组内排名调整', caption } = Astro.props;
+const Q = '篮子里有 37 个苹果，又放进 25 个，现在一共有多少个？';
+const ANS: [string, number][] = [
+  ['37 + 25：个位 7 + 5 = 12，写 2 进 1；十位 3 + 2 + 1 = 6。答案 62。', 1],
+  ['37 + 25 = 52。答案 52。', 0],
+  ['先算 37 + 20 = 57，再加 5，得 61。答案 61。', 0],
+  ['37 + 25 = 37 + 3 + 22 = 40 + 22 = 62。答案 62。', 1],
+  ['3 和 2 是 5，7 和 5 是 12，拼起来是 512。答案 512。', 0],
+  ['苹果的数量是 37 + 25 = 63。答案 63。', 0],
+  ['37 接近 40，40 + 25 = 65，再减 3 是 62……等等，再检查一下，65 − 3 = 62。答案 62。', 1],
+  ['大概六十个左右。答案 60。', 0],
+];
+---
+<figure class="ai-gt ai-grpo" data-grpo data-ans={JSON.stringify(ANS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-cg-eq">题目：{Q}　正确答案：62</div>
+  <ol class="ai-grpo-list" data-list></ol>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const f = (v: number, d = 3) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  function init(fig: HTMLElement) {
+    const A: [string, number][] = JSON.parse(fig.dataset.ans!);
+    const r = A.map((a) => a[1]);
+    function draw() {
+      const n = r.length, mean = r.reduce((a, b) => a + b, 0) / n, sd = Math.sqrt(r.reduce((a, b) => a + (b - mean) ** 2, 0) / n);
+      const adv = r.map((v) => (v - mean) / (sd + 1e-6)), mx = Math.max(1, ...adv.map(Math.abs));
+      fig.querySelector<HTMLElement>('[data-list]')!.innerHTML = A.map(([t], i) => `<li data-i="${i}" class="${r[i] ? 'is-ok' : 'is-bad'}"><span class="ai-grpo-t">${t}</span><span class="ai-grpo-r">${r[i] ? '✓ 1' : '✗ 0'}</span><span class="ai-grpo-a"><i class="${adv[i] < 0 ? 'is-neg' : ''}" style="width:${(Math.abs(adv[i]) / mx * 50).toFixed(1)}%;${adv[i] < 0 ? 'right:50%' : 'left:50%'}"></i></span><b>${f(adv[i])}</b></li>`).join('');
+      const ok = r.filter(Boolean).length;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `8 个里答对 ${ok} 个：平均奖励 ${f(mean)}，标准差 ${f(sd)}。`
+        + (ok === 0 || ok === n ? '<br><b>全对或全错时，每个回答都等于平均，优势全是 0：这道题对训练没有贡献。</b>所以训练题的难度要合适。'
+          : `<br>答对的回答优势 ${f((1 - mean) / sd)}，会被推高（提高生成它的概率）；答错的 ${f((0 - mean) / sd)}，会被压低。答对的越少，每个答对的回答被推得越用力。`)
+        + '<br><span class="ai-faint">点任意一个回答，切换它的对错。</span>';
+    }
+    fig.addEventListener('click', (e) => { const li = (e.target as HTMLElement).closest<HTMLElement>('[data-i]'); if (!li) return; const i = Number(li.dataset.i); r[i] = 1 - r[i]; draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-grpo]').forEach(init);
+</script>

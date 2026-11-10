@@ -1,0 +1,71 @@
+---
+// 大 EP 的卡间负载不均（公式与第 99 讲第二段代码相同）。256 个路由专家按编号均分到 EP 张卡，一批 1024 个 token 各选 8 个专家。
+//   “一个热点专家”：专家 0 收到平均值 h 倍的行，其余行均分给另外 255 个专家（可以直接手算）
+//   “随机路由”：每个 token 独立、均匀地随机选 8 个不同专家（固定种子，模拟 40 批取平均；代码里模拟 300 批，数字略有差别）
+// 每张卡的行数决定它要接收、发回的字节数和专家计算量；整层要等最忙的卡。读者可以：调 EP、热点倍数、切换路由模式，
+// 看每张卡的行数（÷ 每卡平均）和最忙卡随 EP 的变化曲线。
+interface Props { title?: string; caption?: string }
+const { title = 'EP 越大，最忙的卡越突出', caption } = Astro.props;
+---
+<figure class="ai-gt ai-eks" data-epskew>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="e"><span class="ai-tl-k">EP：</span>{[8, 16, 32, 64, 128, 256].map((v) => <button data-v={v} aria-pressed={v === 32 ? 'true' : 'false'}>{v}</button>)}</div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><span class="ai-tl-k">路由：</span><button data-v="hot" aria-pressed="true">一个热点专家</button><button data-v="rnd" aria-pressed="false">完全随机</button></div>
+    <label class="ai-tl-lr" data-hrow><span>热点是平均的 <b data-hv></b> 倍</span><input type="range" min="1" max="8" step="1" value="4" data-h /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const N = 1024, K = 8, E = 256, EPS = [8, 16, 32, 64, 128, 256];
+  function rngOf(seed: number) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  function hotRows(h: number) { const avg = N * K / E, r = new Array(E).fill((N * K - h * avg) / (E - 1)); r[0] = h * avg; return r; }
+  function rndRows(rand: () => number) {
+    const r = new Array(E).fill(0), idx = [...Array(E).keys()];
+    for (let t = 0; t < N; t++) for (let j = 0; j < K; j++) { const p = j + Math.floor(rand() * (E - j)); [idx[j], idx[p]] = [idx[p], idx[j]]; r[idx[j]]++; }
+    return r;
+  }
+  const cards = (rows: number[], ep: number) => { const per = E / ep, c = new Array(ep).fill(0); rows.forEach((v, i) => (c[Math.floor(i / per)] += v)); return c; };
+  const ratio = (c: number[]) => Math.max(...c) / (c.reduce((a, b) => a + b, 0) / c.length);
+  // 随机路由：每种 EP 模拟 40 批，取最忙 ÷ 平均的均值（固定种子，结果稳定）
+  const RND = (() => { const rand = rngOf(7), acc = EPS.map(() => 0), batches: number[][] = []; for (let b = 0; b < 40; b++) { const r = rndRows(rand); batches.push(r); EPS.forEach((ep, i) => (acc[i] += ratio(cards(r, ep)))); } return { mean: acc.map((v) => v / 40), first: batches[0] }; })();
+  function init(fig: HTMLElement) {
+    let ep = 32, mode = 'hot';
+    const hIn = fig.querySelector<HTMLInputElement>('[data-h]')!;
+    function draw() {
+      const h = Number(hIn.value); fig.querySelector('[data-hv]')!.textContent = String(h);
+      fig.querySelector<HTMLElement>('[data-hrow]')!.style.display = mode === 'hot' ? '' : 'none';
+      const rows = mode === 'hot' ? hotRows(h) : RND.first, c = cards(rows, ep), avg = N * K / ep, mx = Math.max(...c);
+      const x0 = 60, w = 540, bw = w / ep, top = Math.max(mx / avg, 1.2), Y = (v: number) => 150 - v / top * 120;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 640 330"><text class="ai-np-ptitle" x="10" y="16">每张卡收到的行数 ÷ 每卡平均（${ep} 张卡${mode === 'rnd' ? '，随机路由的一批' : ''}）</text>`;
+      c.forEach((v, i) => {
+        const hot = v === mx, x = x0 + i * bw;
+        s += `<rect class="${hot ? 'ai-sn-a' : 'ai-sn-b'}" x="${x + (bw > 4 ? 1 : 0)}" y="${Y(v / avg)}" width="${Math.max(bw - (bw > 4 ? 2 : 0), 0.8)}" height="${150 - Y(v / avg)}"/>`;
+      });
+      s += `<line class="ai-eps-80" x1="${x0}" y1="${Y(1)}" x2="${x0 + w}" y2="${Y(1)}"/><text class="ai-al-gl" x="${x0 - 4}" y="${Y(1) + 4}" text-anchor="end">平均</text>`;
+      s += `<text class="ai-al-gl" x="${x0 - 4}" y="${Y(mx / avg) + 4}" text-anchor="end">${(mx / avg).toFixed(2)}×</text>`;
+      // 曲线：最忙 ÷ 平均 随 EP
+      const yb = 310, ph = 120, all = EPS.map((e) => ratio(cards(hotRows(h), e))), top2 = Math.max(...all, ...RND.mean) * 1.08, px = (i: number) => 90 + i * 96, Y2 = (v: number) => yb - (v - 1) / (top2 - 1) * ph;
+      s += `<text class="ai-np-ptitle" x="10" y="${yb - ph - 14}">最忙卡 ÷ 每卡平均，随 EP 的变化</text><rect class="ai-sn-a" x="250" y="${yb - ph - 23}" width="12" height="10"/><text class="ai-al-gl" x="266" y="${yb - ph - 14}">一个 ${h} 倍热点</text><rect class="ai-sn-b" x="360" y="${yb - ph - 23}" width="12" height="10"/><text class="ai-al-gl" x="376" y="${yb - ph - 14}">完全随机（模拟 40 批）</text>`;
+      const pl = (v: number[], cl: string) => `<polyline class="ai-bc-line ${cl}" points="${v.map((r, i) => `${px(i)},${Y2(r)}`).join(' ')}"/>` + v.map((r, i) => `<circle class="ai-eps-dot ${cl}" cx="${px(i)}" cy="${Y2(r)}" r="${EPS[i] === ep ? 5 : 3}"/><text class="ai-al-gl" x="${px(i) + 6}" y="${Y2(r) - 5}">${r.toFixed(2)}</text>`).join('');
+      s += pl(all, 'c-key') + pl(RND.mean, 'c-acc');
+      EPS.forEach((e, i) => (s += `<text class="ai-al-gl" x="${px(i)}" y="${yb + 14}" text-anchor="middle">EP${e}</text>`));
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `一批 ${N} × ${K} = ${N * K} 次分派，每个专家平均 ${N * K / E} 行；EP${ep} 每卡 ${E / ep} 个专家，平均 ${avg} 行，最忙的卡 ${mx.toFixed(0)} 行，是平均的 <b>${(mx / avg).toFixed(2)} 倍</b>。`
+        + `整层要等最忙的卡：平均的卡有 ${((1 - avg / mx) * 100).toFixed(0)}% 的时间在等。`
+        + '<br><span class="ai-faint">一张卡上的专家越多，各专家的忙闲越能互相抵消；EP 越大，每卡专家越少，专家之间的不均就原样变成卡之间的不均。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      if (g.dataset.group === 'e') ep = Number(bt.dataset.v); else mode = bt.dataset.v!; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-epskew]').forEach(init);
+</script>

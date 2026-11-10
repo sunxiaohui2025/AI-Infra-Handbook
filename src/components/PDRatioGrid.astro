@@ -1,0 +1,72 @@
+---
+// 异构 PD 分离的配比（公式与第 100 讲第二段代码相同）。Qwen3-8B BF16，4 张 A100 + 4 张 H20，两者都按峰值的 50% 发挥。
+//   prefill 一个请求：F = 2·线性层参数·新 token 数 + 因果注意力 4·32·128·36·(L² − c²)/2，时间 F ÷ 有效算力
+//   decode 一个请求：(G − 1) 步 × 一步时间 ÷ 32（批 32 共享一步），一步 = (15.1 GB 权重 + 32 × 平均上下文 × 144 KiB) ÷ 有效带宽
+//   格子 (i, j)：i 张 A100、j 张 H20 做 P，其余做 D；请求率上限 = min(P 池, D 池, 链路带宽 ÷ 每请求 KV)
+// 读者可以：调输入长度、前缀命中、输出长度、链路带宽，看每格的上限和最优配比；点格子看这一格的三项。
+interface Props { title?: string; caption?: string }
+const { title = '8 张卡，几张做 prefill', caption } = Astro.props;
+---
+<figure class="ai-gt ai-prg" data-pdratio>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>输入 <b data-lv></b> token</span><input type="range" min="0" max="4" step="1" value="3" data-l /></label>
+    <label class="ai-tl-lr"><span>前缀命中 <b data-cv></b></span><input type="range" min="0" max="4" step="1" value="0" data-c /></label>
+    <label class="ai-tl-lr"><span>输出 <b data-gv></b> token</span><input type="range" min="0" max="4" step="1" value="3" data-g /></label>
+    <label class="ai-tl-lr"><span>两台机器之间 <b data-bv></b> GB/s</span><input type="range" min="0" max="4" step="1" value="3" data-b /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const Ly = 36, d = 4096, ffn = 12288, nq = 32, nkv = 8, hd = 128, vocab = 151936;
+  const lin = Ly * (d * (nq + 2 * nkv) * hd + nq * hd * d + 3 * d * ffn), W = 2 * (lin + vocab * d), KV = 2 * Ly * nkv * hd * 2;
+  const GPU: Record<string, [number, number]> = { A100: [156e12, 1019.5e9], H20: [74e12, 2048e9] };
+  const LS = [1024, 2048, 4096, 8192, 16384], CS = [0, 0.25, 0.5, 0.75, 0.9], GS = [129, 257, 513, 1025, 4097], BS = [1.25e9, 6.25e9, 12.5e9, 25e9, 50e9];
+  function need(g: string, L: number, c: number, G: number) {
+    const [fl, bw] = GPU[g], nw = L - c;
+    const f = 2 * lin * nw + 4 * nq * hd * Ly * (L * L - c * c) / 2;
+    return [f / fl, (G - 1) * (W + 32 * (L + G / 2) * KV) / bw / 32];
+  }
+  function init(fig: HTMLElement) {
+    let pick: [number, number] | null = null;
+    const q = (s: string) => fig.querySelector<HTMLInputElement>(s)!;
+    function draw() {
+      const L = LS[Number(q('[data-l]').value)], c = Math.round(L * CS[Number(q('[data-c]').value)]), G = GS[Number(q('[data-g]').value)], B = BS[Number(q('[data-b]').value)];
+      fig.querySelector('[data-lv]')!.textContent = L.toLocaleString(); fig.querySelector('[data-cv]')!.textContent = `${c.toLocaleString()} token`;
+      fig.querySelector('[data-gv]')!.textContent = G.toLocaleString(); fig.querySelector('[data-bv]')!.textContent = String(B / 1e9);
+      const a = need('A100', L, c, G), h = need('H20', L, c, G), link = B / (L * KV), co = 4 / (a[0] + a[1]) + 4 / (h[0] + h[1]);
+      const cell = (i: number, j: number) => { const P = i / a[0] + j / h[0], D = (4 - i) / a[1] + (4 - j) / h[1]; return { P, D, mu: Math.min(P, D, link) }; };
+      let best = [0, 0], bm = -1, mx = 0;
+      for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) { const m = cell(i, j).mu; mx = Math.max(mx, m); if (m > bm) { bm = m; best = [i, j]; } }
+      const [pi, pj] = pick ?? best;
+      const x0 = 120, y0 = 40, cs = 56;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 640 340"><text class="ai-np-ptitle" x="${x0}" y="22">横轴：几张 A100 做 P；纵轴：几张 H20 做 P（其余做 D）。格子里是请求率上限（请求/s）</text>`;
+      for (let i = 0; i < 5; i++) for (let j = 0; j < 5; j++) {
+        const m = cell(i, j).mu, x = x0 + i * cs, y = y0 + (4 - j) * cs, op = mx > 0 ? 0.08 + 0.85 * m / mx : 0;
+        s += `<g class="ai-prg-c${i === best[0] && j === best[1] ? ' is-best' : ''}${i === pi && j === pj ? ' is-pick' : ''}" data-ij="${i},${j}"><rect x="${x}" y="${y}" width="${cs - 3}" height="${cs - 3}" rx="3" style="fill-opacity:${op.toFixed(2)}"/><text x="${x + cs / 2 - 1}" y="${y + cs / 2 + 4}" text-anchor="middle">${m.toFixed(2)}</text></g>`;
+      }
+      for (let i = 0; i < 5; i++) s += `<text class="ai-al-gl" x="${x0 + i * cs + cs / 2}" y="${y0 + 5 * cs + 12}" text-anchor="middle">${i}</text>`;
+      for (let j = 0; j < 5; j++) s += `<text class="ai-al-gl" x="${x0 - 8}" y="${y0 + (4 - j) * cs + cs / 2 + 4}" text-anchor="end">${j}</text>`;
+      s += `<text class="ai-al-gl" x="${x0 + 2.5 * cs}" y="${y0 + 5 * cs + 28}" text-anchor="middle">做 P 的 A100 张数</text><text class="ai-al-gl" x="${x0 - 30}" y="${y0 - 6}" text-anchor="middle">做 P 的 H20</text>`;
+      // 右侧：选中格子的三项
+      const r = cell(pi, pj), bx = 420, top = Math.max(r.P, r.D, Math.min(link, 3 * Math.max(r.P, r.D)), co), sx = 180 / top;
+      s += `<text class="ai-np-ptitle" x="${bx}" y="${y0 + 6}">${pi} 张 A100 + ${pj} 张 H20 做 P</text>`;
+      ([['P 池', r.P], ['D 池', r.D], ['链路', link], ['共置', co]] as [string, number][]).forEach(([n, v], k) => {
+        const y = y0 + 22 + k * 34, w = Math.min(v * sx, 200);
+        s += `<text class="ai-al-gl" x="${bx}" y="${y + 12}">${n}</text><rect class="${k === 3 ? 'ai-sn-a' : 'ai-sn-b'}" x="${bx + 34}" y="${y}" width="${w}" height="16"/><text class="ai-al-gl" x="${bx + 38 + w}" y="${y + 12}">${v.toFixed(2)}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `每个请求：A100 prefill ${a[0].toFixed(3)} s、decode ${a[1].toFixed(3)} GPU 秒；H20 prefill ${h[0].toFixed(3)} s、decode ${h[1].toFixed(3)} GPU 秒。每请求交接 KV ${(L * KV / 2 ** 30).toFixed(3)} GiB，链路每秒最多 ${link.toFixed(1)} 份。`
+        + `<br>选中格：min(P ${pi}/${a[0].toFixed(3)} + ${pj}/${h[0].toFixed(3)} = ${r.P.toFixed(2)}，D ${4 - pi}/${a[1].toFixed(3)} + ${4 - pj}/${h[1].toFixed(3)} = ${r.D.toFixed(2)}，链路 ${link.toFixed(2)}) = <b>${r.mu.toFixed(2)} 请求/s</b>。最优 ${best[0]} 张 A100 + ${best[1]} 张 H20 做 P：${bm.toFixed(2)} 请求/s，是共置 ${co.toFixed(2)} 的 ${(bm / co).toFixed(2)} 倍。`
+        + '<br><span class="ai-faint">A100 算力强，适合 prefill；H20 带宽强，适合 decode。前缀命中让 P 的工作变少，卡往 D 挪；输出变短让 D 的工作变少，卡往 P 挪。点格子看它的三项。</span>';
+    }
+    fig.addEventListener('input', () => { pick = null; draw(); });
+    fig.addEventListener('click', (e) => { const g = (e.target as Element).closest<SVGGElement>('[data-ij]'); if (!g) return; pick = g.dataset.ij!.split(',').map(Number) as [number, number]; draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pdratio]').forEach(init);
+</script>

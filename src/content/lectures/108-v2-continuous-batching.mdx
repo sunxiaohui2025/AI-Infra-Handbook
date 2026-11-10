@@ -1,0 +1,118 @@
+---
+id: 108
+slug: v2-continuous-batching
+title: v2 · Continuous Batching
+chapter: 5
+part: 14
+problem: 让多个请求共享一次前向，随到随走
+prereqs: [62, 66, 107]
+level: 主线
+demos: [EngineArch, CodeWalk, CodeDiff, StepTrace, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineArch from '../../components/EngineArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CodeDiff from '../../components/CodeDiff.astro';
+import StepTrace from '../../components/StepTrace.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[62, 66, 107]} />
+
+v1 的 decode 每步约 65 ms，几乎全花在把 3 GB 的权重从内存读一遍上，而这一遍读取只为一个请求算出一个 token。第 62 讲算过：decode 是读内存受限的，batch 里多放几个请求，读一遍权重就能同时为它们各算一个 token，每步的耗时增加得很少。
+
+v1 的 `generate(prompt)` 一次只能接一个请求。这一讲把引擎改成真正的“服务”：请求随时进队列，引擎一步一步地跑，**每一步由调度器决定 batch 里有谁**；生成完的请求立刻离开，空出的位置马上给等着的请求，这就是第 66 讲的 continuous batching。
+
+<EngineArch ver="v2" caption="图 108-1　v2 新增了请求状态（sequence.py）和调度器（scheduler.py），引擎从 generate() 一个循环改成 add_request() + step()，模型的注意力按请求分段计算。" />
+
+## 设计：从“一个循环”到“一步一步”
+
+v1 的结构是“一个请求从头跑到尾”。要同时服务多个请求，得把这个循环拆开：
+
+- **请求要有自己的状态**。每个请求处在不同的阶段：有的还在排队，有的刚进来要做 prefill，有的已经生成了 50 个 token。每个请求自己记住 token 序列、已经算进缓存的位置数、状态和它的 KV Cache。这就是 `Sequence`。
+- **每一步做什么由调度器决定**。调度器维护两个队列：等待中的和运行中的。每一步，运行中的请求各 decode 一个 token；batch 里还有空位，就从等待队列放新请求进来做 prefill。
+- **引擎只负责“执行一步”**。`step()`：问调度器要这一步的 batch，把所有请求要算的 token 拼成一批送进模型，采样，更新每个请求，生成完的交给调度器移出。
+
+模型这一侧的问题是：一个 batch 里的请求长度各不相同，prefill 的请求一次送进几十个 token，decode 的只有一个。常见的做法是**把所有请求这一步的 token 首尾相接拼成一维**，再记下每个请求占其中哪一段。线性层、RMSNorm、SwiGLU 都是逐 token 的，拼起来直接一次算完，batch 的收益就在这里；只有注意力要按段分开，每个请求只和自己的上下文做注意力。这种“拼成一维”的格式叫 varlen（变长），vLLM、nano-vllm 都是这样组织 batch 的。
+
+用一个例子看拼出来的样子：请求 A 正在 decode，已有 20 个 token；请求 B 刚进来，提示 6 个 token。
+
+```text
+tokens = [A 的第 20 个 token,  B 的 6 个提示 token]      共 7 个
+pos    = [19,                 0, 1, 2, 3, 4, 5]
+segs   = [(0, 1, A 的缓存),   (1, 7, B 的缓存)]           每个请求占 tokens 的哪一段
+```
+
+模型算完，A 取第 0 个位置的打分，B 取第 6 个位置的打分，各自得到下一个 token。
+
+## sequence.py：一个请求的全部状态
+
+<CodeWalk file="v2/sequence.py" steps={[
+  { lines: [6, 9], title: '三种状态', body: '<p>等待（还没进 batch）、运行（在 batch 里，每步生成一个 token）、结束。下一版加上抢占后，运行中的请求还可能退回等待。</p>' },
+  { lines: [15, 22], title: '要记的东西', body: '<p><code>tokens</code> 是提示加上已生成的全部 token；<code>num_prompt</code> 记提示有多长，用来区分哪些是生成的。</p><p><b><code>num_computed</code> 是这个类里最重要的数</b>：有多少个位置的 K、V 已经写进了缓存。刚进来时是 0；prefill 之后等于提示长度；之后每步加一。第 107 讲说过，缓存总是比 tokens 少最后一个位置（刚生成的 token 还没送进模型）。</p>' },
+  { lines: [28, 30], title: '这一步要送进模型的 token', body: '<p>就是 <code>tokens[num_computed:]</code>：还没进缓存的那些。刚进来时是整个提示（prefill），之后每步正好是最后一个 token（decode）。同一个式子统一了两种情况，调度器和引擎都不用区分“这是 prefill 还是 decode”。</p>' },
+]} />
+
+## scheduler.py：每一步谁进 batch
+
+<CodeWalk file="v2/scheduler.py" steps={[
+  { lines: [7, 13], title: '几个上限', body: '<p><code>max_num_seqs</code>：batch 里最多几个请求，也就是同时占着几份 KV Cache。<code>max_num_tokens</code>：一步最多送进模型多少个 token，防止一下子放进好几个长提示，让这一步变得很慢（第 69 讲的思路）。</p><p><code>static</code> 打开时是静态批处理，用来对比。<code>kv_budget</code> 限制 KV 一共能放多少个位置，第 109 讲对比分页时用。</p>' },
+  { lines: [18, 21], title: '先排运行中的请求', body: '<p>运行中的请求优先：它们已经占着 KV Cache，每步各 decode 一个 token。剩下的 token 预算留给新请求的 prefill。</p>' },
+  { lines: [22, 36], title: '再放新请求进来', body: '<p>只要 batch 没满，就从等待队列头部取请求：token 预算放得下它的提示，KV 空间也够预留一整份（提示 + 最大输出），就放进来，这一步做它的 prefill。</p><p>按先来后到放，遇到放不下的就停（不跳过它去放后面的短请求），保证先来的请求不会被一直插队。</p><p><b>静态批处理和 continuous batching 只差第 23 行</b>：静态时，只要还有请求在运行，就一个新请求都不放。</p>' },
+  { lines: [39, 43], title: '结束：立刻让出位置', body: '<p>生成完的请求移出运行队列，释放 KV Cache，下一步它的位置就可以给等待的请求。这就是 “continuous” 的含义：batch 不是一批一批地换，而是每一步都在变。</p>' },
+]} />
+
+## model.py：拼起来的 batch，分段的注意力
+
+<CodeDiff a="v1/model.py" b="v2/model.py" caption="图 108-2　model.py 和 v1 的差别：forward 的参数从“起始位置 + 一份缓存”换成“每个 token 的位置 + 每个请求的段”；注意力拆成两部分，attention 做投影，attend 对一个请求做注意力；最后每个请求取自己最后一个位置的打分。" />
+
+<CodeWalk file="v2/model.py" from={26} to={52} steps={[
+  { lines: [26, 35], title: '投影：整个 batch 一起算', body: '<p>x 是 [N, 1024]，N 是这一步所有请求的新 token 加起来的数（上面的例子 N = 7）。q、k、v 投影、q/k 归一化、RoPE 都是逐 token 的，整个 batch 一次算完。RoPE 用的是每个 token 自己的位置 <code>pos</code>，所以 A 的 token 转 19 个位置的角度，B 的转 0–5。</p>' },
+  { lines: [36, 39], title: '注意力：按请求分开', body: '<p>对每一段（一个请求），取出它那几行的 q、k、v，用它自己的缓存做注意力，结果放回对应的行。最后再整体做 o 投影。</p><p>这里用 Python 循环逐个请求算，写起来最清楚，代价是请求多时循环开销变大。工业引擎用一个 kernel 一次处理所有请求的注意力（第 76 讲），第 115 讲会看 nano-vllm 怎么做。</p>' },
+  { lines: [41, 51], title: '一个请求的注意力', body: '<p>和 v1 的注意力完全一样：写缓存、读缓存、GQA、按位置的因果掩码、softmax、加权求和。只是从 attention 里拆出来，变成对单个请求的函数。</p>' },
+]} />
+
+## engine.py：add_request 和 step
+
+<CodeWalk file="v2/engine.py" from={12} to={58} steps={[
+  { lines: [21, 24], title: '加请求：只是放进队列', body: '<p><code>add_request</code> 建一个 Sequence 交给调度器就返回，不做任何计算。真正的服务里，网络请求随时到来，调用的就是这个函数。</p>' },
+  { lines: [26, 36], title: '拼 batch', body: '<p>调度器给出这一步的 batch。对每个请求：第一次进来就分配 KV Cache；取出它这一步要算的 token；记下它在拼起来的 <code>tokens</code> 里占哪一段，以及每个 token 的位置。</p>' },
+  { lines: [39, 41], title: '一次前向，所有请求', body: '<p>一次 forward 就为 batch 里的每个请求各得到一行打分，<code>argmax(-1)</code> 一次给每个请求选出下一个 token。</p>' },
+  { lines: [42, 46], title: '更新每个请求', body: '<p>这一步送进去的 token 都已经写进缓存，所以 <code>num_computed</code> 推进到 token 序列的长度；再把新 token 接上去。遇到结束符或到了长度上限，就交给调度器结束它。</p><p>注意顺序：先更新 <code>num_computed</code>，再追加新 token，这样“缓存比 tokens 少最后一个位置”的规律始终成立。</p>' },
+  { lines: [48, 55], title: 'generate：把请求都放进去，跑到没有活为止', body: '<p>为了方便测试和压测，<code>generate</code> 一次放进一组请求，然后不停地 <code>step()</code>，直到等待和运行队列都空了。每个请求可以有不同的最大长度。</p>' },
+]} />
+
+## 先验证
+
+<RunOutput cmd=".venv/bin/python tests/check.py v2" file="outputs/check_v2.txt" caption="图 108-3　v2 一次放进 4 个请求一起跑，结果仍然和 HuggingFace 逐 token 一致。把 4 个请求拼成一批、分段做注意力，没有改变任何一个请求的计算。" />
+
+这个检查有分量：4 个请求的提示长度各不相同，第一步是 4 个 prefill 拼在一起，之后是 4 个 decode 拼在一起。只要位置、段的边界、缓存的对应关系有一处错，就会有请求的输出不一样。
+
+## 测一测：16 个请求
+
+16 个请求同时到达，每个要生成的 token 数从 8 到 96 不等，一共 792 个 token。比较三种跑法：一个一个跑（`max_num_seqs=1`，相当于 v1）、静态批处理（8 个一批，整批结束才换下一批）、continuous batching（8 个槽，有空就补）。
+
+<RunOutput cmd=".venv/bin/python bench/batching.py" file="outputs/bench_batching.txt" caption="图 108-4　同样 792 个 token：一个一个跑 792 步；静态批处理 192 步；continuous batching 160 步，吞吐是一个一个跑的 1.9 倍。" />
+
+先看步数。一个一个跑，每步只出一个 token，要 792 步。静态批处理分两批，每批要跑到这批里最长的请求结束：两批里都有要生成 96 个 token 的请求，所以各要约 96 步，共 192 步。continuous batching 只要 160 步。
+
+再看每一步的耗时：一个一个跑约 69 ms 一步，continuous batching 约 180 ms 一步，每步的请求平均 5 个。每步的请求是 5 倍，每步的耗时只是 2.6 倍，所以吞吐从 14.5 提高到 27.5 token/s。这就是第 62 讲的结论在 CPU 上的样子：多出来的请求共享了读权重的那一遍。
+
+下面是两种批处理每一步 batch 里实际有谁（来自同一次运行的记录）：
+
+<StepTrace file="outputs/batching_steps.json" runs={['静态批处理（8 个一批）', 'continuous batching（8 个槽）']} caption="图 108-5　静态批处理：第一批里短的请求早早结束，它们的槽一直空到这一批最长的请求（96 个 token）结束，才放第二批进来。continuous batching：请求 2（8 个 token）结束后，下一步请求 8 就补了进来。" />
+
+切换两种运行对比：静态批处理 192 步 × 8 个槽里，空着 48%；continuous batching 空着 38%。continuous batching 还有不少空槽，是因为 16 个请求很快全都进了 batch，最后只剩几个长请求在跑，没有新请求可以补。真实的服务里请求源源不断地到来，这部分空槽会被填上。
+
+<Note kind="point">continuous batching 的关键是“每一步重新决定 batch”：运行中的请求各 decode 一个 token，有空位就放新请求进来 prefill，生成完的立刻离开。模型这边把所有请求的新 token 拼成一维，线性层一次算完，只有注意力按请求分段。</Note>
+
+## 还剩什么问题
+
+v2 给每个请求按“提示 + 最大输出”预留一整份 KV Cache。KV 的空间有限时，能同时运行的请求数就由这个“最大值”决定，而不是由实际用了多少决定。比如每个请求声明最多生成 512 个 token、实际只生成了 50 个，预留的空间九成是空的，却挡住了后面的请求。下一讲的压测会看到，KV 空间紧张时，这个毛病直接限制了吞吐。
+
+## 回顾
+
+v2 把引擎拆成三部分：Sequence 记每个请求的状态（关键是 `num_computed`），Scheduler 每一步决定 batch（运行中的先 decode，有空位再放新请求 prefill），`step()` 把这一步所有请求的 token 拼成一维送进模型，注意力按请求分段。和 HuggingFace 仍然逐 token 一致。16 个请求、792 个 token，continuous batching 用 160 步、27.5 token/s，是一个一个跑的 1.9 倍，比静态批处理少用 32 步。
+
+每个请求按最大长度预留 KV，空间不够时放不下几个请求；而且这块空间必须是连续的。下一讲：**v3 · 分页 KV 管理**。

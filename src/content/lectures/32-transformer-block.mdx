@@ -1,0 +1,169 @@
+---
+id: 32
+slug: transformer-block
+title: Transformer Block
+chapter: 2
+part: 4
+problem: 这些部件怎么组合成一层
+prereqs: [26, 29, 30, 31]
+level: 主线
+minutes: 20
+demos: [ArchExplorer]
+video: ""
+formula: 'Post-Norm：$\mathbf{x}\leftarrow\mathrm{LN}(\mathbf{x}+\mathrm{Attn}(\mathbf{x}))$，$\mathbf{x}\leftarrow\mathrm{LN}(\mathbf{x}+\mathrm{FFN}(\mathbf{x}))$　Pre-Norm：$\mathbf{x}\leftarrow\mathbf{x}+\mathrm{Attn}(\mathrm{Norm}(\mathbf{x}))$，$\mathbf{x}\leftarrow\mathbf{x}+\mathrm{FFN}(\mathrm{Norm}(\mathbf{x}))$'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import ArchExplorer from '../../components/ArchExplorer.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[26, 29, 30, 31]} />
+
+第 25 到 31 讲，我们一个一个地造好了 Transformer 的零件：位置编码、自注意力、因果掩码、多头、残差连接、LayerNorm、前馈网络。这一讲把它们组装起来：先拼成**一层**，叫一个 **Transformer Block**（Transformer 块）；再把很多层叠起来，加上入口和出口，就是一个完整的大语言模型。
+
+这一讲没有新的计算，重点是看清结构：数据按什么顺序经过哪些部件，形状怎么变，参数都在哪里。
+
+## 一层由两个子层组成
+
+一个 Transformer Block 由两个**子层**组成，每个子层的模式都一样：“做一件事，加回残差流，归一化”。
+
+<div class="ai-formula">子层 1：<b><i>x</i></b> ← LN(<b><i>x</i></b> + 多头注意力(<b><i>x</i></b>))<br />子层 2：<b><i>x</i></b> ← LN(<b><i>x</i></b> + FFN(<b><i>x</i></b>))</div>
+
+第一个子层让词与词交换信息（第 26–28 讲），第二个子层让每个词各自加工收集到的信息（第 31 讲）。两个子层都用残差连接（第 29 讲）保证梯度能传回去，都用 LayerNorm（第 30 讲）把数值拉回统一的尺度。这是 2017 年原始 Transformer 的排法，归一化在残差之后，叫 Post-Norm，TinyLM 用的就是它。
+
+一层的输入是 [s, d]，输出也是 [s, d]：注意力和 FFN 都把形状还原了回来。正因为形状不变，一层的输出可以直接作为下一层的输入，**同样结构的层可以一层接一层地叠下去**，叠多少层都行。每一层有自己独立的一套权重，结构相同，参数不共享。
+
+## 入口和出口
+
+把 N 层叠起来之后，前后各加一段：
+
+- **入口**：token 编号查词嵌入表（第 22 讲），加上位置编码（第 25 讲），得到 [s, d] 的初始残差流。
+- **出口**：最后一层的输出乘输出层 lm_head，变成 [s, V] 的 logits，再过 softmax，得到每个位置下一个词的概率（第 33 讲、第 23 讲）。
+
+完整的数据流是：
+
+<div class="ai-formula">编号 → 词嵌入 + 位置编码 → [注意力 → 残差 → LN → FFN → 残差 → LN] × N → lm_head → softmax → 下一个词的概率</div>
+
+下面的结构图可以点任意一个部件，看它做什么、形状怎么变、有多少参数，以及讲它的是哪一讲。上面的按钮可以切换到 Llama-3-8B，看现代大模型的结构有哪些不同。
+
+<ArchExplorer caption="图 32-1　Transformer 的结构。绿框里是一层，叠 N 次。切换到 Llama-3-8B：归一化挪到了每个子层之前，位置编码不再加到输入上，最后多了一个归一化。" />
+
+## 数一数参数
+
+TinyLM 小到可以把参数一个个数清楚：
+
+| 部件 | 形状 | 参数 |
+| --- | --- | --- |
+| 词嵌入 | 6 × 4 | 24 |
+| 每层注意力 | *W*<sub>q</sub>、*W*<sub>k</sub>、*W*<sub>v</sub>、*W*<sub>o</sub> 各 4 × 4 | 64 |
+| 每层 FFN | *W*<sub>1</sub> 4 × 8，*W*<sub>2</sub> 8 × 4 | 64 |
+| 2 层合计 | | 256 |
+| 输出层 | 4 × 6 | 24 |
+| 合计 | | 304 |
+
+位置编码是算出来的，LayerNorm 的 *γ*、*β* 在 TinyLM 里固定为 1 和 0，都不算参数。
+
+用同样的方法数 Llama-3-8B，得到 8,030,261,248 个，正是官方公布的“8B”。其中 32 层一共 6,979,584,000 个，嵌入表和输出层各 525,336,576 个。
+
+<Note kind="point">一个 Transformer Block = 注意力子层 + FFN 子层，每个子层都带残差和归一化。输入输出形状相同，所以同样的块可以叠很多层；整个模型 = 入口（嵌入 + 位置）+ N 个块 + 出口（lm_head + softmax）。</Note>
+
+## 现代模型改了什么
+
+切换到 Llama-3-8B 时，结构图有几处变化。它们是第 5 篇（第 36–41 讲）的主题，这里先列出来：
+
+| 部件 | 原始 Transformer（TinyLM） | Llama-3 等现代模型 | 详见 |
+| --- | --- | --- | --- |
+| 归一化的位置 | 残差相加之后（Post-Norm） | 每个子层之前（Pre-Norm），最后再补一个 | 第 36 讲 |
+| 归一化的方式 | LayerNorm | RMSNorm（不减均值） | 第 36 讲 |
+| 位置信息 | 正弦编码加到输入上 | RoPE，在注意力里旋转 Q、K | 第 37 讲 |
+| FFN | ReLU，两个矩阵 | SwiGLU，三个矩阵 | 第 38 讲 |
+| 注意力的 K、V | 每个头一份 | 多个查询头共享一份（GQA） | 第 39 讲 |
+
+Pre-Norm 的写法是：
+
+<div class="ai-formula"><b><i>x</i></b> ← <b><i>x</i></b> + Attn(Norm(<b><i>x</i></b>))，　<b><i>x</i></b> ← <b><i>x</i></b> + FFN(Norm(<b><i>x</i></b>))</div>
+
+残差流本身不再被归一化，只有送进子层的那一份被归一化。这让梯度沿着残差流的“捷径”传得更顺畅，深层网络更好训。代价是残差流的数值不受约束，所以在出口处要补一个最后的归一化。改动虽多，但“两个子层、各带残差、叠 N 层”这个骨架一点没变。
+
+## 用代码复现
+
+下面的代码用前几讲的零件写出一个 `block` 函数，把 TinyLM 的两层串起来，和第 34 讲那个逐站计算的结果核对；然后用同一个函数数出 TinyLM 和 Llama-3-8B 各部分的参数。
+
+```python
+import json
+import numpy as np
+
+t = json.load(open("tinylm.json", encoding="utf-8"))
+st = {s["key"]: np.array(s["v"]) for s in t["examples"]["34"]["steps"]}
+
+def layer_norm(x, eps=1e-5):
+    mu = x.mean(-1, keepdims=True)
+    return (x - mu) / np.sqrt(((x - mu) ** 2).mean(-1, keepdims=True) + eps)
+
+def attention(x, L, n_heads=2):
+    Q, K, V = (x @ np.array(L[k]) for k in ["W_q", "W_k", "W_v"])
+    s, dh = x.shape[0], x.shape[1] // n_heads
+    mask = np.triu(np.full((s, s), -np.inf), 1)
+    out = []
+    for h in range(n_heads):
+        c = slice(h * dh, (h + 1) * dh)
+        S = Q[:, c] @ K[:, c].T / np.sqrt(dh) + mask
+        A = np.exp(S - S.max(1, keepdims=True)); A /= A.sum(1, keepdims=True)
+        out.append(A @ V[:, c])
+    return np.concatenate(out, 1) @ np.array(L["W_o"])
+
+def ffn(x, L):
+    return np.maximum(0, x @ np.array(L["W_1"])) @ np.array(L["W_2"])
+
+def block(x, L):                                   # 一层：注意力 → 残差 → LN → FFN → 残差 → LN（Post-Norm）
+    x = layer_norm(x + attention(x, L))
+    return layer_norm(x + ffn(x, L))
+
+x = st["pos"]                                      # 嵌入 + 位置编码
+for i, L in enumerate(t["weights"]["layers"]):
+    x = block(x, L)
+    print(f"第 {i + 1} 层输出和逐站结果一致：", np.allclose(x, st[f"L{i + 1}ln2"], atol=1e-3), " 形状", x.shape)
+
+# 参数清单
+def count(d, d_ff, V, n_layers, kv_dim, gated, norm_params, final_norm):
+    attn = 2 * d * d + 2 * d * kv_dim
+    mlp = (3 if gated else 2) * d * d_ff
+    per_layer = attn + mlp + 2 * norm_params
+    return {"嵌入": V * d, "每层": per_layer, "全部层": per_layer * n_layers,
+            "最后的归一化": norm_params if final_norm else 0, "输出层": d * V}
+tiny = count(4, 8, 6, 2, 4, False, 0, False)
+llama = count(4096, 14336, 128256, 32, 1024, True, 4096, True)
+for name, c in [("TinyLM", tiny), ("Llama-3-8B", llama)]:
+    total = c["嵌入"] + c["全部层"] + c["最后的归一化"] + c["输出层"]
+    print(name, {k: f"{v:,}" for k, v in c.items()}, f"合计 {total:,}")
+```
+
+输出：
+
+```text
+第 1 层输出和逐站结果一致： True  形状 (4, 4)
+第 2 层输出和逐站结果一致： True  形状 (4, 4)
+TinyLM {'嵌入': '24', '每层': '128', '全部层': '256', '最后的归一化': '0', '输出层': '24'} 合计 304
+Llama-3-8B {'嵌入': '525,336,576', '每层': '218,112,000', '全部层': '6,979,584,000', '最后的归一化': '4,096', '输出层': '525,336,576'} 合计 8,030,261,248
+```
+
+前两行：用 `block` 函数一层层算出的结果，和逐站计算的结果一致，每层的输出都是 4 × 4。后两行是参数清单：TinyLM 合计 304 个；Llama-3-8B 每层 218,112,000 个（注意力、FFN 和两个 RMSNorm），32 层加上嵌入、最后的归一化和输出层，合计 8,030,261,248 个。
+
+## 到了大模型里
+
+**层数和宽度是模型规模的两个旋钮。**Llama-3-8B 是 32 层、宽 4096；Llama-3-70B 是 80 层、宽 8192。参数量大致与“层数 × 宽度²”成正比，第 35 讲会把它写成公式。
+
+**同样的块，同样的代码。**因为每一层的结构完全一样，推理引擎只需要为“一层”写好高度优化的算子，然后循环 N 次。模型的权重文件也是按层组织的：`layers.0.attention.wq`、`layers.0.feed_forward.w1`……一直到 `layers.31`。
+
+**按层切分到多卡。**层与层之间是串行的，前一层算完才能算后一层。模型太大、一张卡放不下时，一种办法是把前一半的层放在一张卡上、后一半放在另一张卡上，像流水线一样传递，叫流水线并行（第 12 篇）；另一种是把每一层内部的矩阵切开，叫张量并行（第 93 讲）。两种切法都以“一层”为基本单位。
+
+## 容易混淆的地方
+
+1. **“一层”指的是一个 Block。**说 Llama-3-8B 有 32 层，指的是 32 个 Transformer Block。每个 Block 里面有 7 个线性层（第 13 讲）、2 个归一化，所以按线性层数会多得多。
+2. **各层的结构相同，权重不同。**32 层不是把同一组权重用 32 遍，而是 32 组各自训练出来的权重。
+3. **原始 Transformer 还有“编码器”。**2017 年的论文是为翻译设计的，有一个编码器（读原文，无因果掩码）和一个解码器（写译文）。GPT、Llama 这类语言模型只用了解码器那一半，所以也叫“仅解码器”（decoder-only）结构。
+
+## 回顾
+
+Transformer Block 由两个子层组成：多头注意力负责词与词交换信息，FFN 负责每个词各自加工；每个子层都加回残差流、做归一化。一层的输入输出形状相同，所以可以叠 N 层；再加上入口（词嵌入 + 位置编码）和出口（lm_head + softmax），就是完整的语言模型。TinyLM 有 304 个参数，Llama-3-8B 有 8,030,261,248 个，绝大部分在 32 个块里。现代模型在这个骨架上做了几处改动：Pre-Norm、RMSNorm、RoPE、SwiGLU、GQA，留到第 5 篇。
+
+结构图的最后两站，lm_head 和 softmax，我们还没有细讲：最后一层那个 4 维（或 4096 维）的向量，是怎么变成词表上每个词的概率的？下一讲：**输出层**。

@@ -30,7 +30,8 @@ def lecture_files(which):
 def check_code(text):
     """每个 python 代码块后面如果紧跟一个 text 代码块，就当作它的期望输出。"""
     problems = []
-    pairs = re.findall(r"```python\n(.*?)```(?:(?!```python).)*?```text\n(.*?)```", text, re.S)
+    # 代码组不能跨过 ```：没有紧跟输出的代码块（比如只示意、不运行的 PyTorch 片段）就跳过
+    pairs = re.findall(r"```python\n((?:(?!```).)*?)```(?:(?!```python).)*?```text\n(.*?)```", text, re.S)
     for i, (code, expected) in enumerate(pairs, 1):
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8") as f:
             f.write(code)
@@ -73,6 +74,8 @@ def main():
         n_code, p1 = check_code(text)
         p2, heads = check_page(lid)
         problems = p1 + p2
+        if lid >= 36 and any(c in text for c in "「」『』"):
+            problems.append("第 36 讲起不用直角引号「」『』，改用 “ ” 和 ‘ ’（见写作规范）")
         status = "通过" if not problems else "有问题"
         print(f"第 {lid:02d} 讲 {f.name}：{status}（核对了 {n_code} 段代码输出，{len(text)} 字符）")
         print("  小节：" + " / ".join(heads))

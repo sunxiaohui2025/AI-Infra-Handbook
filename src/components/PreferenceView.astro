@@ -1,0 +1,51 @@
+---
+// 偏好学习的两个公式。
+//   奖励模型（Bradley–Terry）：P(A 比 B 好) = σ(r_A − r_B)，损失 = −ln σ(r_好 − r_差)。
+//   DPO：Δ_w、Δ_l 是策略模型相对参考模型，对“好回答”和“差回答”的 ln 概率变化；
+//        隐式奖励 = β·Δ，损失 = −ln σ(β(Δ_w − Δ_l))，梯度的权重 = σ(−β(Δ_w − Δ_l))。
+// 读者可以拖动各个滑块，看概率、损失和“还要推多用力”怎么变。
+interface Props { title?: string; caption?: string }
+const { title = '两个回答，人更喜欢哪一个', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pref" data-pref>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-nc-cols">
+    <div class="ai-nc-col">
+      <div class="ai-mlp-pt"><b>奖励模型</b>：给回答 A（人选的）和 B 各打一个分</div>
+      <label class="ai-tl-lr"><span>r_A = <b data-v="ra"></b></span><input type="range" min="-3" max="3" step="0.1" value="1" data-s="ra" /></label>
+      <label class="ai-tl-lr"><span>r_B = <b data-v="rb"></b></span><input type="range" min="-3" max="3" step="0.1" value="1" data-s="rb" /></label>
+      <div class="ai-vp-read" data-rm></div>
+    </div>
+    <div class="ai-nc-col">
+      <div class="ai-mlp-pt"><b>DPO</b>：直接调整模型给两个回答的概率</div>
+      <label class="ai-tl-lr"><span>好回答 Δ_w = <b data-v="dw"></b></span><input type="range" min="-3" max="3" step="0.1" value="0" data-s="dw" /></label>
+      <label class="ai-tl-lr"><span>差回答 Δ_l = <b data-v="dl"></b></span><input type="range" min="-3" max="3" step="0.1" value="0" data-s="dl" /></label>
+      <label class="ai-tl-lr"><span>β = <b data-v="b"></b></span><input type="range" min="0.1" max="2" step="0.1" value="0.5" data-s="b" /></label>
+      <div class="ai-vp-read" data-dpo></div>
+    </div>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const sig = (z: number) => 1 / (1 + Math.exp(-z));
+  const f = (v: number, d = 3) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  function init(fig: HTMLElement) {
+    const g = (k: string) => Number(fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!.value);
+    function draw() {
+      ['ra', 'rb', 'dw', 'dl', 'b'].forEach((k) => { fig.querySelector(`[data-v="${k}"]`)!.textContent = f(g(k), 1); });
+      const ra = g('ra'), rb = g('rb'), p = sig(ra - rb);
+      fig.querySelector<HTMLElement>('[data-rm]')!.innerHTML = `<div class="ai-vp-row"><span>概率</span><div>P(A 更好) = σ(${f(ra, 1)} − ${f(rb, 1)}) = <b>${f(p)}</b></div></div>`
+        + `<div class="ai-vp-row"><span>损失</span><div>−ln ${f(p)} = <b>${f(-Math.log(p))}</b></div></div>`
+        + `<div class="ai-vp-row ai-vp-hint">只有分差起作用：两个分一样时是 0.5，损失 ln 2 ≈ 0.693。训练让人选的那个分更高。</div>`;
+      const dw = g('dw'), dl = g('dl'), b = g('b'), m = b * (dw - dl), loss = -Math.log(sig(m)), w = sig(-m);
+      fig.querySelector<HTMLElement>('[data-dpo]')!.innerHTML = `<div class="ai-vp-row"><span>隐式奖励</span><div>好 β·Δ_w = ${f(b * dw)}，差 β·Δ_l = ${f(b * dl)}</div></div>`
+        + `<div class="ai-vp-row"><span>损失</span><div>−ln σ(${f(m)}) = <b>${f(loss)}</b></div></div>`
+        + `<div class="ai-vp-row"><span>推的力度</span><div>σ(${f(-m)}) = <b>${f(w)}</b>：${w >= 0.45 ? '还没分开，用力推' : w > 0.1 ? '已经分开一些，推得轻一点' : '已经分得很开，几乎不推了'}</div></div>`
+        + `<div class="ai-vp-row ai-vp-hint">提高好回答的概率（Δ_w 变大）或降低差回答的概率（Δ_l 变小），损失都会下降。β 越大，越容易被推开，也越容易偏离参考模型。</div>`;
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pref]').forEach(init);
+</script>

@@ -1,0 +1,57 @@
+---
+// α-β 通信代价计算器（公式与第 91 讲的代码相同）。一条消息 T = α + m/β。
+// All-Reduce：Ring = 2(p−1)·(α + m/(p·β))；Tree ≈ 2·⌈log₂p⌉·α + 2m/β；一步到位（每张卡同时读其余 p−1 张卡）= α + (p−1)·m/β。
+// 读者可以：选链路预设或自己调 α、β，调消息大小（对数刻度）和卡数，看三种算法的耗时、延迟占比；下图是单条消息的实际带宽随消息大小的变化。
+interface Props { title?: string; caption?: string }
+const { title = '这次通信要多久', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ab" data-alphabeta>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="l"><button data-pa="3" data-pb="450" aria-pressed="true">NVLink（机内）</button><button data-pa="6" data-pb="50" aria-pressed="false">InfiniBand（跨机）</button><button data-pa="10" data-pb="25" aria-pressed="false">PCIe（经 CPU）</button></div>
+    <label class="ai-tl-lr"><span>α = <b data-av></b> μs</span><input type="range" min="1" max="30" step="1" value="3" data-a /></label>
+    <label class="ai-tl-lr"><span>β = <b data-bv></b> GB/s</span><input type="range" min="5" max="900" step="5" value="450" data-b /></label>
+    <label class="ai-tl-lr"><span>消息 m = <b data-mv></b></span><input type="range" min="0" max="18" step="1" value="9" data-m /></label>
+    <label class="ai-tl-lr"><span>卡数 p = <b data-pv></b></span><input type="range" min="1" max="9" step="1" value="3" data-p /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmtB = (m: number) => (m >= 1e9 ? `${(m / 1e9).toFixed(m >= 1e10 ? 0 : 1)} GB` : m >= 1e6 ? `${(m / 1e6).toFixed(m >= 1e7 ? 0 : 1)} MB` : `${(m / 1e3).toFixed(0)} KB`);
+  const fmtT = (t: number) => (t >= 1e-3 ? `${(t * 1e3).toFixed(2)} ms` : `${(t * 1e6).toFixed(1)} μs`);
+  function init(fig: HTMLElement) {
+    const q = (k: string) => fig.querySelector<HTMLInputElement>(`[data-${k}]`)!;
+    function draw() {
+      const a = Number(q('a').value) * 1e-6, b = Number(q('b').value) * 1e9, m = 1e3 * 2 ** Number(q('m').value) , p = 2 ** Number(q('p').value);
+      fig.querySelector('[data-av]')!.textContent = String(Number(q('a').value)); fig.querySelector('[data-bv]')!.textContent = String(Number(q('b').value)); fig.querySelector('[data-mv]')!.textContent = fmtB(m); fig.querySelector('[data-pv]')!.textContent = String(p);
+      const algs: [string, number, number][] = [
+        ['Ring', 2 * (p - 1) * a, 2 * (p - 1) * m / p / b],
+        ['Tree', 2 * Math.ceil(Math.log2(Math.max(p, 2))) * a, 2 * m / b],
+        ['一步到位', a, (p - 1) * m / b],
+      ];
+      const mx = Math.max(...algs.map(([, x, y]) => x + y));
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 220">';
+      algs.forEach(([n, la, bw], i) => { const y = 8 + i * 26, wa = (la / mx) * 440, wb = (bw / mx) * 440; s += `<text class="ai-al-gl" x="70" y="${y + 13}" text-anchor="end">${n}</text><rect class="ai-ab-lat" x="76" y="${y}" width="${wa}" height="18"/><rect class="ai-ab-bw" x="${76 + wa}" y="${y}" width="${wb}" height="18"/><text class="ai-al-gl" x="${80 + wa + wb}" y="${y + 13}">${fmtT(la + bw)}</text>`; });
+      // 实际带宽曲线：m/(α + m/β)，m 从 1 KB 到 1 GB
+      const X = (mm: number) => 76 + (Math.log2(mm / 1e3) / 20) * 480, Y = (v: number) => 205 - (v / b) * 95;
+      let pts = ''; for (let k = 0; k <= 20; k += 0.25) { const mm = 1e3 * 2 ** k; pts += `${X(mm)},${Y(mm / (a + mm / b))} `; }
+      s += `<text class="ai-np-ptitle" x="76" y="100">单条消息的实际带宽 m ÷ (α + m/β)，横轴 1 KB → 1 GB</text><line class="ai-bc-ax" x1="76" x2="556" y1="205" y2="205"/><line class="ai-bc-grid" x1="76" x2="556" y1="${Y(b)}" y2="${Y(b)}"/><text class="ai-al-gl" x="72" y="${Y(b) + 3}" text-anchor="end">β</text><line class="ai-bc-grid" x1="${X(a * b)}" x2="${X(a * b)}" y1="${Y(b)}" y2="205"/><text class="ai-al-gl" x="${X(a * b)}" y="217" text-anchor="middle">α·β</text><polyline class="ai-bc-line c-acc" points="${pts}"/><circle class="ai-bc-dot" cx="${X(m)}" cy="${Y(m / (a + m / b))}" r="4"/>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const best = algs.reduce((x, y) => (x[1] + x[2] <= y[1] + y[2] ? x : y));
+      const t1 = a + m / b;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `单条消息：${fmtT(a)} + ${fmtB(m)} ÷ ${(b / 1e9).toFixed(0)} GB/s = ${fmtT(t1)}，延迟占 ${Math.round(a / t1 * 100)}%；分界点 α·β = ${fmtB(a * b)}（比它小的消息主要花在延迟上）。`
+        + `<br>${p} 张卡 All-Reduce ${fmtB(m)}：最快的是 <b>${best[0]}</b>，${fmtT(best[1] + best[2])}。<span class="ai-faint">（灰：延迟项；绿：带宽项）</span>`;
+    }
+    fig.addEventListener('input', () => { fig.querySelectorAll('[data-group="l"] button').forEach((x) => x.setAttribute('aria-pressed', 'false')); draw(); });
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group="l"] button'); if (!bt) return;
+      q("a").value = bt.dataset.pa!; q("b").value = bt.dataset.pb!;
+      fig.querySelectorAll('[data-group="l"] button').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false')); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-alphabeta]').forEach(init);
+</script>

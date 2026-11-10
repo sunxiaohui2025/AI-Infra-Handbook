@@ -10,8 +10,7 @@ level: 主线
 minutes: 30
 demos: [GridTransform]
 video: ""
-formula: "<b><i>x</i></b> · <i>W</i> = <i>x</i><sub>1</sub> ·（<i>W</i> 的第 1 行）+ <i>x</i><sub>2</sub> ·（<i>W</i> 的第 2 行）"
-shape: "例：(1, 1) · [[2, 1], [0, 1]] = 1×(2, 1) + 1×(0, 1) = (2, 2)"
+formula: '$\mathbf{x}\cdot W = x_1\cdot\text{（W 的第 1 行）} + x_2\cdot\text{（W 的第 2 行）}$'
 ---
 import PrereqLinks from '../../components/PrereqLinks.astro';
 import GridTransform from '../../components/GridTransform.astro';
@@ -41,7 +40,9 @@ import Note from '../../components/Note.astro';
 
 这个结论比看上去重要得多。第 1 讲的专栏里提到过“线性组合”：平面上任何一个向量 (x<sub>1</sub>, x<sub>2</sub>)，都可以写成
 
-<div class="ai-formula">(<i>x</i><sub>1</sub>, <i>x</i><sub>2</sub>) = <i>x</i><sub>1</sub> · (1, 0) + <i>x</i><sub>2</sub> · (0, 1)</div>
+$$
+(x_1, x_2) = x_1\cdot(1, 0) + x_2\cdot(0, 1)
+$$
 
 也就是“沿横轴走 x<sub>1</sub> 步，再沿纵轴走 x<sub>2</sub> 步”。
 
@@ -91,7 +92,9 @@ import Note from '../../components/Note.astro';
 
 演示右侧还有一行叫“行列式”。对 2×2 的矩阵 [[a, b], [c, d]]，它的计算方法是
 
-<div class="ai-formula">det <i>W</i> = <i>a</i> · <i>d</i> − <i>b</i> · <i>c</i></div>
+$$
+\det W = a\cdot d - b\cdot c
+$$
 
 它的几何意义正好是：**单位正方形变换后的面积**，也就是整个平面上所有面积被放大的倍数。默认的 W 是 2 × 1 − 1 × 0 = 2，面积变成 2 倍；旋转和剪切的行列式都是 1，面积不变；压扁的行列式是 1 × 1 − 0.5 × 2 = 0，面积变成 0。
 
@@ -103,7 +106,9 @@ import Note from '../../components/Note.astro';
 
 如果先用矩阵 A 变换一次，再用矩阵 B 变换一次，结果会怎样？按行向量的写法，x 先变成 x · A，再变成 (x · A) · B。矩阵乘法满足结合律，所以
 
-<div class="ai-formula">(<b><i>x</i></b> · <i>A</i>) · <i>B</i> = <b><i>x</i></b> · (<i>A</i> · <i>B</i>)</div>
+$$
+(\mathbf{x}\cdot A)\cdot B = \mathbf{x}\cdot(A\cdot B)
+$$
 
 **连续做两次变换，等于用一个矩阵 A · B 做一次变换。**这就是矩阵和矩阵相乘的几何意义：把两次变换合并成一次。
 

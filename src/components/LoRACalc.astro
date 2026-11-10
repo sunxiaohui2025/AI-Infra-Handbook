@@ -1,0 +1,57 @@
+---
+// LoRA 计算器：一个 d_in × d_out 的权重 W 冻结不动，旁边训练 A（d_in × r）和 B（r × d_out），更新量 = A·B。
+// 读者可以：选一个 Llama-3-8B 的线性层（或整个模型）、调秩 r，看参数量、占比和微调显存；图上按比例画出 W、A、B 的形状。
+// 公式与第 50 讲的代码一致：LoRA 参数 = r × (d_in + d_out)；显存不含激活值。
+interface Props { title?: string; caption?: string }
+const { title = '调秩 r：LoRA 要训练多少参数', caption } = Astro.props;
+---
+<figure class="ai-gt ai-lora" data-lora>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><span class="ai-tl-k">矩阵</span><button data-v="q" aria-pressed="true">q_proj 4096×4096</button><button data-v="k" aria-pressed="false">k_proj 4096×1024</button><button data-v="up" aria-pressed="false">up_proj 4096×14336</button></div>
+    <label class="ai-tl-lr"><span>秩 r = <b data-rv></b></span><input type="range" min="0" max="8" step="1" value="4" data-r /></label>
+  </div>
+  <svg class="ai-tl-svg" viewBox="0 0 560 170" data-svg role="img" aria-label="W、A、B 的形状"></svg>
+  <div class="ai-mc-cards" data-cards></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const RS = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+  const MATS: Record<string, [number, number]> = { q: [4096, 4096], k: [4096, 1024], up: [4096, 14336] };
+  const ALL: [number, number][] = [[4096, 4096], [4096, 1024], [4096, 1024], [4096, 4096], [4096, 14336], [4096, 14336], [14336, 4096]];
+  const N = 8030261248;
+  const big = (n: number) => (n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n.toLocaleString());
+  function init(fig: HTMLElement) {
+    let m = 'q';
+    const rIn = fig.querySelector<HTMLInputElement>('[data-r]')!;
+    function draw() {
+      const r = RS[Number(rIn.value)];
+      fig.querySelector('[data-rv]')!.textContent = String(r);
+      const [di, dout] = MATS[m];
+      // 按比例画：高度对应 d_in，宽度对应 d_out（同一个缩放），A、B 的窄边至少 2 像素
+      const sc = 140 / Math.max(di, dout), wW = dout * sc, hW = di * sc, aw = Math.max(2, r * sc), bh = Math.max(2, r * sc);
+      let s = `<rect class="ai-lora-w" x="20" y="14" width="${wW}" height="${hW}"/><text class="ai-al-gl" x="${20 + wW / 2}" y="${14 + hW / 2}" text-anchor="middle">W（冻结）${di}×${dout}</text>`;
+      const x0 = 40 + wW;
+      s += `<text class="ai-lora-op" x="${x0}" y="${14 + hW / 2}">+</text>`;
+      s += `<rect class="ai-lora-a" x="${x0 + 20}" y="14" width="${aw}" height="${hW}"/><text class="ai-al-gl" x="${x0 + 26 + aw}" y="${24}">A ${di}×${r}</text>`;
+      s += `<rect class="ai-lora-b" x="${x0 + 30 + aw}" y="${14 + hW / 2 - bh / 2}" width="${wW}" height="${bh}"/><text class="ai-al-gl" x="${x0 + 30 + aw}" y="${14 + hW / 2 + bh / 2 + 14}">B ${r}×${dout}</text>`;
+      fig.querySelector('[data-svg]')!.innerHTML = s;
+      const one = r * (di + dout), all = 32 * ALL.reduce((a, [p, q]) => a + r * (p + q), 0);
+      fig.querySelector<HTMLElement>('[data-cards]')!.innerHTML =
+        `<div><span>这个矩阵</span><b>${big(one)}</b><small>r × (d_in + d_out) = ${r} × ${di + dout}，是 W（${big(di * dout)}）的 ${(one / (di * dout) * 100).toFixed(2)}%</small></div>`
+        + `<div><span>全模型（32 层 × 7 个线性层）</span><b>${big(all)}</b><small>占 Llama-3-8B 的 ${(all / N * 100).toFixed(2)}%</small></div>`
+        + `<div><span>微调显存（不含激活）</span><b>${(N * 2 / 1e9 + all * 16 / 1e9).toFixed(1)} GB</b><small>冻结的 BF16 权重 16.1 GB + LoRA 参数 × 16 字节；全量微调要 128.5 GB</small></div>`;
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group="m"] [data-v]');
+      if (!b) return;
+      m = b.dataset.v!;
+      fig.querySelectorAll('[data-group="m"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-lora]').forEach(init);
+</script>

@@ -10,8 +10,7 @@ level: 主线
 minutes: 20
 demos: [VectorPlane]
 video: ""
-formula: "<b><i>v</i></b> = (<i>v</i><sub>1</sub>, <i>v</i><sub>2</sub>, …, <i>v</i><sub>n</sub>)"
-shape: "例：苹果 = (7, 4)　TinyLM 里的“我”= (0.7, −0.6, −0.9, 0.3)"
+formula: '$\mathbf{v} = (v_1, v_2, \dots, v_n)$'
 ---
 import VectorPlane from '../../components/VectorPlane.astro';
 import Note from '../../components/Note.astro';
@@ -70,7 +69,9 @@ import tiny from '../../../../tinylm/tinylm.json';
 
 **n 个数按固定顺序排成一串，就叫一个 n 维向量**。写成
 
-<div class="ai-formula"><b><i>v</i></b> = (<i>v</i><sub>1</sub>, <i>v</i><sub>2</sub>, …, <i>v</i><sub>n</sub>)</div>
+$$
+\mathbf{v} = (v_1, v_2, \dots, v_n)
+$$
 
 其中 *v*<sub>1</sub> 是第 1 个数，*v*<sub>2</sub> 是第 2 个数，依此类推，每一个叫做向量的一个**分量**。分量的个数 n 叫做向量的**维度**。水果的向量有甜度、酸度两个分量，所以是 2 维的。
 
@@ -78,7 +79,9 @@ import tiny from '../../../../tinylm/tinylm.json';
 
 向量的长度也可以推广到 n 维：把每个分量平方、加起来、再开方，
 
-<div class="ai-formula">|<b><i>v</i></b>| = √(<i>v</i><sub>1</sub><sup>2</sup> + <i>v</i><sub>2</sub><sup>2</sup> + … + <i>v</i><sub>n</sub><sup>2</sup>)</div>
+$$
+|\mathbf{v}| = \sqrt{v_1^2 + v_2^2 + \dots + v_n^2}
+$$
 
 苹果 (7, 4) 的长度就是 √(49 + 16) = √65 ≈ 8.06。这个“长度”在大模型里会反复出现：模型每算完一层，都要把向量的长度拉回到差不多的大小，防止数字越算越大或越算越小。这件事叫归一化，第 30 讲和第 36 讲会讲到。
 
@@ -88,7 +91,9 @@ import tiny from '../../../../tinylm/tinylm.json';
 
 还是水果店。你想做一款“加糖苹果”：在苹果的基础上加一勺糖。一勺糖只增加甜度、不影响酸度，可以写成向量 (2, 0)。加糖之后的苹果，就是把两个向量的**对应分量**分别相加：
 
-<div class="ai-formula">(7, 4) + (2, 0) = (7 + 2, 4 + 0) = (9, 4)</div>
+$$
+(7, 4) + (2, 0) = (7 + 2, 4 + 0) = (9, 4)
+$$
 
 甜度从 7 变成 9，酸度还是 4。规则就这么简单：第 1 个分量和第 1 个分量相加，第 2 个和第 2 个相加。两个向量的维度必须相同，否则没有“对应分量”可以加。
 
@@ -106,7 +111,9 @@ import tiny from '../../../../tinylm/tinylm.json';
 
 第二种运算是**数乘**：用一个普通的数 k 去乘向量，规则是**每个分量都乘以 k**。
 
-<div class="ai-formula"><i>k</i> · (<i>v</i><sub>1</sub>, <i>v</i><sub>2</sub>) = (<i>k v</i><sub>1</sub>, <i>k v</i><sub>2</sub>)</div>
+$$
+k \cdot (v_1, v_2) = (k v_1, k v_2)
+$$
 
 比如 0.5 × (7, 4) = (3.5, 2)：甜度和酸度都减半，可以想象成把苹果汁兑了一倍的水，味道变淡了，但“甜里带一点酸”的比例没变。
 

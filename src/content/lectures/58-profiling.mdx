@@ -1,0 +1,158 @@
+---
+id: 58
+slug: profiling
+title: 性能分析与 Profiling
+chapter: 3
+part: 7
+problem: 怎么找到真正的瓶颈
+prereqs: [54, 56]
+level: 主线
+minutes: 30
+demos: [ProfilerTimeline]
+video: ""
+formula: '先看 GPU 有没有空等，再按类别和单个 kernel 排出时间，最后把最耗时的 kernel 的实际带宽或算力和 Roofline 的屋顶比：差多少，就还能优化多少'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import ProfilerTimeline from '../../components/ProfilerTimeline.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[54, 56]} />
+
+前面几讲给了我们一套估算的工具：算力、带宽、Roofline、互联。它们能告诉我们“理论上该多快”。可程序真正跑起来，常常比估算慢，而且慢的原因五花八门：某个 kernel 写得不好，CPU 来不及发射任务，通信卡住了，数据在 CPU 和 GPU 之间来回拷贝……凭猜是猜不准的。
+
+**性能分析**（profiling）就是把程序实际运行的过程记录下来，看时间到底花在了哪里。这一讲介绍常用的工具，以及读一张 Profiler 时间线的方法。
+
+## 常用的工具
+
+- **PyTorch Profiler**：在 Python 代码里加几行就能用，记录每个算子在 CPU 上的耗时和对应的 GPU kernel，可以导出成时间线在浏览器里看。适合先粗看一遍。
+- **NVIDIA Nsight Systems**：系统级的时间线，同时记录 CPU 线程、CUDA API 调用、GPU 上每个 kernel、内存拷贝、NCCL 通信，看“谁在等谁”最清楚。
+- **NVIDIA Nsight Compute**：针对**单个 kernel** 的深入分析：它用了多少显存带宽、多少算力、Tensor Core 的利用率、缓存命中率、为什么停顿。适合确定某个 kernel 为什么慢。
+
+推理引擎一般也有自己的 profiling 开关（比如 vLLM 可以在运行时启停 PyTorch Profiler），方便在真实负载下采集。
+
+## 一张时间线长什么样
+
+Nsight Systems 或 PyTorch Profiler 的时间线，横轴是时间，纵轴是一行行的“轨道”。最重要的是两类：
+
+- **CPU 线程**：Python 代码、框架的调度、CUDA API 调用（比如每一次 kernel 发射）。
+- **GPU 流**：GPU 上实际执行的 kernel，一个接一个的小方块。
+
+读时间线，就是看这两行之间的关系：GPU 一直有活干吗？哪些 kernel 占了大头？它们离硬件的上限还有多远？
+
+下面是一份**模拟的**时间线（数字由 Roofline 估算生成，用来练习读图，不是真实的测量）：Llama-3-8B，4 张 H100 做张量并行，decode 一步，批 8、上下文 2048。每层 12 个 kernel：归一化、QKV 投影、RoPE、注意力、输出投影、All-Reduce、残差加归一化、gate/up 投影、SiLU 门控、down 投影、All-Reduce、残差相加。
+
+<ProfilerTimeline caption="图 58-1　一份模拟的 Profiler 时间线（Llama-3-8B、TP=4、decode 一步）。上面一行是 CPU 发射 kernel，下面一行是 GPU 执行的 kernel，颜色表示类别。点 kernel 看它的耗时和实际带宽；切换到 CUDA Graph，看空白怎么消失。" />
+
+## 读图的四步
+
+**第一步：GPU 有没有空等。**先看 GPU 那一行有没有空白。这份时间线里，一步 3.09 ms，GPU 忙了 91%，有约 **0.27 ms** 是空的。放大看，空白出现在一串小 kernel 之间：GPU 算完了一个两三微秒的逐元素运算，下一个 kernel 还没被 CPU 发射过来。这是第 79 讲的 CPU 发射开销，解决办法是 CUDA Graph：切换过去，空白几乎消失，一步变成 2.84 ms。
+
+如果空白很大，往往先解决它，因为 GPU 再快也没用。常见的原因还有：CPU 上的调度逻辑太慢、等待 CPU 和 GPU 之间的数据拷贝、等待其他卡的通信。
+
+**第二步：按类别分账。**把 GPU 上的时间按类别加起来：矩阵乘法 **1.69 ms**（55%），逐元素运算 **0.49 ms**，通信 **0.35 ms**，注意力 **0.30 ms**。
+
+逐元素运算有 0.49 ms，占了 16%，这有点多：它们的计算量微不足道，时间主要是每个 kernel 的固定开销和读写显存。一层有 5 个这样的小 kernel，32 层就是 160 个。这提示我们该做**算子融合**（第 74 讲）。
+
+**第三步：找最耗时的 kernel。**排在前面的是 gate_up 投影（0.80 ms）、down 投影（0.45 ms）、All-Reduce（0.35 ms）、注意力（0.30 ms）。优化要从这些大头开始；把一个只占 1% 的 kernel 优化到零，也只能快 1%。
+
+**第四步：和屋顶比。**最大的 gate_up 投影，一次 24.9 μs，读 58.7 MB 权重，实际带宽 **2.36 TB/s**。它是 decode 的矩阵乘法，在 Roofline 的带宽区（第 54 讲），屋顶是 3.35 TB/s。它只用到了 70%，还有提升空间：可能是 kernel 的选择不对、批太小导致并行度不够，或者这台机器的实际带宽本来就达不到标称（第 59 讲会实测）。
+
+<Note kind="point">读 Profiler 时间线分四步：先看 GPU 有没有空等（空白多半来自 CPU 发射或等待通信）；再按类别分账，看哪类运算占得多；然后找出最耗时的几个 kernel；最后把它们的实际带宽或算力和 Roofline 的屋顶比，差多少就是还能优化多少。优化从大头开始，改完再测。</Note>
+
+## 根据发现决定怎么改
+
+把四步的发现整理成一张单子：
+
+| 发现 | 可能的改法 | 预期收益 |
+| --- | --- | --- |
+| GPU 空等 0.27 ms | CUDA Graph（第 79 讲） | 约 0.25 ms |
+| 逐元素 kernel 多、共 0.49 ms | 融合进相邻的 kernel（第 74 讲） | 约 0.3 ms |
+| 矩阵乘法只用到 70% 带宽 | 换更好的 kernel、调整切分 | 最多约 0.5 ms |
+| All-Reduce 0.35 ms | 小消息专用实现、和计算重叠（第 91、93 讲） | 视情况 |
+
+每改一项，**重新测一次**。优化之间会相互影响：融合了逐元素运算，kernel 数少了，CPU 发射的压力也小了；CUDA Graph 的收益可能就没那么大了。
+
+## 测量时的几个坑
+
+**异步执行。**GPU 的 kernel 是异步发射的（第 79 讲），在 Python 里用计时器量一个函数，量到的可能只是发射的时间。要么在计时前后调用 `torch.cuda.synchronize()`，要么用 CUDA 事件、用 Profiler。
+
+**预热。**第一次运行时要编译 kernel、分配显存、自动调优（第 78 讲的 autotune），会特别慢。先跑几次再测。
+
+**Profiler 本身有开销。**记录得越详细，程序跑得越慢，时间线里的空白可能被放大。重要的结论最好用不开 Profiler 的端到端计时再确认一次。
+
+**测真实的负载。**批大小、序列长度不同，瓶颈完全不同：同一个模型，decode 卡在带宽上，prefill 卡在算力上；小批时 CPU 发射是问题，大批时就不是。要在接近线上的条件下测。
+
+## 到了大模型里
+
+**分布式的时间线。**多卡、多机时，每张卡都有自己的时间线。一张卡在等 All-Reduce，往往是因为另一张卡还没算完（负载不均）或者网络拥塞。要把多张卡的时间线放在一起看，找出最慢的那张。
+
+**指标监控和 Profiling 互补。**线上服务通常有监控指标（TTFT、TPOT、吞吐、KV Cache 使用率、抢占次数，第 73 讲），它们告诉你“哪里不对”；Profiling 告诉你“为什么”。
+
+## 用代码复现
+
+下面的代码按 Roofline 生成这份模拟时间线（每个 kernel 的耗时、CPU 的发射），然后做四步分析：GPU 空闲、按类别分账、最耗时的 kernel、最大矩阵乘法的实际带宽；最后对比 CUDA Graph。
+
+```python
+# 一份“模拟”的 Profiler 时间线：Llama-3-8B，4 张 H100 张量并行（追求低延迟），decode 一步，批 8、上下文 2048。
+# 每个 kernel 的耗时按 Roofline 估算（矩阵乘法按带宽的 80%），CPU 逐个发射、每个约 8 μs（eager 模式，第 79 讲）
+BW, EFF, LAUNCH, L, B, CTX = 3.35e12, 0.8, 8e-6, 32, 8, 2048
+d, dff, kvh = 4096, 14336, 8
+def gemm(n_in, n_out): return ("矩阵乘法", 2 * n_in * n_out / 4)              # 每张卡读 1/4 的权重（TP=4），BF16
+LAYER = [("rmsnorm", ("逐元素", 4 * B * d)), ("qkv_proj", gemm(d, d + 2 * kvh * 128)), ("rope", ("逐元素", 4 * B * d)),
+         ("attention_decode", ("注意力", B * CTX * kvh // 4 * 128 * 2 * 2)), ("o_proj", gemm(d, d)), ("all_reduce", ("通信", B * d * 2)),
+         ("add_rmsnorm", ("逐元素", 6 * B * d)), ("gate_up_proj", gemm(d, 2 * dff)), ("silu_mul", ("逐元素", 6 * B * dff // 4)),
+         ("down_proj", gemm(dff, d)), ("all_reduce", ("通信", B * d * 2)), ("add", ("逐元素", 6 * B * d))]
+
+def trace(graph):
+    cpu, gpu, out = (20e-6, 0.0, []) if graph else (0.0, 0.0, [])
+    for layer in range(L):
+        for name, (cat, nbytes) in LAYER:
+            dur = 3e-6 + nbytes / (BW * EFF) if cat != "通信" else 5e-6 + 3 * nbytes / 450e9   # 通信：一步到位的 All-Reduce
+            if not graph: cpu += LAUNCH
+            start = max(gpu, cpu); gpu = start + dur
+            out.append((layer, name, cat, start, dur, nbytes))
+    return out
+
+def summary(tr, title):
+    T = tr[-1][3] + tr[-1][4]; busy = sum(k[4] for k in tr)
+    print(f"{title}：一步 {T * 1e3:.2f} ms，{len(tr)} 个 kernel，GPU 忙 {busy / T:.0%}，空闲 {(T - busy) * 1e3:.2f} ms")
+    by = {}
+    for k in tr: by[k[2]] = by.get(k[2], 0) + k[4]
+    print("   按类别：" + "，".join(f"{c} {t * 1e3:.2f} ms" for c, t in sorted(by.items(), key=lambda x: -x[1])))
+    return T
+
+eager = trace(False); T1 = summary(eager, "eager")
+top = {}
+for k in eager: top[k[1]] = top.get(k[1], 0) + k[4]
+print("   最耗时的 kernel：" + "，".join(f"{n} {t * 1e3:.2f} ms" for n, t in sorted(top.items(), key=lambda x: -x[1])[:4]))
+g = [k for k in eager if k[1] == "gate_up_proj"][0]
+print(f"   gate_up_proj 一次 {g[4] * 1e6:.1f} μs，读 {g[5] / 1e6:.1f} MB，实际带宽 {g[5] / g[4] / 1e12:.2f} TB/s（峰值 3.35）")
+T2 = summary(trace(True), "CUDA Graph")
+print(f"换成 CUDA Graph 后一步快了 {T1 / T2:.1f} 倍")
+```
+
+输出：
+
+```text
+eager：一步 3.09 ms，384 个 kernel，GPU 忙 91%，空闲 0.27 ms
+   按类别：矩阵乘法 1.69 ms，逐元素 0.49 ms，通信 0.35 ms，注意力 0.30 ms
+   最耗时的 kernel：gate_up_proj 0.80 ms，down_proj 0.45 ms，all_reduce 0.35 ms，attention_decode 0.30 ms
+   gate_up_proj 一次 24.9 μs，读 58.7 MB，实际带宽 2.36 TB/s（峰值 3.35）
+CUDA Graph：一步 2.84 ms，384 个 kernel，GPU 忙 99%，空闲 0.02 ms
+   按类别：矩阵乘法 1.69 ms，逐元素 0.49 ms，通信 0.35 ms，注意力 0.30 ms
+换成 CUDA Graph 后一步快了 1.1 倍
+```
+
+第一组是 eager：一步 3.09 ms，GPU 忙 91%，按类别和按 kernel 的排序，以及 gate_up 投影的实际带宽 2.36 TB/s。第二组是 CUDA Graph：空闲几乎为零，一步 2.84 ms。
+
+## 容易混淆的地方
+
+1. **GPU 利用率高不等于跑得好。**`nvidia-smi` 的“利用率”只说明这段时间有 kernel 在跑，即使它只用了很小一部分算力和带宽。要看实际带宽、实际算力和屋顶的距离。
+2. **CPU 上的耗时不是 GPU 上的耗时。**PyTorch Profiler 的表格里，同一个算子有“CPU 时间”和“CUDA 时间”两栏，前者是发射和调度的开销，后者才是 GPU 上执行的时间。
+3. **模拟不是测量。**这一讲的时间线是用模型生成的，用来练习读图的方法；真实的时间线要在自己的机器上采集，第 59 讲会讲怎么把实测值和理论值对上。
+
+## 回顾
+
+性能分析把程序实际运行的过程记录下来：PyTorch Profiler 适合粗看，Nsight Systems 看 CPU 和 GPU 之间谁在等谁，Nsight Compute 深入分析单个 kernel。读时间线分四步：看 GPU 有没有空等，按类别分账，找最耗时的 kernel，把它们和 Roofline 的屋顶比较。模拟的 8B、TP=4 decode 一步 3.09 ms：GPU 空等 0.27 ms（换 CUDA Graph 后降到 2.84 ms），逐元素运算 0.49 ms 提示要融合，最大的矩阵乘法只用到 2.36 / 3.35 TB/s。测量时要同步、预热、注意 Profiler 的开销，并在真实负载下测。
+
+最后一个问题：Roofline 的屋顶用的是规格表上的峰值，实际的机器能达到多少？手算的速度和实测的速度差多少？下一讲用一台 DGX Spark 来对一对：**理论值对上实测值**。

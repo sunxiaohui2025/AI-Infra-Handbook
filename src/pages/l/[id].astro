@@ -5,6 +5,7 @@ import { getCollection, render } from 'astro:content';
 import Base from '../../layouts/Base.astro';
 import SideNav from '../../components/SideNav.astro';
 import Tags from '../../components/Tags.astro';
+import CompareMode from '../../components/CompareMode.astro';
 import { LECTURES, PN, partLs, pad, lecture } from '../../data/course';
 
 export function getStaticPaths() {
@@ -18,9 +19,10 @@ const ls = partLs(l.part);
 const idx = ls.findIndex((x) => x.id === l.id) + 1;
 const prev = LECTURES[l.id - 2];
 const next = LECTURES[l.id];
+const proj = l.part >= 14;            // 第五章（项目篇）：代码多，用宽版式
 ---
 <Base title={`${pad(l.id)} ${l.title}`} view="lec">
-  <main class="ai-scroll ai-read" id="main">
+  <main class={`ai-scroll ai-read${proj ? ' ai-proj' : ''}`} id="main">
     <div class="ai-shell">
       <SideNav ch={l.ch} part={l.part} lec={l.id} />
       <div class="ai-shell-main">
@@ -28,13 +30,9 @@ const next = LECTURES[l.id];
           <article class="ai-article">
             <header class="ai-art-head" id="top-of-article">
               <div class="ai-kicker"><a href={`/p/${l.part}`}>第 {l.part} 篇 {PN[l.part]}</a><span>第 {idx} 讲 / 共 {ls.length} 讲</span></div>
-              <h1><span class="ai-art-no">{pad(l.id)}</span>{l.title}</h1>
-              {entry?.data.formula && <div class="ai-art-formula" set:html={entry.data.formula} />}
-              {entry?.data.shape && <div class="ai-art-shape">{entry.data.shape}</div>}
-              <p class="ai-art-q">{l.q}</p>
+              <h1><span class="ai-art-no">第{pad(l.id)}讲</span>{l.title}</h1>
               <div class="ai-article-meta">
                 <Tags l={l} />
-                {entry?.data.minutes && <span class="ai-tag ai-tag--opt">约 {entry.data.minutes} 分钟</span>}
               </div>
             </header>
 
@@ -43,7 +41,7 @@ const next = LECTURES[l.id];
                 <p class="ai-todo-title">这一讲还没有写</p>
                 <dl>
                   <dt>要回答的问题</dt><dd>{l.q}</dd>
-                  <dt>{l.part === 14 ? '对应原理讲' : '计划中的演示'}</dt><dd>{l.demo}</dd>
+                  <dt>{l.part >= 14 ? '对应' : '计划中的演示'}</dt><dd>{l.demo}</dd>
                 </dl>
                 <p class="ai-todo-hint">想读这一讲时，对写作助手说「写第 {l.id} 讲」即可。</p>
               </div>
@@ -58,4 +56,5 @@ const next = LECTURES[l.id];
       </div>
     </div>
   </main>
+  {Content && <CompareMode />}
 </Base>

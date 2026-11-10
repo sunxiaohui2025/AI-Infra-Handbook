@@ -1,0 +1,49 @@
+---
+// 单位圆与旋转（与第 9 讲的代码相同的例子）。
+// 左图：拖角度 θ，单位圆上的点 (cos θ, sin θ)，以及它在两条轴上的投影；右下的两条曲线是 cos、sin 随 θ 的变化。
+// 右图：两个向量 q = (0.7, −0.6)、k = (0.3, 0.6)，拖 φ 把它们一起逆时针旋转，看长度、夹角、点积都不变。
+interface Props { title?: string; caption?: string }
+const { title = '单位圆，以及一起转的两个向量', caption } = Astro.props;
+---
+<figure class="ai-gt ai-uc" data-unitcircle>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>θ = <b data-tv></b>°</span><input type="range" min="0" max="360" step="5" value="30" data-t /></label>
+    <label class="ai-tl-lr"><span>一起转 φ = <b data-pv></b>°</span><input type="range" min="0" max="360" step="5" value="50" data-p /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const Q = [0.7, -0.6], K = [0.3, 0.6];
+  const rot = (v: number[], a: number) => [v[0] * Math.cos(a) - v[1] * Math.sin(a), v[0] * Math.sin(a) + v[1] * Math.cos(a)];
+  function init(fig: HTMLElement) {
+    const tIn = fig.querySelector<HTMLInputElement>('[data-t]')!, pIn = fig.querySelector<HTMLInputElement>('[data-p]')!;
+    function draw() {
+      const td = Number(tIn.value), pd = Number(pIn.value), t = (td * Math.PI) / 180, p = (pd * Math.PI) / 180;
+      fig.querySelector('[data-tv]')!.textContent = String(td); fig.querySelector('[data-pv]')!.textContent = String(pd);
+      const R = 70, cx = 90, cy = 95, c = Math.cos(t), s = Math.sin(t);
+      let g = `<svg class="ai-tl-svg" viewBox="0 0 600 200"><line class="ai-bc-ax" x1="${cx - 85}" x2="${cx + 85}" y1="${cy}" y2="${cy}"/><line class="ai-bc-ax" x1="${cx}" x2="${cx}" y1="${cy - 85}" y2="${cy + 85}"/><circle class="ai-uc-circ" cx="${cx}" cy="${cy}" r="${R}"/>`;
+      g += `<line class="ai-uc-cos" x1="${cx}" y1="${cy}" x2="${cx + R * c}" y2="${cy}"/><line class="ai-uc-sin" x1="${cx + R * c}" y1="${cy}" x2="${cx + R * c}" y2="${cy - R * s}"/><line class="ai-uc-v" x1="${cx}" y1="${cy}" x2="${cx + R * c}" y2="${cy - R * s}"/><circle class="ai-bc-dot" cx="${cx + R * c}" cy="${cy - R * s}" r="4"/>`;
+      // cos / sin 曲线
+      const X = (a: number) => 190 + (a / (2 * Math.PI)) * 160, Y = (v: number) => 95 - v * 60;
+      let pc = '', ps = ''; for (let a = 0; a <= 2 * Math.PI + 0.01; a += 0.05) { pc += `${X(a)},${Y(Math.cos(a))} `; ps += `${X(a)},${Y(Math.sin(a))} `; }
+      g += `<line class="ai-bc-ax" x1="190" x2="350" y1="95" y2="95"/><polyline class="ai-uc-cl" points="${pc}"/><polyline class="ai-uc-sl" points="${ps}"/><line class="ai-rl-cur" x1="${X(t)}" x2="${X(t)}" y1="30" y2="160"/><text class="ai-al-gl" x="352" y="${Y(Math.cos(t)) + 3}">cos</text><text class="ai-al-gl" x="352" y="${Y(Math.sin(t)) + 3}">sin</text>`;
+      // 两个向量一起转
+      const ox = 480, oy = 100, S = 90, q2 = rot(Q, p), k2 = rot(K, p);
+      g += `<line class="ai-bc-ax" x1="${ox - 95}" x2="${ox + 95}" y1="${oy}" y2="${oy}"/><line class="ai-bc-ax" x1="${ox}" x2="${ox}" y1="${oy - 95}" y2="${oy + 95}"/>`;
+      g += `<line class="ai-uc-ghost" x1="${ox}" y1="${oy}" x2="${ox + S * Q[0]}" y2="${oy - S * Q[1]}"/><line class="ai-uc-ghost" x1="${ox}" y1="${oy}" x2="${ox + S * K[0]}" y2="${oy - S * K[1]}"/>`;
+      g += `<line class="ai-uc-q" x1="${ox}" y1="${oy}" x2="${ox + S * q2[0]}" y2="${oy - S * q2[1]}"/><line class="ai-uc-k" x1="${ox}" y1="${oy}" x2="${ox + S * k2[0]}" y2="${oy - S * k2[1]}"/><text class="ai-al-gl" x="${ox + S * q2[0] + 4}" y="${oy - S * q2[1]}">q</text><text class="ai-al-gl" x="${ox + S * k2[0] + 4}" y="${oy - S * k2[1]}">k</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = g + '</svg>';
+      const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1], len = (a: number[]) => Math.hypot(a[0], a[1]);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `θ = ${td}°：(cos θ, sin θ) = (${c.toFixed(3)}, ${s.toFixed(3)})，cos²θ + sin²θ = ${(c * c + s * s).toFixed(3)}。`
+        + `<br>q、k 一起转 ${pd}°：q = (${q2[0].toFixed(3)}, ${q2[1].toFixed(3)})，k = (${k2[0].toFixed(3)}, ${k2[1].toFixed(3)})；长度 ${len(q2).toFixed(4)}、${len(k2).toFixed(4)}，点积 q·k = <b>${dot(q2, k2).toFixed(4)}</b>（转之前 ${dot(Q, K).toFixed(4)}）。`
+        + '<br><span class="ai-faint">旋转不改变长度，也不改变两个向量之间的夹角，所以一起转同样的角度，点积不变（灰线是转之前的位置）。</span>';
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-unitcircle]').forEach(init);
+</script>

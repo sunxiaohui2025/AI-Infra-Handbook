@@ -1,0 +1,59 @@
+---
+// 静态批处理与连续批处理的甘特图对比。10 个请求（到达步数, 要生成的 token 数）与第 66 讲的代码相同。
+// 每一步，每个占着槽位的请求生成 1 个 token。静态批处理：一批里所有请求都结束了，才放下一批进来；
+// 连续批处理：每一步结束时，空出来的槽位立刻由排队的请求补上。
+// 读者可以：调槽位数（一批最多几个请求）；把鼠标放在色块上看是哪个请求。
+interface Props { title?: string; caption?: string }
+const { title = '同样 10 个请求，两种批处理', caption } = Astro.props;
+const REQS = [[0, 8], [0, 3], [0, 5], [0, 2], [2, 6], [3, 4], [4, 7], [5, 2], [6, 5], [8, 3]];
+---
+<figure class="ai-gt ai-bg" data-batchgantt data-reqs={JSON.stringify(REQS)}>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-tl-lr"><span>槽位数 = <b data-sv></b></span><input type="range" min="2" max="6" step="1" value="4" data-slots /></label>
+  <div class="ai-bg-reqs" data-reqlist></div>
+  <div data-charts></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Seg = { slot: number; req: number; from: number; to: number };
+  function simulate(R: number[][], slots: number, cont: boolean) {
+    let waiting = R.map((_, i) => i), step = 0, busy = 0;
+    const running: (number | null)[] = Array(slots).fill(null), left = R.map((r) => r[1]), start: Record<number, number> = {}, finish: Record<number, number> = {};
+    const segs: Seg[] = [];
+    while (Object.keys(finish).length < R.length) {
+      const arrived = waiting.filter((i) => R[i][0] <= step);
+      if (cont || running.every((x) => x === null)) {
+        for (let s = 0; s < slots && arrived.length; s++) if (running[s] === null) { const i = arrived.shift()!; waiting = waiting.filter((x) => x !== i); running[s] = i; start[i] = step; }
+      }
+      running.forEach((i) => { if (i !== null) { left[i]--; busy++; } });
+      step++;
+      running.forEach((i, s) => { if (i !== null && left[i] === 0) { finish[i] = step; segs.push({ slot: s, req: i, from: start[i], to: step }); running[s] = null; } });
+      if (step > 200) break;
+    }
+    const lat = R.map((r, i) => finish[i] - r[0]);
+    return { steps: step, segs, avg: lat.reduce((a, b) => a + b, 0) / R.length, util: busy / (slots * step), start, finish };
+  }
+  function init(fig: HTMLElement) {
+    const R: number[][] = JSON.parse(fig.dataset.reqs!), sIn = fig.querySelector<HTMLInputElement>('[data-slots]')!;
+    fig.querySelector<HTMLElement>('[data-reqlist]')!.innerHTML = '<span class="ai-tl-k">请求：</span>' + R.map((r, i) => `<span class="ai-bg-chip" style="--h:${i * 36}">R${i + 1}<small>第 ${r[0]} 步到，生成 ${r[1]} 个</small></span>`).join('');
+    function chart(name: string, sim: ReturnType<typeof simulate>, slots: number, maxSteps: number) {
+      const L = 46, Rr = 590, rowH = 22, T = 18, W = (Rr - L) / maxSteps, H = T + slots * rowH + 22;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 600 ${H}"><text class="ai-np-ptitle" x="${L}" y="12">${name}：全部完成用 ${sim.steps} 步，平均延迟 ${sim.avg.toFixed(1)} 步，槽位利用率 ${Math.round(sim.util * 100)}%</text>`;
+      for (let k = 0; k < slots; k++) s += `<rect class="ai-bg-idle" x="${L}" y="${T + k * rowH}" width="${W * sim.steps}" height="${rowH - 3}"/><text class="ai-al-gl" x="${L - 6}" y="${T + k * rowH + 14}" text-anchor="end">槽位 ${k + 1}</text>`;
+      for (const g of sim.segs) s += `<g><title>R${g.req + 1}：第 ${R[g.req][0]} 步到达，第 ${g.from} 步开始，第 ${g.to} 步完成</title><rect class="ai-bg-seg" style="--h:${g.req * 36}" x="${L + g.from * W + 0.5}" y="${T + g.slot * rowH}" width="${(g.to - g.from) * W - 1}" height="${rowH - 3}"/><text class="ai-bg-lab" x="${L + g.from * W + 4}" y="${T + g.slot * rowH + 14}">R${g.req + 1}</text></g>`;
+      for (let t = 0; t <= maxSteps; t += 2) s += `<text class="ai-vp-tick" x="${L + t * W}" y="${H - 6}" text-anchor="middle" style="font-size:10px;fill:var(--ink-3)">${t}</text>`;
+      return s + '</svg>';
+    }
+    function draw() {
+      const slots = Number(sIn.value);
+      fig.querySelector('[data-sv]')!.textContent = String(slots);
+      const a = simulate(R, slots, false), b = simulate(R, slots, true), mx = Math.max(a.steps, b.steps);
+      fig.querySelector<HTMLElement>('[data-charts]')!.innerHTML = chart('静态批处理', a, slots, mx) + chart('连续批处理', b, slots, mx)
+        + `<div class="ai-cg-eq"><span class="ai-faint">灰色是空着的槽位。静态批处理里，一批中短的请求早早结束，槽位却要空等最长的那个；后来的请求也要等整批结束才能进来。连续批处理每一步都把空槽位补上。</span></div>`;
+    }
+    sIn.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-batchgantt]').forEach(init);
+</script>

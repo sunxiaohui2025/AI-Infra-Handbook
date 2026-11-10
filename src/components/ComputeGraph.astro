@@ -1,0 +1,173 @@
+---
+// 计算图：前向一格一格算值，反向一格一格算梯度（∂L/∂节点）。
+// 每个节点：id、label（显示名）、op（in 数据 / param 参数 / mul / add / sub / relu / sq）、args（输入节点 id）、v（in/param 的初值）、c/r（列、行，决定位置）。
+// 默认是一个两层的小网络：x → z₁ = w₁x + b₁ → h = ReLU(z₁) → ŷ = w₂h + b₂ → e = ŷ − y → L = e²。
+// 读者可以：下一步 / 上一步 / 播放 / 全部算完 / 重置；改左侧的输入和参数，所有值和梯度重新算。
+type Op = 'in' | 'param' | 'mul' | 'add' | 'sub' | 'relu' | 'sq';
+interface N { id: string; label: string; op: Op; args?: string[]; v?: number; c: number; r: number }
+interface Props { nodes?: N[]; title?: string; caption?: string }
+const DEF: N[] = [
+  { id: 'x', label: 'x', op: 'in', v: 1.5, c: 0, r: 0 },
+  { id: 'w1', label: 'w₁', op: 'param', v: 0.8, c: 0, r: 1 },
+  { id: 'm1', label: 'w₁x', op: 'mul', args: ['w1', 'x'], c: 1, r: 0 },
+  { id: 'b1', label: 'b₁', op: 'param', v: -0.2, c: 1, r: 1 },
+  { id: 'z1', label: 'z₁', op: 'add', args: ['m1', 'b1'], c: 2, r: 0 },
+  { id: 'h', label: 'h', op: 'relu', args: ['z1'], c: 3, r: 0 },
+  { id: 'w2', label: 'w₂', op: 'param', v: 1.5, c: 3, r: 1 },
+  { id: 'm2', label: 'w₂h', op: 'mul', args: ['w2', 'h'], c: 4, r: 0 },
+  { id: 'b2', label: 'b₂', op: 'param', v: 0.3, c: 4, r: 1 },
+  { id: 'yh', label: 'ŷ', op: 'add', args: ['m2', 'b2'], c: 5, r: 0 },
+  { id: 'y', label: 'y', op: 'in', v: 2, c: 5, r: 1 },
+  { id: 'e', label: 'e', op: 'sub', args: ['yh', 'y'], c: 6, r: 0 },
+  { id: 'L', label: 'L', op: 'sq', args: ['e'], c: 7, r: 0 },
+];
+const { nodes = DEF, title = '计算图：先往前算值，再往回算梯度', caption } = Astro.props;
+const inputs = nodes.filter((n) => n.op === 'in' || n.op === 'param');
+---
+<figure class="ai-gt ai-cg" data-cgraph data-nodes={JSON.stringify(nodes)}>
+  <div class="ai-ms-title">{title}</div>
+  <svg class="ai-cg-svg" viewBox="0 0 700 200" role="img" aria-label={title}></svg>
+  <div class="ai-cg-ins">
+    {inputs.map((n) => <label class={n.op === 'param' ? 'is-param' : ''}><span>{n.label}</span><input type="number" step="0.1" value={n.v} data-in={n.id} /></label>)}
+  </div>
+  <div class="ai-gt-play">
+    <button class="ai-pill" data-act="prev">上一步</button>
+    <button class="ai-pill ai-pill--solid" data-act="next">下一步</button>
+    <button class="ai-pill" data-act="play">▶ 播放</button>
+    <button class="ai-pill" data-act="end">全部算完</button>
+    <button class="ai-pill" data-act="reset">重置</button>
+    <span class="ai-ms-count" data-count></span>
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Op = 'in' | 'param' | 'mul' | 'add' | 'sub' | 'relu' | 'sq';
+  interface N { id: string; label: string; op: Op; args?: string[]; v?: number; c: number; r: number }
+  const fmt = (v: number) => { v = Math.round(v * 10000) / 10000; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const par = (v: number) => (v < 0 ? '(' + fmt(v) + ')' : fmt(v));
+  const SYM: Record<string, string> = { mul: '×', add: '+', sub: '−' };
+
+  function init(fig: HTMLElement) {
+    const nodes: N[] = JSON.parse(fig.dataset.nodes!);
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+    const countEl = fig.querySelector<HTMLElement>('[data-count]')!;
+    const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+    const fwd = nodes.filter((n) => n.args);                       // 需要计算的节点，按给定顺序（已是拓扑序）
+    const bwd = [...nodes].reverse().filter((n) => n.op !== 'in'); // 反向：从 L 往回，数据节点不需要梯度
+    const out = fwd[fwd.length - 1];
+    const TOTAL = fwd.length + bwd.length;
+    const consumers = (id: string) => nodes.filter((n) => n.args?.includes(id));
+    let step = 0, timer = 0;
+    const val: Record<string, number> = {}, grad: Record<string, number> = {};
+
+    const readIns = () => fig.querySelectorAll<HTMLInputElement>('[data-in]').forEach((i) => { const v = parseFloat(i.value); val[i.dataset.in!] = isNaN(v) ? 0 : v; });
+    const compute = (n: N) => {
+      const a = n.args!.map((k) => val[k]);
+      return n.op === 'mul' ? a[0] * a[1] : n.op === 'add' ? a[0] + a[1] : n.op === 'sub' ? a[0] - a[1] : n.op === 'relu' ? Math.max(0, a[0]) : a[0] * a[0];
+    };
+    // 节点 c 对它的第 k 个输入的局部导数
+    const local = (c: N, k: number): [number, string] => {
+      const a = c.args!.map((id) => val[id]), other = c.args![1 - k];
+      if (c.op === 'mul') return [a[1 - k], `${byId[other].label}（= ${fmt(a[1 - k])}）`];
+      if (c.op === 'add') return [1, '1'];
+      if (c.op === 'sub') return k === 0 ? [1, '1'] : [-1, '−1'];
+      if (c.op === 'relu') return [a[0] > 0 ? 1 : 0, a[0] > 0 ? `1（${byId[c.args![0]].label} > 0）` : `0（${byId[c.args![0]].label} ≤ 0）`];
+      return [2 * a[0], `2${byId[c.args![0]].label}（= ${fmt(2 * a[0])}）`];
+    };
+
+    function run() {
+      readIns();
+      fwd.forEach((n) => { val[n.id] = compute(n); });
+      for (const k in grad) delete grad[k];
+      bwd.forEach((n) => {
+        if (n === out) { grad[n.id] = 1; return; }
+        grad[n.id] = consumers(n.id).reduce((s, c) => s + grad[c.id] * local(c, c.args!.indexOf(n.id))[0], 0);
+      });
+    }
+    const pos = (n: N) => [18 + n.c * 85, 22 + n.r * 100];
+    const W = 66, H = 58;
+
+    function draw() {
+      run();
+      const shownV = new Set(nodes.filter((n) => !n.args).map((n) => n.id));
+      fwd.slice(0, Math.min(step, fwd.length)).forEach((n) => shownV.add(n.id));
+      const nb = Math.max(0, step - fwd.length);
+      const shownG = new Set(bwd.slice(0, nb).map((n) => n.id));
+      const cur = step === 0 ? null : step <= fwd.length ? fwd[step - 1] : bwd[nb - 1];
+      const curBack = step > fwd.length;
+      let s = `<defs><marker id="cg-a-${fig.dataset.uid}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" style="fill: var(--ink-3)"/></marker></defs>`;
+      for (const n of fwd) for (const a of n.args!) {
+        const [x1, y1] = pos(byId[a]), [x2, y2] = pos(n);
+        const hot = cur && ((!curBack && cur === n) || (curBack && cur.id === a && shownG.has(a)));
+        s += `<line class="ai-cg-edge${hot ? (curBack ? ' is-back' : ' is-hot') : ''}" x1="${x1 + W}" y1="${y1 + H / 2}" x2="${x2 - 2}" y2="${y2 + H / 2}" marker-end="url(#cg-a-${fig.dataset.uid})"/>`;
+      }
+      for (const n of nodes) {
+        const [x, y] = pos(n);
+        const isCur = cur === n;
+        s += `<g class="ai-cg-node is-${n.op}${isCur ? (curBack ? ' is-curb' : ' is-cur') : ''}">`;
+        s += `<rect x="${x}" y="${y}" width="${W}" height="${H}" rx="6"/>`;
+        s += `<text class="ai-cg-lab" x="${x + 6}" y="${y + 13}">${n.label}</text>`;
+        if (n.args) s += `<text class="ai-cg-op" x="${x + W - 6}" y="${y + 13}" text-anchor="end">${n.op === 'relu' ? 'ReLU' : n.op === 'sq' ? '( )²' : SYM[n.op]}</text>`;
+        if (shownV.has(n.id)) s += `<text class="ai-cg-v" x="${x + W / 2}" y="${y + 33}" text-anchor="middle">${fmt(val[n.id])}</text>`;
+        if (shownG.has(n.id)) s += `<text class="ai-cg-g" x="${x + W / 2}" y="${y + 50}" text-anchor="middle">∂ ${fmt(grad[n.id])}</text>`;
+        s += `</g>`;
+      }
+      svg.innerHTML = s;
+
+      const phase = step === 0 ? '' : step <= fwd.length ? `前向 ${step} / ${fwd.length}` : `反向 ${nb} / ${bwd.length}`;
+      countEl.textContent = phase;
+      let txt = '点“下一步”开始。黑色数字是节点的值，琥珀色的“∂”是损失对这个节点的梯度 ∂L/∂节点。';
+      if (cur && !curBack) {
+        const a = cur.args!.map((k) => byId[k]);
+        txt = cur.op === 'relu' ? `前向：${cur.label} = ReLU(${a[0].label}) = max(0, ${fmt(val[a[0].id])}) = <b>${fmt(val[cur.id])}</b>`
+          : cur.op === 'sq' ? `前向：${cur.label} = ${a[0].label}² = ${par(val[a[0].id])}² = <b>${fmt(val[cur.id])}</b>`
+          : `前向：${cur.label} = ${a[0].label} ${SYM[cur.op]} ${a[1].label} = ${par(val[a[0].id])} ${SYM[cur.op]} ${par(val[a[1].id])} = <b>${fmt(val[cur.id])}</b>`;
+        if (cur === out) txt += '。前向结束，得到损失。';
+      } else if (cur) {
+        if (cur === out) txt = `反向：从终点开始，∂L/∂L = <b>1</b>（L 变一点，L 就变一点）`;
+        else {
+          const cs = consumers(cur.id);
+          const terms = cs.map((c) => { const [d, why] = local(c, c.args!.indexOf(cur.id)); return { c, d, why }; });
+          const sym = terms.map(({ c }) => `∂L/∂${c.label} × ∂${c.label}/∂${cur.label}`).join(' + ');
+          const num = terms.map(({ c, d }) => `${par(grad[c.id])} × ${par(d)}`).join(' + ');
+          const whyS = terms.map(({ c, why }) => `∂${c.label}/∂${cur.label} = ${why}`).join('；');
+          txt = `反向：∂L/∂${cur.label} = ${sym} = ${num} = <b>${fmt(grad[cur.id])}</b><br><span class="ai-faint">局部导数：${whyS}${cs.length > 1 ? '。这个节点被用了不止一次，各条路的贡献要加起来' : ''}</span>`;
+        }
+        if (nb === bwd.length) {
+          const ps = nodes.filter((n) => n.op === 'param');
+          txt += `<br>反向结束。参数的梯度：${ps.map((p) => `∂L/∂${p.label} = ${fmt(grad[p.id])}`).join('，')}`;
+        }
+      }
+      eq.innerHTML = txt;
+      fig.querySelector<HTMLButtonElement>('[data-act="prev"]')!.disabled = step === 0;
+      fig.querySelector<HTMLButtonElement>('[data-act="next"]')!.disabled = step === TOTAL;
+    }
+    const stop = () => { clearInterval(timer); timer = 0; playBtn.textContent = '▶ 播放'; };
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+      if (!b) return;
+      const a = b.dataset.act;
+      if (a === 'play') {
+        if (timer) { stop(); return; }
+        if (step === TOTAL) step = 0;
+        playBtn.textContent = '❚❚ 暂停';
+        timer = window.setInterval(() => { step++; draw(); if (step >= TOTAL) stop(); }, 900);
+        return;
+      }
+      stop();
+      if (a === 'next') step = Math.min(TOTAL, step + 1);
+      else if (a === 'prev') step = Math.max(0, step - 1);
+      else if (a === 'end') step = TOTAL;
+      else if (a === 'reset') { step = 0; fig.querySelectorAll<HTMLInputElement>('[data-in]').forEach((i) => { i.value = String(byId[i.dataset.in!].v); }); }
+      draw();
+    });
+    fig.addEventListener('input', () => draw());
+    draw();
+  }
+  let n = 0;
+  document.querySelectorAll<HTMLElement>('[data-cgraph]').forEach((f) => { f.dataset.uid = String(n++); init(f); });
+</script>

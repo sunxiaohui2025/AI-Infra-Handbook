@@ -1,0 +1,80 @@
+---
+// 稠密模型 decode 一步：读显存 + 通信（公式与第 103 讲第一段代码相同）。GPU 按 H100（3.35 TB/s），只改卡的连法。
+//   一步 = pp × (每卡权重 + 每卡 KV) ÷ 3.35 TB/s + 2 × 层数 × All-Reduce + (pp − 1) 次跨机交接
+//   每卡 KV = 总 KV ÷ min(tp, KV 头数) ÷ pp（KV 只能按头切，头不够分时每个头存多份）
+//   域内 Ring All-Reduce = 2(p − 1) × (α + m/p ÷ 450 GB/s)，α 默认 0.822 μs（MSCCL++ 实测）；跨两台服务器的 All-Reduce 用 nccl-tests 实测 32.74 μs（可调）
+// 负载：Qwen3-32B 一个 128K 会话（batch 1）；Llama-3.1-405B 32 个 8K 会话。读者可以：切换模型、调 NVLink 每轮延迟和跨机 All-Reduce，找 TP16 追平 TP8 的条件。
+interface Props { title?: string; caption?: string }
+const { title = '把 TP 组放大到 16 张卡', caption } = Astro.props;
+---
+<figure class="ai-gt ai-sn" data-supernode>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><span class="ai-tl-k">负载：</span><button data-v="q" aria-pressed="true">Qwen3-32B，一个 128K 会话</button><button data-v="l" aria-pressed="false">Llama-3.1-405B，32 个 8K 会话</button></div>
+    <label class="ai-tl-lr"><span>NVLink 每轮 <b data-av></b> μs</span><input type="range" min="0.2" max="2" step="0.001" value="0.822" data-a /></label>
+    <label class="ai-tl-lr" data-xrow><span>跨机 All-Reduce <b data-xv></b> μs</span><input type="range" min="5" max="60" step="0.01" value="32.74" data-x /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const HBM = 3.35e12, BNV = 450e9, AIB = 3.76e-6, BIB = 50e9;
+  type Cfg = [number, number, number, number, number, number, number];
+  const QW: Cfg = [64, 5120, 64, 8, 128, 25600, 151936], L4: Cfg = [126, 16384, 128, 8, 128, 53248, 128256];
+  function dense([L, d, nq, nkv, hd, ffn, voc]: Cfg) {
+    const attn = d * (nq + 2 * nkv) * hd + nq * hd * d;
+    return [2 * (L * (attn + 3 * d * ffn) + voc * d), 2 * L * nkv * hd * 2];
+  }
+  function step(cfg: Cfg, tp: number, pp: number, batch: number, ctx: number, ar: (m: number, p: number) => number) {
+    const [w, kt] = dense(cfg), L = cfg[0], d = cfg[1], nkv = cfg[3];
+    const kv = batch * ctx * kt / Math.min(tp, nkv) / pp, per = w / tp / pp + kv;
+    const read = pp * per / HBM, comm = 2 * L * ar(batch * d * 2, tp) + (pp - 1) * (AIB + batch * d * 2 / BIB);
+    return { read, comm, t: read + comm, w: w / tp / pp, kv };
+  }
+  function init(fig: HTMLElement) {
+    let m = 'q';
+    const aIn = fig.querySelector<HTMLInputElement>('[data-a]')!, xIn = fig.querySelector<HTMLInputElement>('[data-x]')!;
+    function draw() {
+      const a = Number(aIn.value) * 1e-6, x = Number(xIn.value) * 1e-6;
+      fig.querySelector('[data-av]')!.textContent = (a * 1e6).toFixed(3); fig.querySelector('[data-xv]')!.textContent = (x * 1e6).toFixed(2);
+      fig.querySelector<HTMLElement>('[data-xrow]')!.style.display = m === 'q' ? '' : 'none';
+      const ring = (mm: number, p: number) => 2 * (p - 1) * (a + mm / p / BNV);
+      const rows = m === 'q'
+        ? [['TP8，一台服务器内', step(QW, 8, 1, 1, 131072, ring)], ['TP16，跨两台服务器', step(QW, 16, 1, 1, 131072, () => x)], ['TP16，16 卡 NVLink 域', step(QW, 16, 1, 1, 131072, ring)]] as const
+        : [['TP8 × PP2，两台服务器', step(L4, 8, 2, 32, 8192, ring)], ['TP16，16 卡 NVLink 域', step(L4, 16, 1, 32, 8192, ring)]] as const;
+      const mx = Math.max(...rows.map((r) => r[1].t)), sx = 400 / mx;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 640 ${30 + rows.length * 40}"><text class="ai-np-ptitle" x="10" y="14">decode 一步（ms）：</text><rect class="ai-sn-b" x="130" y="5" width="12" height="10"/><text class="ai-al-gl" x="146" y="14">读显存（权重 + KV）</text><rect class="ai-sn-a" x="250" y="5" width="12" height="10"/><text class="ai-al-gl" x="266" y="14">All-Reduce 等通信</text>`;
+      rows.forEach(([n, r], i) => {
+        const y = 28 + i * 40;
+        s += `<text class="ai-al-gl" x="150" y="${y + 17}" text-anchor="end">${n}</text>`;
+        s += `<rect class="ai-sn-b" x="156" y="${y + 4}" width="${r.read * sx}" height="20"/><rect class="ai-sn-a" x="${156 + r.read * sx}" y="${y + 4}" width="${r.comm * sx}" height="20"/>`;
+        s += `<text class="ai-al-gl" x="${160 + r.t * sx}" y="${y + 13}">${(r.t * 1e3).toFixed(2)} ms</text><text class="ai-al-gl" x="${160 + r.t * sx}" y="${y + 25}">读 ${(r.read * 1e3).toFixed(2)} + 通信 ${(r.comm * 1e3).toFixed(2)}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      let eq = '';
+      if (m === 'q') {
+        const [r8, rx, rd] = rows.map((r) => r[1]);
+        const need = (r8.t - rd.read) / 128;
+        eq = `每卡：TP8 读权重 ${(r8.w / 1e9).toFixed(2)} GB + KV ${(r8.kv / 1e9).toFixed(2)} GB；TP16 读权重 ${(rd.w / 1e9).toFixed(2)} GB + KV ${(rd.kv / 1e9).toFixed(2)} GB（只有 8 个 KV 头，KV 不再减少）。`
+          + `一次 All-Reduce：TP8 环 14 轮 ${(r8.comm / 128 * 1e6).toFixed(2)} μs，16 卡域内环 30 轮 ${(rd.comm / 128 * 1e6).toFixed(1)} μs，跨机 ${(x * 1e6).toFixed(2)} μs；每步 128 次。`
+          + `<br>TP16 要追平 TP8，每次 All-Reduce 必须 ≤ (${(r8.t * 1e3).toFixed(2)} − ${(rd.read * 1e3).toFixed(2)}) ms ÷ 128 = <b>${(need * 1e6).toFixed(1)} μs</b>。现在：域内 ${rd.t < r8.t ? '已经更快' : '仍然更慢'}，跨机 ${rx.t < r8.t ? '已经更快' : '仍然更慢'}。`;
+      } else {
+        const [p, t] = rows.map((r) => r[1]);
+        eq = `TP8 × PP2：每卡权重 ${(p.w / 1e9).toFixed(1)} GB + KV ${(p.kv / 1e9).toFixed(2)} GB，一个 token 要依次走过两段，读显存 ${(p.read * 1e3).toFixed(1)} ms。`
+          + `TP16：每卡权重相同，KV 却翻倍到 ${(t.kv / 1e9).toFixed(2)} GB（8 个 KV 头存两份），但只走一段，读显存 ${(t.read * 1e3).toFixed(1)} ms；通信 ${(t.comm * 1e3).toFixed(2)} ms（252 次 30 轮的 Ring）。`
+          + `<br>一步从 ${(p.t * 1e3).toFixed(1)} ms 降到 ${(t.t * 1e3).toFixed(1)} ms，少了 ${((1 - t.t / p.t) * 100).toFixed(0)}%。`;
+      }
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = eq + '<br><span class="ai-faint">把 NVLink 每轮延迟往小调，相当于用更好的算法或在交换芯片里做归约（轮数变少）；这比把带宽翻倍有用得多。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((y) => y.setAttribute('aria-pressed', y === bt ? 'true' : 'false'));
+      m = bt.dataset.v!; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-supernode]').forEach(init);
+</script>

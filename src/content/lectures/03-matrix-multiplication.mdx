@@ -10,8 +10,7 @@ level: 主线
 minutes: 30
 demos: [MatrixFigure, MatrixStepper, MatmulCalc]
 video: ""
-formula: "<i>C</i> = <i>X</i> · <i>W</i>"
-shape: "形状：(4×4) · (4×4) → 4×4"
+formula: '$C = X \cdot W$'
 ---
 import PrereqLinks from '../../components/PrereqLinks.astro';
 import MatrixFigure from '../../components/MatrixFigure.astro';
@@ -46,7 +45,9 @@ import Note from '../../components/Note.astro';
 
 图里高亮的是一个例子：“爱”这一行（X 的第 2 行）和 W 的第 1 列做点积，结果填在右边那张表的“爱”这一行、第 1 列。四对数字分别相乘再相加：
 
-<div class="ai-formula">(−0.3)×(−0.4) + (−0.1)×(−0.7) + (−0.8)×0.3 + (−0.2)×(−0.7) = 0.12 + 0.07 − 0.24 + 0.14 = 0.09</div>
+$$
+(-0.3)\times(-0.4) + (-0.1)\times(-0.7) + (-0.8)\times 0.3 + (-0.2)\times(-0.7) = 0.12 + 0.07 - 0.24 + 0.14 = 0.09
+$$
 
 其余 15 格也一样，每一格都是“左边一行”和“右边一列”的点积。
 
@@ -60,7 +61,9 @@ import Note from '../../components/Note.astro';
 
 写成一般的公式：设 A 是 m×k 的矩阵，B 是 k×n 的矩阵，它们的乘积 C = AB 是 m×n 的矩阵，第 i 行第 j 列为
 
-<div class="ai-formula"><i>C</i><sub><i>ij</i></sub> = <span class="ai-sum">Σ</span><sub><i>t</i>=1</sub><sup><i>k</i></sup> <i>A</i><sub><i>it</i></sub> · <i>B</i><sub><i>tj</i></sub> = <i>A</i><sub><i>i</i>1</sub><i>B</i><sub>1<i>j</i></sub> + <i>A</i><sub><i>i</i>2</sub><i>B</i><sub>2<i>j</i></sub> + … + <i>A</i><sub><i>ik</i></sub><i>B</i><sub><i>kj</i></sub></div>
+$$
+C_{ij} = \sum_{t=1}^{k} A_{it}\cdot B_{tj} = A_{i1}B_{1j} + A_{i2}B_{2j} + \dots + A_{ik}B_{kj}
+$$
 
 式子里各个符号的意思：
 
@@ -72,7 +75,9 @@ import Note from '../../components/Note.astro';
 
 在看演示之前，先用手算第一格：“我”这一行和 W 的第 1 列。
 
-<div class="ai-formula">0.7×(−0.4) + (−0.6)×(−0.7) + (−0.9)×0.3 + 0.3×(−0.7) = −0.28 + 0.42 − 0.27 − 0.21 = −0.34</div>
+$$
+0.7\times(-0.4) + (-0.6)\times(-0.7) + (-0.9)\times 0.3 + 0.3\times(-0.7) = -0.28 + 0.42 - 0.27 - 0.21 = -0.34
+$$
 
 再用下面的演示核对，并把剩下的 15 格也算出来。点“下一格”一格一格往前走，点“▶ 播放”让它自动走，也可以直接点结果 C 里的任意一格，跳到那一格。每走一步，参与计算的那一行、那一列会被高亮，下方的提示条写出这一格的完整算式。
 
@@ -94,13 +99,17 @@ X 和 W 都来自课程目录下的 `tinylm/tinylm.py`（随机种子 2026，权
 
 结果的形状也可以这样推出来：左边有几行，就有几个输入向量，结果就有几行；右边有几列，就有几个方向，结果就有几列。把这些写成一条规则：
 
-<div class="ai-formula">[<i>m</i>, <i>k</i>] @ [<i>k</i>, <i>n</i>] → [<i>m</i>, <i>n</i>]</div>
+$$
+[m,\,k] \,\text{@}\, [k,\,n] \to [m,\,n]
+$$
 
 **中间的 k 相消，两边的 m 和 n 留下**。比如只要 W 的前两列，也就是只保留 2 个探测方向，那么 [4, 4] @ [4, 2] → [4, 2]，每个词只得到两个分数，正好是原来 C 的前两列：(−0.34, 0.18)、(0.09, 0.07)、(−0.15, −0.21)、(−0.18, 0.32)。
 
 这条规则在大模型里每天都在用。模型里的一批 token 通常写成形状 [s, d] 的矩阵：s 个 token，每个 d 维。经过一个 d × d<sub>out</sub> 的权重矩阵，就变成
 
-<div class="ai-formula">[<i>s</i>, <i>d</i>] @ [<i>d</i>, <i>d</i><sub>out</sub>] → [<i>s</i>, <i>d</i><sub>out</sub>]</div>
+$$
+[s,\,d] \,\text{@}\, [d,\,d_{\mathrm{out}}] \to [s,\,d_{\mathrm{out}}]
+$$
 
 每个 token 从 d 维变成了 d<sub>out</sub> 维。看到一个矩阵乘法，先把两边的形状写出来，检查中间的维度对不对得上，是读大模型代码时最有用的习惯之一。第 5 讲会专门讲形状。
 

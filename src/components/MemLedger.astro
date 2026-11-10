@@ -1,0 +1,56 @@
+---
+// 显存账本：一张卡上，权重、激活、其他开销、KV Cache 各占多少，能同时放下多少个请求。
+// 公式与第 63 讲的代码一致：可用 = 显存 × 90%；权重 = 参数 × 字节 / 卡数；激活 ≈ 8192 × (4d + 3·d_ff) × 2 / 卡数（prefill 一块的临时空间，粗估）；
+// 其他 ≈ 2 GB（CUDA 上下文、通信缓冲等，粗估）；每 token KV = 2 × 层数 × KV 头数 × 每头维度 × 字节 / 卡数。
+// 读者可以：换模型、精度、显卡、卡数（张量并行）、请求长度和并发数，看占用条和最大并发。
+interface Props { title?: string; caption?: string }
+const { title = '一张卡的显存，都被谁占了', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ml" data-memledger>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-mc-in">
+    <label><span>模型</span><select data-f="m"><option value="8">Llama-3-8B</option><option value="70">Llama-3-70B</option></select></label>
+    <label><span>权重精度</span><select data-f="w"><option value="2">BF16（2 字节）</option><option value="1">FP8（1 字节）</option><option value="0.5">INT4（约 0.5 字节）</option></select></label>
+    <label><span>KV Cache 精度</span><select data-f="kv"><option value="2">BF16</option><option value="1">FP8</option></select></label>
+    <label><span>显卡</span><select data-f="g"><option value="80">80 GB（H100）</option><option value="141">141 GB（H200）</option></select></label>
+    <label><span>卡数（张量并行）</span><select data-f="n"><option>1</option><option>2</option><option>4</option><option>8</option></select></label>
+    <label><span>每个请求的长度</span><select data-f="ctx"><option>1024</option><option selected>4096</option><option>16384</option><option>131072</option></select></label>
+  </div>
+  <label class="ai-tl-lr"><span>并发请求数 = <b data-bv></b></span><input type="range" min="1" max="400" step="1" value="64" data-b /></label>
+  <div class="ai-ml-bar" data-bar></div>
+  <div class="ai-ml-legend" data-legend></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const MODELS: Record<string, { N: number; L: number; d: number; f: number; kv: number; dh: number }> = {
+    '8': { N: 8.03e9, L: 32, d: 4096, f: 14336, kv: 8, dh: 128 },
+    '70': { N: 70.55e9, L: 80, d: 8192, f: 28672, kv: 8, dh: 128 },
+  };
+  const GiB = 2 ** 30, g1 = (v: number) => (v / GiB).toFixed(1) + ' GiB';
+  function init(fig: HTMLElement) {
+    const v = (k: string) => (fig.querySelector(`[data-f="${k}"]`) as HTMLSelectElement).value;
+    const bIn = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    function draw() {
+      const m = MODELS[v('m')], wb = Number(v('w')), kb = Number(v('kv')), gpu = Number(v('g')) * 1e9, n = Number(v('n')), ctx = Number(v('ctx')), b = Number(bIn.value);
+      fig.querySelector('[data-bv]')!.textContent = String(b);
+      const total = gpu * 0.9, W = m.N * wb / n, act = 8192 * (4 * m.d + 3 * m.f) * 2 / n, other = 2e9;
+      const kvTok = 2 * m.L * m.kv * m.dh * kb / n, kvNeed = kvTok * ctx * b, room = total - W - act - other;
+      const maxReq = Math.max(0, Math.floor(room / (kvTok * ctx)));
+      const parts: [string, number, string][] = [['权重', W, 'w'], ['激活', act, 'a'], ['其他', other, 'o'], ['KV Cache', Math.min(Math.max(room, 0), kvNeed), 'k']];
+      const free = Math.max(0, total - W - act - other - kvNeed);
+      const scale = (x: number) => (x / gpu * 100).toFixed(2) + '%';
+      fig.querySelector<HTMLElement>('[data-bar]')!.innerHTML = parts.map(([nm, x, c]) => `<i class="is-${c}" style="width:${scale(Math.min(x, gpu))}" title="${nm} ${g1(x)}"></i>`).join('') + `<i class="is-f" style="width:${scale(free)}"></i><i class="is-r" style="width:${scale(gpu * 0.1)}" title="预留 10%"></i>`;
+      fig.querySelector<HTMLElement>('[data-legend]')!.innerHTML = parts.map(([nm, x, c]) => `<span class="is-${c}">${nm} ${g1(x)}</span>`).join('') + `<span class="is-f">空闲 ${g1(free)}</span><span class="is-r">预留 10%</span>`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = room <= 0
+        ? `<b class="c-key">放不下</b>：每张卡的权重 ${g1(W)} 加上激活和其他开销，已经超过可用的 ${g1(total)}，没有地方放 KV Cache。试试更低的精度或更多的卡。`
+        : `每个 token 的 KV Cache 在每张卡上占 ${(kvTok / 1024).toFixed(0)} KiB，一个 ${ctx} token 的请求占 ${g1(kvTok * ctx)}。这张卡最多同时放 <b>${maxReq}</b> 个这样的请求。`
+          + (b > maxReq ? `<br><b class="c-key">现在的 ${b} 个请求放不下</b>：推理引擎会让多出来的请求排队，或者把一些请求的 KV Cache 换出（第 70 讲）。` : `<br>现在的 ${b} 个请求用掉了 ${g1(kvNeed)} 的 KV Cache。`);
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-memledger]').forEach(init);
+</script>

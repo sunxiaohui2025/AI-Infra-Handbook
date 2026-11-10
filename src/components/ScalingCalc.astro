@@ -1,0 +1,50 @@
+---
+// Scaling Laws：固定算力 C，模型参数 N 和数据量 D 怎么分（C ≈ 6ND）。
+// 损失用 Chinchilla 论文拟合的公式 L(N, D) = 1.69 + 406.4 / N^0.34 + 410.7 / D^0.28（与第 46 讲的代码一致）。
+// 读者可以：拖算力预算，看“损失 vs 模型大小”的 U 形曲线和最低点；对照 Llama-3-8B 的位置。
+interface Props { title?: string; caption?: string }
+const { title = '一笔算力，模型做多大最划算', caption } = Astro.props;
+---
+<figure class="ai-gt ai-sc" data-scaling>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-tl-lr"><span>算力 C = 10^<b data-cv></b> FLOPs</span><input type="range" min="19" max="25" step="0.1" value="22" data-c /></label>
+  <svg class="ai-tl-svg" viewBox="0 0 560 230" data-svg role="img" aria-label={title}></svg>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const E = 1.69, A = 406.4, B = 410.7, al = 0.34, be = 0.28;
+  const loss = (N: number, D: number) => E + A / N ** al + B / D ** be;
+  const big = (n: number) => (n >= 1e12 ? (n / 1e12).toFixed(1) + 'T' : n >= 1e9 ? (n / 1e9).toFixed(n >= 1e10 ? 0 : 2) + 'B' : (n / 1e6).toFixed(0) + 'M');
+  function init(fig: HTMLElement) {
+    const cIn = fig.querySelector<HTMLInputElement>('[data-c]')!;
+    function draw() {
+      const lc = Number(cIn.value), C = 10 ** lc;
+      fig.querySelector('[data-cv]')!.textContent = lc.toFixed(1);
+      const Ns = Array.from({ length: 241 }, (_, i) => 10 ** (7 + i * 6 / 240));
+      const Ls = Ns.map((N) => loss(N, C / (6 * N)));
+      let bi = 0; Ls.forEach((v, i) => { if (v < Ls[bi]) bi = i; });
+      const lo = Ls[bi] - 0.05, hi = Math.min(Math.max(...Ls), Ls[bi] + 1.2);
+      const L = 46, R = 548, T = 12, Bt = 190, X = (N: number) => L + (Math.log10(N) - 7) / 6 * (R - L), Y = (v: number) => Bt - (Math.min(v, hi) - lo) / (hi - lo) * (Bt - T);
+      let s = '<g class="ai-vp-grid">';
+      for (let p = 7; p <= 13; p++) s += `<line x1="${X(10 ** p)}" y1="${T}" x2="${X(10 ** p)}" y2="${Bt}"/>`;
+      s += '</g><g class="ai-vp-tick">';
+      for (let p = 7; p <= 13; p++) s += `<text x="${X(10 ** p)}" y="${Bt + 14}" text-anchor="middle">${big(10 ** p)}</text>`;
+      s += `<text x="${L - 4}" y="${Y(Ls[bi]) + 3}" text-anchor="end">${Ls[bi].toFixed(2)}</text></g>`;
+      s += `<path class="ai-al-f" d="${Ns.map((N, i) => `${i ? 'L' : 'M'}${X(N).toFixed(1)} ${Y(Ls[i]).toFixed(1)}`).join(' ')}"/>`;
+      s += `<circle class="ai-np-dot" cx="${X(Ns[bi])}" cy="${Y(Ls[bi])}" r="5"/>`;
+      const N8 = 8.03e9, D8 = C / (6 * N8), L8 = loss(N8, D8);
+      s += `<circle class="ai-sc-l8" cx="${X(N8)}" cy="${Y(L8)}" r="4.5"/><text class="ai-al-gl" x="${X(N8) + 6}" y="${Y(L8) - 6}">8B</text>`;
+      s += `<text class="ai-al-gl" x="${R}" y="${Bt - 4}" text-anchor="end">模型参数 N →（对数坐标）</text><text class="ai-al-gl" x="${L + 4}" y="${T + 10}">↑ 损失</text>`;
+      fig.querySelector('[data-svg]')!.innerHTML = s;
+      const N = Ns[bi], D = C / (6 * N);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `算力 10^${lc.toFixed(1)} FLOPs 下，最优的模型约 <b>${big(N)}</b> 参数，配 <b>${big(D)}</b> 个 token（每个参数 ${(D / N).toFixed(0)} 个 token），损失 ${Ls[bi].toFixed(3)}。`
+        + `<br>同样的算力训练一个 8B 的模型：数据 ${big(D8)} 个 token（每个参数 ${(D8 / N8).toFixed(0)} 个），损失 ${L8.toFixed(3)}。`
+        + `<br><span class="ai-faint">模型太小：数据很多也学不进去；模型太大：数据太少，训练不充分。U 形的底部就是最优分配。Llama-3-8B 的算力约是 10^23.9。</span>`;
+    }
+    cIn.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-scaling]').forEach(init);
+</script>

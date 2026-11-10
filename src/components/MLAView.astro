@@ -1,0 +1,56 @@
+---
+// MLA：每个 token 只缓存一个压缩向量 c（512 维）和一小段带位置的 k（64 维），用的时候再还原出所有头的 K、V。
+// 以 DeepSeek-V3（隐藏维度 7168，61 层，128 个头，每头 k、v 各 128 维）为例。
+// 读者可以：点上面的步骤看每一步的形状；切换“正常还原 / 吸收”看解码时的两种算法；下方对比四种方案的 KV Cache。
+interface Props { title?: string; caption?: string }
+const { title = 'MLA：先压缩再缓存，用时再还原', caption } = Astro.props;
+const STEPS = [
+  { id: 'x', t: '这个 token 的向量 x', s: '7168 维', d: '注意力子层的输入（RMSNorm 之后）。' },
+  { id: 'c', t: '压缩：c = x · W_DKV', s: '7168 → 512 维', d: '一个 7168 × 512 的矩阵，把 x 压成 512 维的潜在向量 c。它就是要缓存的东西，所有头共用。', cache: true },
+  { id: 'kr', t: '位置部分：k_R = RoPE(x · W_KR)', s: '7168 → 64 维', d: '一小段单独做 RoPE（第 37 讲）的 k，所有头共用一份，也要缓存。为什么要单独拿出来，见正文。', cache: true },
+  { id: 'k', t: '还原 K：k = c · W_UK', s: '512 → 128 个头 × 128 维', d: '每个头的 k（不带位置的部分）都由 c 乘一个矩阵还原出来，再和 k_R 拼起来。' },
+  { id: 'v', t: '还原 V：v = c · W_UV', s: '512 → 128 个头 × 128 维', d: '每个头的 v 也由同一个 c 还原。' },
+  { id: 'attn', t: '照常做注意力', s: '128 个头', d: '每个头用自己的 q 和还原出的 k、v 打分、加权求和（第 26 讲），拼接后乘 W_O。' },
+];
+---
+<figure class="ai-gt ai-mla" data-mla data-steps={JSON.stringify(STEPS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-mla-flow" data-flow></div>
+  <div class="ai-cg-eq" data-eq></div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="mode"><span class="ai-tl-k">解码时</span><button data-v="plain" aria-pressed="false">正常还原 K、V</button><button data-v="absorb" aria-pressed="true">吸收：直接对 c 算</button></div>
+  <div class="ai-cg-eq" data-mode></div>
+  <div class="ai-mlp-pt" style="margin-top:12px">每个 token 的 KV Cache（DeepSeek-V3 的规模，61 层，BF16）</div>
+  <div class="ai-mla-bars" data-bars></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  interface Step { id: string; t: string; s: string; d: string; cache?: boolean }
+  function init(fig: HTMLElement) {
+    const S: Step[] = JSON.parse(fig.dataset.steps!);
+    let sel = 'c', mode = 'absorb';
+    const SCH: [string, number, string][] = [['MHA', 32768, '128 个头，每头 k、v 各 128 维'], ['GQA（8 组）', 2048, '8 组 k、v'], ['MQA', 256, '1 组 k、v'], ['MLA', 576, 'c 512 维 + k_R 64 维']];
+    function draw() {
+      fig.querySelector<HTMLElement>('[data-flow]')!.innerHTML = S.map((s) => `<button class="ai-mla-step${s.id === sel ? ' is-sel' : ''}${s.cache ? ' is-cache' : ''}" data-id="${s.id}"><b>${s.t}</b><small>${s.s}${s.cache ? ' · 缓存' : ''}</small></button>`).join('<span class="ai-mla-arr">→</span>');
+      const st = S.find((s) => s.id === sel)!;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${st.t}</b>（${st.s}）：${st.d}`;
+      fig.querySelector<HTMLElement>('[data-mode]')!.innerHTML = mode === 'plain'
+        ? '正常还原：每生成一个 token，先把缓存里所有历史 token 的 c 乘 W_UK、W_UV，还原出 128 个头的 K、V（每个 token 32768 个数），再做注意力。缓存是省了，但每一步都要把历史的 K、V 重新算一遍、写一遍，计算和读写都很多。'
+        : '吸收：q·k = q·(c·W_UK) = (q·W_UKᵀ)·c。先把新 token 的 q 乘 W_UKᵀ，变成和 c 一样长的 512 维，直接和缓存的 c 打分；v 那边的 W_UV 同理并进 W_O。历史 token 的 K、V 从来不需要还原，每一步只读 576 个数一个的缓存。';
+      const max = Math.max(...SCH.map((x) => x[1]));
+      fig.querySelector<HTMLElement>('[data-bars]')!.innerHTML = SCH.map(([n, v, how]) => {
+        const kib = v * 2 * 61 / 1024;
+        return `<div class="ai-mla-bar${n === 'MLA' ? ' is-mla' : ''}"><span>${n}</span><span class="ai-mc-bar"><i style="width:${Math.max(0.6, v / max * 100).toFixed(1)}%"></i></span><b>${kib >= 1024 ? (kib / 1024).toFixed(2) + ' MiB' : kib.toFixed(1) + ' KiB'}</b><small>${how}；每层 ${v} 个数${n !== 'MLA' ? `，是 MLA 的 ${(v / 576).toFixed(2)} 倍` : ''}</small></div>`;
+      }).join('');
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, st = t.closest<HTMLElement>('[data-id]'), mb = t.closest<HTMLElement>('[data-group="mode"] [data-v]');
+      if (st) sel = st.dataset.id!;
+      else if (mb) { mode = mb.dataset.v!; fig.querySelectorAll('[data-group="mode"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === mb ? 'true' : 'false')); }
+      else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-mla]').forEach(init);
+</script>

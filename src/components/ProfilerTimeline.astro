@@ -1,0 +1,62 @@
+---
+// 读一张 Profiler 时间线（模拟数据，模型与第 58 讲的代码相同）：Llama-3-8B，TP = 4，decode 一步，批 8、上下文 2048。
+// 每层 12 个 kernel，耗时按 Roofline 估算（矩阵乘法按带宽的 80%，每个 kernel 另有约 3 μs 固定开销）；CPU 每发射一个约 8 μs。
+// 两行：CPU（发射 kernel）、GPU（执行 kernel，颜色 = 类别）。读者可以：看前 2 层或整步；切换 eager / CUDA Graph；点一个 kernel 看它的耗时、读写量和实际带宽。
+interface Props { title?: string; caption?: string }
+const { title = '一步 decode 的时间线', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pt" data-proftl>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="z"><button data-v="0" aria-pressed="true">看前 2 层</button><button data-v="1" aria-pressed="false">看整步</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="g"><button data-v="0" aria-pressed="true">eager</button><button data-v="1" aria-pressed="false">CUDA Graph</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const BW = 3.35e12, EFF = 0.8, LAUNCH = 8e-6, L = 32, B = 8, CTX = 2048, d = 4096, dff = 14336, kvh = 8;
+  const gemm = (i: number, o: number): [string, number] => ['矩阵乘法', 2 * i * o / 4];
+  const LAYER: [string, [string, number]][] = [['rmsnorm', ['逐元素', 4 * B * d]], ['qkv_proj', gemm(d, d + 2 * kvh * 128)], ['rope', ['逐元素', 4 * B * d]], ['attention_decode', ['注意力', B * CTX * (kvh / 4) * 128 * 2 * 2]], ['o_proj', gemm(d, d)], ['all_reduce', ['通信', B * d * 2]], ['add_rmsnorm', ['逐元素', 6 * B * d]], ['gate_up_proj', gemm(d, 2 * dff)], ['silu_mul', ['逐元素', 6 * B * Math.floor(dff / 4)]], ['down_proj', gemm(dff, d)], ['all_reduce', ['通信', B * d * 2]], ['add', ['逐元素', 6 * B * d]]];
+  const CLS: Record<string, string> = { 矩阵乘法: 'k-gemm', 注意力: 'k-attn', 逐元素: 'k-elem', 通信: 'k-comm' };
+  type K = { layer: number; name: string; cat: string; s: number; dur: number; bytes: number; c0: number; c1: number };
+  function trace(graph: boolean) {
+    let cpu = graph ? 20e-6 : 0, gpu = 0; const out: K[] = [];
+    for (let l = 0; l < L; l++) for (const [name, [cat, bytes]] of LAYER) {
+      const dur = cat !== '通信' ? 3e-6 + bytes / (BW * EFF) : 5e-6 + 3 * bytes / 450e9, c0 = cpu;
+      if (!graph) cpu += LAUNCH;
+      const s = Math.max(gpu, cpu); gpu = s + dur; out.push({ layer: l, name, cat, s, dur, bytes, c0, c1: cpu });
+    }
+    return out;
+  }
+  function init(fig: HTMLElement) {
+    let zoom = 0, graph = false, sel = 7;
+    function draw() {
+      const tr = trace(graph), shown = zoom ? tr : tr.slice(0, 24), T = shown[shown.length - 1].s + shown[shown.length - 1].dur, sx = 520 / T;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 120"><text class="ai-al-gl" x="4" y="30">CPU</text><text class="ai-al-gl" x="4" y="70">GPU</text><rect class="ai-lt-bg" x="60" y="56" width="520" height="22"/>';
+      if (graph) s += `<rect class="ai-lt-cpu" x="60" y="18" width="${Math.max(1, 20e-6 * sx)}" height="18"/>`;
+      shown.forEach((k, i) => {
+        if (!graph && k.c0 < T) s += `<rect class="ai-lt-cpu${i % 2 ? ' alt' : ''}" x="${60 + k.c0 * sx}" y="18" width="${Math.max(0.4, (Math.min(k.c1, T) - k.c0) * sx - 0.3)}" height="18"/>`;
+        s += `<rect class="ai-pt-k ${CLS[k.cat]}${i === sel ? ' is-sel' : ''}" data-i="${i}" x="${60 + k.s * sx}" y="56" width="${Math.max(0.6, k.dur * sx - 0.3)}" height="22"/>`;
+      });
+      s += `<text class="ai-al-gl" x="60" y="98">蓝：矩阵乘法　紫：注意力　灰：逐元素　琥珀：通信　空白：GPU 在等</text><text class="ai-al-gl" x="580" y="112" text-anchor="end">0 – ${(T * 1e3).toFixed(2)} ms</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const all = tr, Tall = all[all.length - 1].s + all[all.length - 1].dur, busy = all.reduce((a, k) => a + k.dur, 0);
+      const k = shown[Math.min(sel, shown.length - 1)];
+      const by: Record<string, number> = {}; all.forEach((x) => (by[x.cat] = (by[x.cat] ?? 0) + x.dur));
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `选中：第 ${k.layer} 层 <b>${k.name}</b>（${k.cat}），${(k.dur * 1e6).toFixed(1)} μs，读写 ${(k.bytes / 1e6).toFixed(2)} MB，实际带宽 ${(k.bytes / k.dur / 1e12).toFixed(2)} TB/s（峰值 3.35）。点时间线上的 kernel 换一个看。`
+        + `<br>整步：${(Tall * 1e3).toFixed(2)} ms，GPU 忙 ${Math.round(busy / Tall * 100)}%，空等 ${((Tall - busy) * 1e3).toFixed(2)} ms；${Object.entries(by).sort((a, b) => b[1] - a[1]).map(([c, t]) => `${c} ${(t * 1e3).toFixed(2)} ms`).join('，')}。`
+        + `<br><span class="ai-faint">${graph ? 'CUDA Graph 一次发射整步，GPU 上的 kernel 首尾相接，空白消失了。' : '小 kernel 之间的空白：GPU 算完了，下一个 kernel 还没被 CPU 发射过来（第 79 讲）。'}</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element, b = t.closest<HTMLElement>('[data-group] [data-v]'), kk = t.closest<SVGRectElement>('[data-i]');
+      if (b) { const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); if (g.dataset.group === 'z') zoom = Number(b.dataset.v); else graph = b.dataset.v === '1'; }
+      else if (kk) sel = Number(kk.dataset.i); else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-proftl]').forEach(init);
+</script>

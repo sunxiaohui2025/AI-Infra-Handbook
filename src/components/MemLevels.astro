@@ -1,0 +1,46 @@
+---
+// GPU 的存储层级（H100 SXM 的量级，与第 53 讲的代码相同）：寄存器、L1/共享内存、L2、HBM 显存、CPU 内存（经 PCIe）。
+// 每层画两根对数刻度的条：容量、带宽。读者可以：调数据量，看从每一层读这么多数据要多久、放不放得下；
+// 以及读每个字节期间 Tensor Core 能做多少次运算（算力 ÷ 带宽）。
+interface Props { title?: string; caption?: string }
+const { title = '越近越快，越近越小', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ml" data-memlevels>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-tl-lr"><span>数据量 <b data-sv></b></span><input type="range" min="0" max="8" step="1" value="5" data-s /></label>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const SM = 132, CLK = 1.83e9, PEAK = 989e12;
+  const LV: [string, number, number | null, string][] = [
+    ['寄存器', SM * 256 * 1024, null, '约 1 周期'], ['L1 / 共享内存', SM * 256 * 1024, SM * 128 * CLK, '约 30 周期'],
+    ['L2 缓存', 50e6, 5.5e12, '约 250 周期'], ['HBM 显存', 80e9, 3.35e12, '约 500 周期'], ['CPU 内存（PCIe）', 2e12, 64e9, '微秒级']];
+  const SIZES = [64e3, 1e6, 10e6, 50e6, 200e6, 1e9, 16e9, 80e9, 500e9];
+  const fmtB = (b: number) => (b >= 1e12 ? `${(b / 1e12).toFixed(0)} TB` : b >= 1e9 ? `${(b / 1e9).toFixed(0)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(0)} MB` : `${(b / 1e3).toFixed(0)} KB`);
+  const fmtT = (t: number) => (t >= 1 ? `${t.toFixed(2)} s` : t >= 1e-3 ? `${(t * 1e3).toFixed(2)} ms` : `${(t * 1e6).toFixed(1)} μs`);
+  function init(fig: HTMLElement) {
+    const sIn = fig.querySelector<HTMLInputElement>('[data-s]')!;
+    function draw() {
+      const size = SIZES[Number(sIn.value)]; fig.querySelector('[data-sv]')!.textContent = fmtB(size);
+      const lc = (v: number) => ((Math.log10(v) - 4) / (13 - 4)) * 200, lb = (v: number) => ((Math.log10(v) - 10) / (14 - 10)) * 140;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 200"><text class="ai-np-ptitle" x="130" y="12">容量（对数）</text><text class="ai-np-ptitle" x="345" y="12">带宽（对数）</text><text class="ai-np-ptitle" x="500" y="12">读这么多要</text>';
+      LV.forEach(([n, cap, bw, lat], i) => {
+        const y = 22 + i * 34, fits = size <= cap;
+        s += `<text class="ai-al-gl" x="122" y="${y + 13}" text-anchor="end">${n}</text><text class="ai-al-gl" x="122" y="${y + 25}" text-anchor="end">${lat}</text>`;
+        s += `<rect class="ai-ml-cap" x="130" y="${y + 2}" width="${lc(cap)}" height="20"/><text class="ai-al-gl" x="${134 + lc(cap)}" y="${y + 16}">${fmtB(cap)}</text>`;
+        if (bw) s += `<rect class="ai-ml-bw" x="345" y="${y + 2}" width="${lb(bw)}" height="20"/><text class="ai-al-gl" x="${349 + lb(bw)}" y="${y + 16}">${bw >= 1e12 ? (bw / 1e12).toFixed(1) + ' TB/s' : (bw / 1e9).toFixed(0) + ' GB/s'}</text>`;
+        s += `<text class="ai-al-gl" x="500" y="${y + 16}">${!fits ? '放不下' : bw ? fmtT(size / bw) : '—'}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${fmtB(size)} 的数据：${LV.filter(([, c, b]) => b && size <= c).map(([n, , b]) => `${n} ${fmtT(size / b!)}`).join('，')}。`
+        + `<br>Tensor Core 每秒 989 万亿次运算：从 HBM 每读 1 字节的时间里能做 ${Math.round(PEAK / 3.35e12)} 次，从 L2 ${Math.round(PEAK / 5.5e12)} 次，从共享内存 ${Math.round(PEAK / (SM * 128 * CLK))} 次。`
+        + '<br><span class="ai-faint">片上存储（寄存器、共享内存）快，但全卡加起来只有几十 MB；HBM 有 80 GB，却慢了一个数量级。数据要尽量在片上被反复使用，才不会让计算单元等。</span>';
+    }
+    sIn.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-memlevels]').forEach(init);
+</script>

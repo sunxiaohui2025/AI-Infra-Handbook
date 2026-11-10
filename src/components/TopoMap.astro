@@ -1,0 +1,54 @@
+---
+// 并行方式映射到拓扑（公式与第 97 讲的代码相同）：2 台机器 × 8 张 H100，Llama-3.1-70B（141 GB，80 层），每个微批次 32 个请求。
+// TPOT = 读权重 W/TP ÷ 3.35 TB/s + 160 次 TP All-Reduce + (PP−1) 次段间传输；TP 组在机内用 NVLink（α 3 μs、β 450 GB/s，一步到位），
+// 跨机用 InfiniBand（α 6 μs、β 50 GB/s，Ring）。吞吐 = 份数 × PP × 32 ÷ TPOT。每卡权重超过 52 GB（给 KV 留 20 GB）算放不下。
+// 读者可以：选 TP、PP，切换“TP 组放在机内 / 故意跨机”，看 16 张卡怎么分组、TPOT 和吞吐。
+interface Props { title?: string; caption?: string }
+const { title = '16 张卡怎么分组', caption } = Astro.props;
+---
+<figure class="ai-gt ai-tm" data-topomap>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="tp"><span class="ai-tl-k">TP：</span><button data-v="2" aria-pressed="false">2</button><button data-v="4" aria-pressed="false">4</button><button data-v="8" aria-pressed="true">8</button><button data-v="16" aria-pressed="false">16</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="pp"><span class="ai-tl-k">PP：</span><button data-v="1" aria-pressed="true">1</button><button data-v="2" aria-pressed="false">2</button><button data-v="4" aria-pressed="false">4</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="pl"><button data-v="in" aria-pressed="true">TP 组放在机内</button><button data-v="cross" aria-pressed="false">TP 组故意跨机</button></div>
+  </div>
+  <div class="ai-tm-nodes" data-nodes></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const W = 141e9, L = 80, D = 8192, BW = 3.35e12, m = 32 * D * 2, NVL: [number, number] = [3e-6, 450e9], IB: [number, number] = [6e-6, 50e9];
+  const ar = (t: number, link: [number, number]) => (t === 1 ? 0 : link === NVL ? link[0] + (t - 1) * m / link[1] : 2 * (t - 1) * (link[0] + m / t / link[1]));
+  function init(fig: HTMLElement) {
+    let tp = 8, pp = 1, pl = 'in';
+    function draw() {
+      const nodes = fig.querySelector<HTMLElement>('[data-nodes]')!, eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+      if (tp * pp > 16) { nodes.innerHTML = ''; eq.innerHTML = `TP × PP = ${tp * pp} 超过了 16 张卡。`; return; }
+      const reps = 16 / (tp * pp), cross = tp > 8 || (pl === 'cross'), ppCross = !cross && tp * pp > 8;
+      // 给每张卡标上（份, 段, TP 序号）。机内放法：按 TP → PP → 份 的顺序连续编号；跨机放法：每个 TP 组一半在机器 0、一半在机器 1
+      const label: string[] = Array(16).fill('');
+      let k = 0;
+      for (let r = 0; r < reps; r++) for (let s = 0; s < pp; s++) for (let i = 0; i < tp; i++) {
+        let gpu = k;
+        if (pl === 'cross' && tp <= 8) { const half = tp / 2, grp = Math.floor(k / tp), slot = k % tp; gpu = (slot < half ? 0 : 8) + grp * half + (slot % half); }
+        label[gpu] = `${r}|${s}|${i}`; k++;
+      }
+      nodes.innerHTML = [0, 1].map((n) => `<div class="ai-tm-node"><b>机器 ${n}</b><div class="ai-tm-gpus">${label.slice(n * 8, n * 8 + 8).map((lb, j) => { const [r, s, i] = lb.split('|').map(Number); return `<span class="ai-tm-g" style="--h:${r * 90 + s * 25}"><small>卡 ${n * 8 + j}</small>份${r}${pp > 1 ? `·段${s}` : ''}<i>TP${i}</i></span>`; }).join('')}</div></div>`).join('');
+      const perGpu = W / (tp * pp), fit = perGpu <= 52e9;
+      const read = W / tp / BW, comm = 2 * L * ar(tp, cross ? IB : NVL), p2p = pp === 1 ? 0 : (pp - 1) * ((ppCross ? IB : NVL)[0] + m / (ppCross ? IB : NVL)[1]);
+      const step = read + comm + p2p, thru = reps * pp * 32 / step;
+      eq.innerHTML = `${reps} 份模型，每份 TP = ${tp}${pp > 1 ? `、PP = ${pp}` : ''}；每卡权重 ${(perGpu / 1e9).toFixed(1)} GB${fit ? '' : '（<b>放不下</b>：还要留 KV Cache）'}。TP 的 All-Reduce 走 <b>${cross ? 'InfiniBand（跨机）' : 'NVLink（机内）'}</b>${pp > 1 ? `，段间传输走 ${ppCross ? 'InfiniBand' : 'NVLink'}` : ''}。`
+        + `<br>TPOT = 读权重 ${(read * 1e3).toFixed(1)} ms + TP 通信 ${(comm * 1e3).toFixed(2)} ms${pp > 1 ? ` + 段间 ${(p2p * 1e3).toFixed(2)} ms` : ''} = <b>${(step * 1e3).toFixed(1)} ms</b>；全集群吞吐约 ${Math.round(thru).toLocaleString()} token/s。`
+        + `<br><span class="ai-faint">${cross ? 'TP 每层都要同步两次，放在慢速的跨机网络上，通信远超计算。' : pp > 1 ? '流水并行的段间每步只传一次小数据，放在跨机网络上影响很小。' : 'TP 留在 NVLink 域内，通信只占一小部分。TP 越小，单个请求越慢（TPOT 越大），但份数多，总吞吐可能更高。'}</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      const v = b.dataset.v!; if (g.dataset.group === 'tp') tp = Number(v); else if (g.dataset.group === 'pp') pp = Number(v); else pl = v; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-topomap]').forEach(init);
+</script>

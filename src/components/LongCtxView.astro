@@ -1,0 +1,74 @@
+---
+// 长上下文的两种手段。
+// 上：滑动窗口注意力。16 个 token，每个只看最近 W 个（含自己）；再叠几层，看最后一个 token 的信息最远能来自哪里。
+// 下：RoPE 的位置插值。某一对维度的转角 = 位置 × θ。训练长度 2048，要用到 8192：
+//   直接外推，转角超出训练时见过的范围；位置插值，把位置压缩 4 倍；改 base，让这一对转得更慢。
+interface Props { title?: string; caption?: string }
+const { title = '滑动窗口与位置插值', caption } = Astro.props;
+---
+<figure class="ai-gt ai-lc" data-longctx>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-mlp-pt"><b>滑动窗口</b>：深色是第 1 层里每个 token 能看的范围，琥珀色是叠了几层之后，最后一个 token 间接能获得信息的范围</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>窗口 W = <b data-v="w"></b></span><input type="range" min="1" max="16" step="1" value="4" data-s="w" /></label>
+    <label class="ai-tl-lr"><span>层数 = <b data-v="l"></b></span><input type="range" min="1" max="5" step="1" value="2" data-s="l" /></label>
+  </div>
+  <div class="ai-lc-grid" data-grid></div>
+  <div class="ai-cg-eq" data-weq></div>
+  <div class="ai-mlp-pt" style="margin-top:14px"><b>位置插值</b>：某一对维度的转角随位置的变化（训练长度 2048，目标 8192）</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="extra" aria-pressed="true">直接外推</button><button data-v="pi" aria-pressed="false">位置插值</button><button data-v="ntk" aria-pressed="false">改 base</button></div>
+  <svg class="ai-tl-svg" viewBox="0 0 560 200" data-plot role="img" aria-label="转角随位置变化"></svg>
+  <div class="ai-cg-eq" data-req></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const S = 16;
+  function init(fig: HTMLElement) {
+    const w = fig.querySelector<HTMLInputElement>('[data-s="w"]')!, l = fig.querySelector<HTMLInputElement>('[data-s="l"]')!;
+    let m = 'extra';
+    function draw() {
+      const W = Number(w.value), Ly = Number(l.value);
+      fig.querySelector('[data-v="w"]')!.textContent = String(W);
+      fig.querySelector('[data-v="l"]')!.textContent = String(Ly);
+      // 最后一个 token 经过 Ly 层能到达的最早位置
+      const reach = Math.max(0, S - 1 - Ly * (W - 1));
+      let g = '<table class="ai-att-tbl ai-lc-tbl"><tbody>';
+      for (let i = 0; i < S; i++) {
+        g += `<tr><th>${i + 1}</th>`;
+        for (let j = 0; j < S; j++) {
+          const see = j <= i && j > i - W, far = i === S - 1 && j < S && j >= reach && !see;
+          g += `<td class="${see ? 'is-see' : ''}${far ? ' is-far' : ''}${j > i ? ' is-mask' : ''}"></td>`;
+        }
+        g += '</tr>';
+      }
+      fig.querySelector<HTMLElement>('[data-grid]')!.innerHTML = g + '</tbody></table>';
+      fig.querySelector<HTMLElement>('[data-weq]')!.innerHTML = `每个 token 在一层里只看最近 ${W} 个 token，所以 KV Cache 最多只需存 ${W} 个。但经过 ${Ly} 层，信息可以一层层接力：最后一个 token 间接能获得从第 ${reach + 1} 个 token 起的信息（最远 ${Ly} × (${W} − 1) = ${Ly * (W - 1)} 个位置之前）。`;
+      // 转角曲线
+      const train = 2048, target = 8192, theta = 2 * Math.PI / 4096;
+      const ang = (p: number) => (m === 'extra' ? p * theta : m === 'pi' ? p * train / target * theta : p * theta * train / target);
+      const L = 40, R = 548, T = 12, B = 170, X = (p: number) => L + p / target * (R - L), Y = (a: number) => B - a / (target * theta) * (B - T);
+      let s = `<rect class="ai-lc-seen" x="${L}" y="${Y(train * theta)}" width="${R - L}" height="${B - Y(train * theta)}"/>`;
+      s += `<line class="ai-al-zl" x1="${X(train)}" y1="${T}" x2="${X(train)}" y2="${B}"/><text class="ai-al-gl" x="${X(train) + 4}" y="${T + 10}">训练长度 2048</text>`;
+      s += `<text class="ai-al-gl" x="${L + 4}" y="${Y(train * theta) - 4}">训练时见过的转角范围</text>`;
+      s += `<path class="ai-al-f" d="M${X(0)} ${Y(0)} L${X(target)} ${Y(ang(target))}"/>`;
+      s += `<g class="ai-vp-axis"><line x1="${L}" y1="${B}" x2="${R}" y2="${B}"/><line x1="${L}" y1="${T}" x2="${L}" y2="${B}"/></g><g class="ai-vp-tick"><text x="${L}" y="${B + 14}" text-anchor="middle">0</text><text x="${R}" y="${B + 14}" text-anchor="end">位置 8192</text><text x="${L - 4}" y="${Y(train * theta) + 3}" text-anchor="end">π</text></g>`;
+      fig.querySelector('[data-plot]')!.innerHTML = s;
+      fig.querySelector<HTMLElement>('[data-req]')!.innerHTML = m === 'extra'
+        ? '直接外推：位置超过 2048 后，转角超出了训练时见过的范围（阴影之外），模型从没见过这样的 q、k 组合，效果会迅速变差。'
+        : m === 'pi'
+          ? '位置插值：把位置乘以 2048 / 8192，转角又回到了见过的范围。代价是相邻位置的转角差也缩小到 1/4，快的那些维度区分近距离变难，需要再用长文本训练一小段让模型适应。'
+          : '改 base：把 base 调大，让这一对（和其他慢的对）转得更慢，同样回到见过的范围；而最快的那些对几乎不受影响，近距离的分辨力保留下来。NTK、YaRN 等方法都是在“哪些对缩、缩多少”上做文章。';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group="m"] [data-v]');
+      if (!b) return;
+      m = b.dataset.v!;
+      fig.querySelectorAll('[data-group="m"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-longctx]').forEach(init);
+</script>

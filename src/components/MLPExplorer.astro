@@ -1,0 +1,156 @@
+---
+// 多层感知机（一维输入、一维输出，层间用 ReLU，最后一层不加激活）逐层查看。
+//   net="fit"：tinylm.json 的 examples["15"]，一个训练好的 1→8→8→1 网络，拟合 sin(1.5x)。
+//   net="saw"：“锯齿”网络，每个隐藏层 2 个神经元，h = (ReLU(u), ReLU(u − 0.5))，下一层的 u = 2h₁ − 4h₂。
+//              用滑块改层数 k（1–6），输出在 [0, 1] 上有 2^k 段。
+// 每个隐藏层画一张图：横轴是输入 x，每条线是一个神经元的输出随 x 怎么变。
+// 读者可以：拖 x，看每层在这一点的数值；点神经元的小标签，把它“关掉”（输出强制为 0），看后面各层和最终输出怎么变；
+//   悬停标签，高亮这个神经元的曲线。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { net?: 'fit' | 'saw'; depth?: number; title?: string; caption?: string }
+const { net = 'fit', depth = 3, caption } = Astro.props;
+const { title = net === 'fit' ? '一个训练好的 1→8→8→1 网络，逐层看' : '每层只有 2 个神经元的“锯齿”网络' } = Astro.props;
+const layers = net === 'fit' ? tiny.examples['15'].layers : null;
+---
+<figure class="ai-gt ai-mlp" data-mlp data-net={net} data-layers={layers ? JSON.stringify(layers) : undefined} data-depth={depth}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-pc-sl ai-mlp-ctl">
+    <label><span><i>x</i> = <b data-xv></b></span><input type="range" min={net === 'fit' ? -3 : 0} max={net === 'fit' ? 3 : 1} step={net === 'fit' ? 0.05 : 0.005} value={net === 'fit' ? 1 : 0.3} data-x /></label>
+    {net === 'saw' && <label><span>层数 k = <b data-kv></b></span><input type="range" min="1" max="6" step="1" value={depth} data-k /></label>}
+  </div>
+  <div class="ai-mlp-panels" data-panels></div>
+  <div class="ai-mlp-trace" data-trace></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  interface Layer { W: number[][]; b: number[] }
+  const fmt = (v: number, d = 2) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const SUBS = '₀₁₂₃₄₅₆₇₈₉';
+  const sub = (n: number) => String(n).split('').map((c) => SUBS[+c]).join('');
+
+  function sawNet(k: number): Layer[] {
+    const L: Layer[] = [{ W: [[1, 1]], b: [0, -0.5] }];
+    for (let i = 1; i < k; i++) L.push({ W: [[2, 2], [-4, -4]], b: [0, -0.5] });
+    L.push({ W: [[2], [-4]], b: [0] });
+    return L;
+  }
+
+  function init(fig: HTMLElement) {
+    const isFit = fig.dataset.net === 'fit';
+    const xIn = fig.querySelector<HTMLInputElement>('[data-x]')!;
+    const kIn = fig.querySelector<HTMLInputElement>('[data-k]');
+    const panels = fig.querySelector<HTMLElement>('[data-panels]')!;
+    const trace = fig.querySelector<HTMLElement>('[data-trace]')!;
+    const [X0, X1] = isFit ? [-3, 3] : [0, 1];
+    const target = isFit ? (x: number) => Math.sin(1.5 * x) : null;
+    let net: Layer[] = isFit ? JSON.parse(fig.dataset.layers!) : sawNet(Number(fig.dataset.depth));
+    let off = new Set<string>();   // "层-神经元"，被关掉的神经元
+    let hi = '';                   // 悬停高亮的神经元
+
+    // 前向传播：返回每个隐藏层的输出和最终输出
+    function forward(x: number): { hs: number[][]; y: number } {
+      let h = [x];
+      const hs: number[][] = [];
+      net.forEach((L, li) => {
+        const z = L.b.map((bj, j) => h.reduce((s, hv, i) => s + hv * L.W[i][j], bj));
+        h = li < net.length - 1 ? z.map((v, j) => (off.has(`${li}-${j}`) ? 0 : Math.max(0, v))) : z;
+        if (li < net.length - 1) hs.push(h);
+      });
+      return { hs, y: h[0] };
+    }
+    const NS = isFit ? 241 : 2049;
+    const xs = Array.from({ length: NS }, (_, i) => X0 + (X1 - X0) * i / (NS - 1));
+
+    // 数线性段数：相邻两小段斜率不同就算一个折点（连在一起的标记合并成一个）
+    function pieces(ys: number[]): number {
+      let kinks = 0, prevFlag = false;
+      for (let i = 2; i < ys.length; i++) {
+        const s1 = ys[i - 1] - ys[i - 2], s2 = ys[i] - ys[i - 1];
+        const flag = Math.abs(s2 - s1) > 1e-7 * (1 + Math.abs(s1) + Math.abs(s2)) + 1e-12;
+        if (flag && !prevFlag) kinks++;
+        prevFlag = flag;
+      }
+      return kinks + 1;
+    }
+
+    function plot(series: { ys: number[]; cls: string; key?: string }[], xNow: number, yNow: number[], w = 240, h = 132) {
+      const L = 30, R = w - 8, T = 8, B = h - 18;
+      let lo = 0, hiY = 0;
+      for (const s of series) for (const v of s.ys) { if (v < lo) lo = v; if (v > hiY) hiY = v; }
+      if (hiY - lo < 1e-9) hiY = lo + 1;
+      const pad = (hiY - lo) * 0.06; lo -= pad; hiY += pad;
+      const PX = (v: number) => L + (v - X0) / (X1 - X0) * (R - L), PY = (v: number) => B - (v - lo) / (hiY - lo) * (B - T);
+      let s = `<svg viewBox="0 0 ${w} ${h}" class="ai-mlp-svg"><g class="ai-vp-axis"><line x1="${L}" y1="${PY(0)}" x2="${R}" y2="${PY(0)}"/></g>`;
+      s += `<g class="ai-vp-tick"><text x="${L}" y="${h - 4}" text-anchor="middle">${fmt(X0)}</text><text x="${R}" y="${h - 4}" text-anchor="middle">${fmt(X1)}</text>`
+        + `<text x="${L - 4}" y="${PY(hiY - pad) + 3}" text-anchor="end">${fmt(hiY - pad, 1)}</text><text x="${L - 4}" y="${PY(0) + 3}" text-anchor="end">0</text></g>`;
+      for (const sr of series) {
+        let d = '';
+        for (let i = 0; i < xs.length; i++) d += `${i ? 'L' : 'M'}${PX(xs[i]).toFixed(1)} ${PY(sr.ys[i]).toFixed(1)} `;
+        s += `<path class="${sr.cls}" d="${d}"${sr.key ? ` data-key="${sr.key}"` : ''}/>`;
+      }
+      s += `<line class="ai-al-zl" x1="${PX(xNow)}" y1="${T}" x2="${PX(xNow)}" y2="${B}"/>`;
+      for (const v of yNow) s += `<circle class="ai-mlp-dot" cx="${PX(xNow)}" cy="${PY(v)}" r="2.6"/>`;
+      return s + '</svg>';
+    }
+
+    function draw() {
+      const xNow = parseFloat(xIn.value);
+      fig.querySelector('[data-xv]')!.textContent = fmt(xNow, isFit ? 2 : 3);
+      if (kIn) fig.querySelector('[data-kv]')!.textContent = kIn.value;
+      const runs = xs.map(forward);
+      const now = forward(xNow);
+      const nHidden = net.length - 1;
+      let html = '';
+      for (let l = 0; l < nHidden; l++) {
+        const width = net[l].b.length;
+        const series = Array.from({ length: width }, (_, j) => ({
+          ys: runs.map((r) => r.hs[l][j]),
+          cls: 'ai-mlp-n' + (off.has(`${l}-${j}`) ? ' is-off' : '') + (hi === `${l}-${j}` ? ' is-hi' : ''),
+          key: `${l}-${j}`,
+        }));
+        const alive = series.filter((s, j) => !off.has(`${l}-${j}`) && s.ys.some((v) => v > 1e-9)).length;
+        html += `<div class="ai-mlp-p"><div class="ai-mlp-pt">第 ${l + 1} 层 · ${width} 个神经元 <span class="ai-faint">（在这个范围里有输出的：${alive} 个）</span></div>`
+          + plot(series, xNow, now.hs[l])
+          + `<div class="ai-mlp-chips">${now.hs[l].map((v, j) => `<button data-n="${l}-${j}" class="${off.has(`${l}-${j}`) ? 'is-off' : ''}" title="点一下关掉 / 打开这个神经元">h${sub(j + 1)} ${fmt(v)}</button>`).join('')}</div></div>`;
+      }
+      const ys = runs.map((r) => r.y);
+      const outSeries = [{ ys, cls: 'ai-al-f' }];
+      if (target) outSeries.unshift({ ys: xs.map(target), cls: 'ai-al-target' });
+      const np = pieces(ys);
+      let info = `${isFit ? `y = ${fmt(now.y, 3)}，目标 sin(1.5x) = ${fmt(target!(xNow), 3)}` : `y = ${fmt(now.y, 3)}`}<br>输出是一条由 <b>${np}</b> 段直线连成的折线`;
+      if (isFit) info += `，均方误差 ${fmt(ys.reduce((s, v, i) => s + (v - target!(xs[i])) ** 2, 0) / ys.length, 5)}`;
+      else info += `；${nHidden} 层 × 2 个 = ${2 * nHidden} 个神经元`;
+      html += `<div class="ai-mlp-p is-out"><div class="ai-mlp-pt">输出 y${isFit ? '　<span class="ai-faint">虚线是目标</span>' : ''}</div>${plot(outSeries, xNow, [now.y])}<div class="ai-mlp-info">${info}</div></div>`;
+      panels.innerHTML = html;
+
+      // 在当前 x 处的逐层计算
+      const vec = (v: number[]) => '(' + v.map((t) => fmt(t)).join(', ') + ')';
+      let tr = `<div><span>输入</span>x = ${fmt(xNow, isFit ? 2 : 3)}</div>`;
+      now.hs.forEach((h, l) => { tr += `<div><span>第 ${l + 1} 层</span>h${sub(l + 1)} = ReLU(${l ? 'h' + sub(l) : 'x'} · W${sub(l + 1)} + b${sub(l + 1)}) = ${vec(h)}</div>`; });
+      tr += `<div><span>输出</span>y = h${sub(nHidden)} · W${sub(nHidden + 1)} + b${sub(nHidden + 1)} = <b>${fmt(now.y, 3)}</b></div>`;
+      if (off.size) tr += `<div class="ai-vp-hint">关掉了 ${off.size} 个神经元（标签划了线）。再点一下可以打开。</div>`;
+      trace.innerHTML = tr;
+    }
+
+    fig.addEventListener('input', (e) => {
+      if (e.target === kIn) { net = sawNet(Number(kIn!.value)); off = new Set(); }
+      draw();
+    });
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-n]');
+      if (!b) return;
+      const k = b.dataset.n!;
+      if (off.has(k)) off.delete(k); else off.add(k);
+      draw();
+    });
+    const setHi = (k: string) => {
+      if (k === hi) return; hi = k;
+      fig.querySelectorAll<SVGPathElement>('path[data-key]').forEach((p) => p.classList.toggle('is-hi', p.dataset.key === hi));
+    };
+    fig.addEventListener('pointerover', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-n]'); setHi(b ? b.dataset.n! : ''); });
+    fig.addEventListener('pointerleave', () => setHi(''));
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-mlp]').forEach(init);
+</script>

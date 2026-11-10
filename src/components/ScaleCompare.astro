@@ -1,0 +1,54 @@
+---
+// 同一次通信在两种组织方式下的耗时（公式与第 57 讲的代码相同）：64 张卡。
+// A：8 台 8 卡服务器（机内 NVLink 450 GB/s，机间每卡 50 GB/s，按轨道 8 条并行）；B：64 张卡在一个 NVLink 域（每卡 900 GB/s）。
+// All-Reduce：A 用分层（机内 Reduce-Scatter → 机间 All-Reduce 1/8 → 机内 All-Gather），B 取 Ring 和 Tree 中快的；All-to-All：A 的 56/63 走网卡。
+// 读者可以：切换集合通信，调消息大小，看两种组织方式的耗时和构成。
+interface Props { title?: string; caption?: string }
+const { title = 'scale-out 与 scale-up：同一次通信', caption } = Astro.props;
+---
+<figure class="ai-gt ai-sc" data-scalecmp>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="c"><button data-v="ar" aria-pressed="true">All-Reduce</button><button data-v="a2a" aria-pressed="false">All-to-All</button></div>
+    <label class="ai-tl-lr"><span>每卡数据 <b data-mv></b></span><input type="range" min="0" max="6" step="1" value="5" data-m /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const ANV = 3e-6, ANET = 6e-6, MS = [64e3, 1e6, 16e6, 64e6, 256e6, 1e9, 4e9];
+  function calc(c: string, m: number) {
+    if (c === 'ar') {
+      const intra = 2 * (7 * ANV + 7 / 8 * m / 450e9), inter = 2 * 7 * (ANET + m / 8 / 8 / 50e9);
+      const B = Math.min(2 * 63 * (ANV + m / 64 / 900e9), 12 * ANV + 2 * m / 900e9);
+      return { A: [['机内 NVLink', intra], ['机间网络', inter]] as [string, number][], B };
+    }
+    const nv = 7 / 63 * m / 450e9, net = 56 / 63 * m / 50e9;
+    return { A: [['机内 NVLink（同时进行，被藏住）', 0], ['机间网络', Math.max(nv, net) + 2 * ANET]] as [string, number][], B: m / 900e9 + 2 * ANV };
+  }
+  function init(fig: HTMLElement) {
+    let c = 'ar';
+    const mIn = fig.querySelector<HTMLInputElement>('[data-m]')!;
+    const fmtB = (b: number) => (b >= 1e9 ? `${b / 1e9} GB` : b >= 1e6 ? `${b / 1e6} MB` : `${b / 1e3} KB`);
+    const fmtT = (t: number) => (t >= 1e-3 ? `${(t * 1e3).toFixed(2)} ms` : `${(t * 1e6).toFixed(0)} μs`);
+    function draw() {
+      const m = MS[Number(mIn.value)], r = calc(c, m); fig.querySelector('[data-mv]')!.textContent = fmtB(m);
+      const tA = r.A.reduce((a, x) => a + x[1], 0), mx = Math.max(tA, r.B), sx = 400 / mx;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 110">';
+      s += `<text class="ai-al-gl" x="150" y="30" text-anchor="end">A：8 台 × 8 卡</text>`;
+      let x = 156; r.A.forEach(([n, t], i) => { if (t > 0) { s += `<rect class="${i === 0 ? 'ai-sc-nv' : 'ai-sc-net'}" x="${x}" y="16" width="${t * sx}" height="22"><title>${n} ${fmtT(t)}</title></rect>`; x += t * sx; } });
+      s += `<text class="ai-al-gl" x="${x + 4}" y="31">${fmtT(tA)}</text>`;
+      s += `<text class="ai-al-gl" x="150" y="72" text-anchor="end">B：64 卡一个域</text><rect class="ai-sc-nv" x="156" y="58" width="${r.B * sx}" height="22"/><text class="ai-al-gl" x="${160 + r.B * sx}" y="73">${fmtT(r.B)}</text>`;
+      s += `<text class="ai-al-gl" x="156" y="102">蓝：走 NVLink；琥珀：走机间网络</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${c === 'ar' ? 'All-Reduce' : 'All-to-All'}，每卡 ${fmtB(m)}：A ${fmtT(tA)}（${r.A.filter((x) => x[1] > 0).map(([n, t]) => `${n} ${fmtT(t)}`).join(' + ')}），B ${fmtT(r.B)}，B 快 ${(tA / r.B).toFixed(1)} 倍。`
+        + `<br><span class="ai-faint">${c === 'ar' ? 'All-Reduce 可以分层做：先在机内把数据缩成 1/8，机间网络只传 1/8，所以 A 的劣势不算太大。' : 'All-to-All 是每张卡和每张卡交换不同的数据，没法先在机内“缩小”，A 里 56/63 的数据都要挤过 50 GB/s 的网卡。这是超节点收益最大的通信。'}</span>`;
+    }
+    mIn.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return; c = b.dataset.v!; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-scalecmp]').forEach(init);
+</script>

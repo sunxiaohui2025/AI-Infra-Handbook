@@ -1,0 +1,90 @@
+---
+// BPE 演示：在一小段语料上一步一步学合并规则，再用学到的规则切分新句子。
+// 规则：语料按“。”切成若干段，每段从单个字符开始；每一步数出所有相邻两个 token 的出现次数，
+// 把次数最多的一对合并成一个新 token（次数相同时，选在语料里最先出现的那一对）；最多的一对不到 2 次就停。
+// 读者可以：改语料、点“合并一次”“合并到底”“重置”；在下面输入一句新话，看它被切成哪些 token、编号是多少。
+interface Props { corpus?: string; probe?: string; title?: string; caption?: string }
+const { corpus = '我爱学AI。我爱推理。学AI的人爱推理。AI推理很快。我学推理。', probe = '你爱学AI推理', title = 'BPE：数一数，把最常一起出现的两个合并', caption } = Astro.props;
+---
+<figure class="ai-gt ai-bpe" data-bpe>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-bpe-lab">语料（可以改）<textarea rows="2" data-corpus>{corpus}</textarea></label>
+  <div class="ai-gt-play">
+    <button class="ai-pill ai-pill--solid" data-act="step">合并一次</button>
+    <button class="ai-pill" data-act="all">合并到底</button>
+    <button class="ai-pill" data-act="reset">重置</button>
+    <span class="ai-ms-count" data-count></span>
+  </div>
+  <div class="ai-bpe-grid">
+    <div><div class="ai-mlp-pt">语料现在被切成</div><div class="ai-bpe-segs" data-segs></div></div>
+    <div><div class="ai-mlp-pt">相邻两个 token 的出现次数（前 6）</div><table class="ai-vp-tbl" data-pairs></table></div>
+  </div>
+  <div class="ai-mlp-pt">学到的合并规则</div>
+  <ol class="ai-bpe-rules" data-rules></ol>
+  <label class="ai-bpe-lab">用这些规则切一句新话<input data-probe value={probe} /></label>
+  <div class="ai-bpe-segs" data-out></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const ta = fig.querySelector<HTMLTextAreaElement>('[data-corpus]')!, probe = fig.querySelector<HTMLInputElement>('[data-probe]')!;
+    const q = (s: string) => fig.querySelector<HTMLElement>(s)!;
+    let chunks: string[][] = [], base: string[] = [], merges: [string, string, number][] = [], last = -1;
+
+    function reset() {
+      const text = ta.value.replace(/\s+/g, '');
+      chunks = text.split('。').filter(Boolean).map((c) => Array.from(c));
+      base = [];
+      for (const c of chunks) for (const ch of c) if (!base.includes(ch)) base.push(ch);
+      merges = []; last = -1;
+    }
+    function counts() {
+      const m = new Map<string, { a: string; b: string; n: number; first: number }>();
+      let pos = 0;
+      for (const c of chunks) { for (let i = 0; i + 1 < c.length; i++) { const k = c[i] + '\u0001' + c[i + 1]; const e = m.get(k); if (e) e.n++; else m.set(k, { a: c[i], b: c[i + 1], n: 1, first: pos }); pos++; } pos++; }
+      return [...m.values()].sort((x, y) => y.n - x.n || x.first - y.first);
+    }
+    const apply = (c: string[], a: string, b: string) => { const o: string[] = []; for (let i = 0; i < c.length; i++) { if (i + 1 < c.length && c[i] === a && c[i + 1] === b) { o.push(a + b); i++; } else o.push(c[i]); } return o; };
+    function step() {
+      const cs = counts();
+      if (!cs.length || cs[0].n < 2) return false;
+      const { a, b, n } = cs[0];
+      merges.push([a, b, n]); last = merges.length - 1;
+      chunks = chunks.map((c) => apply(c, a, b));
+      return true;
+    }
+    const vocab = () => [...base, ...merges.map(([a, b]) => a + b)];
+    const chip = (t: string, cls = '') => `<span class="ai-bpe-tok${t.length > 1 ? ' is-m' : ''}${cls}">${t.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span>`;
+
+    function draw() {
+      const cs = counts(), V = vocab();
+      const justMade = last >= 0 ? merges[last][0] + merges[last][1] : '';
+      q('[data-segs]').innerHTML = chunks.map((c) => `<div class="ai-bpe-line">${c.map((t) => chip(t, t === justMade ? ' is-new' : '')).join('')}<span class="ai-bpe-dot">。</span></div>`).join('');
+      q('[data-pairs]').innerHTML = `<thead><tr><th>一对</th><th>次数</th></tr></thead><tbody>${cs.slice(0, 6).map((p, i) => `<tr${i === 0 && p.n >= 2 ? ' class="is-focus"' : ''}><td>${chip(p.a)} + ${chip(p.b)}</td><td>${p.n}</td></tr>`).join('') || '<tr><td colspan="2">没有相邻的一对了</td></tr>'}</tbody>`;
+      q('[data-rules]').innerHTML = merges.map(([a, b, n], i) => `<li${i === last ? ' class="is-new"' : ''}>${chip(a)} + ${chip(b)} → ${chip(a + b)} <span class="ai-faint">（${n} 次）</span></li>`).join('') || '<li class="ai-faint">还没有。点“合并一次”。</li>';
+      const total = chunks.reduce((s, c) => s + c.length, 0);
+      q('[data-count]').textContent = `词表 ${V.length} 个（${base.length} 个单字 + ${merges.length} 条合并） · 语料共 ${total} 个 token`;
+      // 切分新句子：先拆成单字，再按学到的顺序逐条应用合并规则
+      let toks = Array.from(probe.value.replace(/\s+/g, ''));
+      for (const [a, b] of merges) toks = apply(toks, a, b);
+      q('[data-out]').innerHTML = toks.map((t) => { const id = V.indexOf(t); return `<span class="ai-bpe-pair">${chip(t, id < 0 ? ' is-unk' : '')}<small>${id < 0 ? '不在词表' : id}</small></span>`; }).join('');
+      const unk = toks.filter((t) => !V.includes(t));
+      const cs0 = cs[0];
+      q('[data-eq]').innerHTML = (last >= 0 ? `第 ${merges.length} 次合并：“${merges[last][0]}”和“${merges[last][1]}”相邻出现了 ${merges[last][2]} 次，是最多的，合并成新 token“${justMade}”。` : '每段语料先拆成单个字符。')
+        + (cs0 && cs0.n >= 2 ? `下一次会合并“${cs0.a}”+“${cs0.b}”（${cs0.n} 次）。` : '<b>所有相邻的对都只出现 1 次了，合并结束。</b>')
+        + `<br><span class="ai-faint">新句子切成 ${toks.length} 个 token（下面的小字是编号）${unk.length ? `；“${unk.join('”“')}”在语料里没出现过，不在词表里：真实的分词器从字节开始合并，所以不会出现这种情况` : ''}。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const a = (e.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
+      if (!a) return;
+      if (a === 'step') step(); else if (a === 'all') { while (step()); } else reset();
+      draw();
+    });
+    ta.addEventListener('input', () => { reset(); draw(); });
+    probe.addEventListener('input', draw);
+    reset(); draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-bpe]').forEach(init);
+</script>

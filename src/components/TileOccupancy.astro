@@ -1,0 +1,63 @@
+---
+// 矩阵乘的一个线程块在 H100 SM 上能驻留几个，以及块大小对显存读写的影响（公式与第 77 讲第二段代码相同）。
+//   每块共享内存 = A 块 2·t·k + W 块 2·k·t（BF16）+（累加器放共享内存时）4·t² + 1 KiB 预留
+//   每线程寄存器 = 基础寄存器 +（累加器放寄存器时）t² ÷ 线程数（FP32）
+//   驻留块数 = min(2048 ÷ 线程数, 65536 ÷ (线程数 × 寄存器), 233472 ÷ 共享内存, 32)；占用率 = 驻留 warp ÷ 64
+//   在途字节：驻留 warp × 每 warp 4 条加载 × 512 字节，对比 3.35 TB/s × 600 ns ÷ 132 ≈ 15.2 KB
+//   全矩阵读写（M=1024, K=4096, N=12288，每个输出块独立读输入）= 2MK·N/t + 2KN·M/t + 2MN
+// 读者可以：调输出块、K 步长、线程数、每线程寄存器、累加器放哪里，看哪项资源先用完、在途字节够不够、读写量是多少。
+interface Props { title?: string; caption?: string }
+const { title = '一个线程块占多少资源，SM 上能放几个', caption } = Astro.props;
+---
+<figure class="ai-gt ai-toc" data-tileocc>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="t"><span class="ai-tl-k">输出块：</span>{[32, 64, 128, 256].map((v) => <button data-v={v} aria-pressed={v === 128 ? 'true' : 'false'}>{`${v}×${v}`}</button>)}</div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="k"><span class="ai-tl-k">K 步长：</span>{[32, 64].map((v) => <button data-v={v} aria-pressed={v === 64 ? 'true' : 'false'}>{v}</button>)}</div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="a"><span class="ai-tl-k">累加器：</span><button data-v="smem" aria-pressed="true">放共享内存</button><button data-v="reg" aria-pressed="false">放寄存器</button></div>
+    <label class="ai-tl-lr"><span>每块 <b data-hv></b> 个线程</span><input type="range" min="0" max="2" step="1" value="1" data-h /></label>
+    <label class="ai-tl-lr"><span>基础寄存器 <b data-rv></b> 个/线程</span><input type="range" min="32" max="255" step="8" value="128" data-r /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const TH = [128, 256, 512], M = 1024, K = 4096, N = 12288;
+  function init(fig: HTMLElement) {
+    let t = 128, k = 64, acc = 'smem';
+    const hIn = fig.querySelector<HTMLInputElement>('[data-h]')!, rIn = fig.querySelector<HTMLInputElement>('[data-r]')!;
+    function draw() {
+      const th = TH[Number(hIn.value)], base = Number(rIn.value);
+      fig.querySelector('[data-hv]')!.textContent = String(th); fig.querySelector('[data-rv]')!.textContent = String(base);
+      const regs = base + (acc === 'reg' ? (t * t) / th : 0), smem = 2 * t * k * 2 + (acc === 'smem' ? 4 * t * t : 0) + 1024;
+      const res: [string, number, number, string][] = [['线程槽', 2048, th, '个'], ['寄存器', 65536, th * regs, '个'], ['共享内存', 233472, smem, 'B']];
+      const fits = res.map(([, tot, need]) => Math.floor(tot / need)), nb = Math.max(0, Math.min(...fits, 32)), warps = nb * th / 32, occ = warps / 64;
+      const needB = 3.35e12 * 600e-9 / 132, have = warps * 4 * 512, traffic = 2 * M * K * N / t * 2 + 2 * M * N;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 175"><text class="ai-np-ptitle" x="10" y="14">一个 SM 的三类资源（每格一个线程块）</text>';
+      res.forEach(([name, tot, need], i) => {
+        const y = 26 + i * 40, x0 = 110, w = 460, f = fits[i], tight = f === nb && regs <= 255;
+        s += `<text class="ai-al-gl" x="${x0 - 6}" y="${y + 14}" text-anchor="end">${name}</text><rect class="ai-eps-cap" x="${x0}" y="${y}" width="${w}" height="20"/>`;
+        for (let b = 0; b < Math.min(nb, 32); b++) s += `<rect class="${b % 2 ? 'ai-sn-b' : 'ai-eps-cp'}" x="${x0 + b * need / tot * w}" y="${y}" width="${Math.max(need / tot * w - 1, 0.5)}" height="20"/>`;
+        s += `<text class="ai-al-gl" x="${x0 + w + 4}" y="${y + 9}">放得下 ${f} 块</text>${tight ? `<text class="ai-al-gl" x="${x0 + w + 4}" y="${y + 21}">← 限制</text>` : ''}`;
+      });
+      s += `<text class="ai-al-gl" x="110" y="160">驻留 ${nb} 块 = ${warps} 个 warp，占用率 ${(occ * 100).toFixed(0)}%；在途 ${(have / 1024).toFixed(0)} KiB，需要 ${(needB / 1000).toFixed(1)} KB（${(have / needB).toFixed(2)} 倍）</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        (regs > 255 ? `<b>每线程 ${regs.toFixed(0)} 个寄存器，超过 255 的上限</b>，编译器会把一部分溢出到显存（register spill），这种配置不可行。<br>` : '')
+        + `每块：共享内存 2·${t}·${k}·2${acc === 'smem' ? ` + 4·${t}²` : ''} + 1 KiB = ${(smem / 1024).toFixed(0)} KiB，寄存器 ${th} × ${regs.toFixed(0)} = ${(th * regs).toLocaleString()} 个。驻留块数 = min(${fits.join(', ')}, 32) = ${nb}。`
+        + `<br>全矩阵读写 2MK·N/${t} + 2KN·M/${t} + 2MN = ${(traffic / 2 ** 20).toFixed(0)} MiB，算术强度 ${(2 * M * K * N / traffic).toFixed(1)} FLOP/byte（H100 的峰值算力 ÷ 带宽约 295）。`
+        + `${have < needB ? '<br><b>在途字节不够</b>：有效带宽只有接口的 ' + (have / needB * 100).toFixed(0) + '%。' : ''}`
+        + '<br><span class="ai-faint">块越大，输入重读越少；可每块占的资源越多，同时驻留的块越少，能隐藏延迟的在途请求也越少。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      const v = bt.dataset.v!; if (g.dataset.group === 't') t = Number(v); else if (g.dataset.group === 'k') k = Number(v); else acc = v; draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-tileocc]').forEach(init);
+</script>

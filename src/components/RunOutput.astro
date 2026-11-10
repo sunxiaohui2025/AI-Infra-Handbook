@@ -1,0 +1,12 @@
+---
+// 运行结果（第五章）：上面是命令，下面是 miniinfer/outputs/ 里保存的真实输出（构建时读取）。
+// 用法：<RunOutput cmd="python bench/batching.py" file="outputs/bench_batching.txt" />
+import { readMini } from './_mini';
+interface Props { cmd: string; file: string; caption?: string }
+const { cmd, file, caption } = Astro.props;
+const out = readMini(file);
+---
+<figure class="ai-gt ai-ro">
+  <div class="ai-ro-term"><div class="ai-ro-cmd"><span class="ai-faint">$ </span>{cmd}</div><pre>{out}</pre></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>

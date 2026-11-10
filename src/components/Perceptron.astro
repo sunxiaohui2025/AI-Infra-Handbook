@@ -133,7 +133,7 @@ const NAMES = { fruit: '水果', and: '与', or: '或', xor: '异或' };
       svg.innerHTML = s;
     }
 
-    // 把画布这个正方形按 z > 0 切开，得到「输出 1」那一半的多边形
+    // 把画布这个正方形按 z > 0 切开，得到“输出 1”那一半的多边形
     function halfPlane(sign: 1 | -1): string {
       const sq: [number, number][] = [[MIN, MIN], [MAX, MIN], [MAX, MAX], [MIN, MAX]];
       const f = (p: [number, number]) => sign * (w[0] * p[0] + w[1] * p[1] + b);
@@ -206,7 +206,7 @@ const NAMES = { fruit: '水果', and: '与', or: '或', xor: '异或' };
       read.innerHTML = h;
       if (log) {
         const head = done ? '' : `<div class="ai-pc-now">下一个：第 ${epoch} 轮，第 ${idx + 1} 个样本 ${ds.pts[idx].name}</div>`;
-        log.innerHTML = (last ? `<div class="ai-pc-last">${last}</div>` : '<div class="ai-pc-last ai-faint">点「下一个样本」，从 w = (0, 0)、b = 0 开始训练，看感知机怎么根据一个样本改权重。</div>')
+        log.innerHTML = (last ? `<div class="ai-pc-last">${last}</div>` : '<div class="ai-pc-last ai-faint">点“下一个样本”，从 w = (0, 0)、b = 0 开始训练，看感知机怎么根据一个样本改权重。</div>')
           + head + (summary.length ? `<div class="ai-pc-sum">${summary.join('<br>')}</div>` : '');
       }
     }

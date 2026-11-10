@@ -1,0 +1,70 @@
+---
+// GPU 结构图（以 H100 SXM 为原型的示意，数字取公开规格，以 NVIDIA 白皮书为准）。
+// 整卡视图：132 个 SM（画成 8 组）、中间的 L2 缓存、四周的 HBM 显存、NVLink 和 PCIe 接口；SM 视图：4 个分区，每个分区一个 Tensor Core、
+// 32 个 FP32 核、寄存器文件，以及整个 SM 共享的 L1/共享内存。读者可以：点任何部件看它做什么、有多大、有多快；点一个 SM 进入 SM 视图。
+interface Props { title?: string; caption?: string }
+const { title = '一张 GPU 里有什么', caption } = Astro.props;
+---
+<figure class="ai-gt ai-gv" data-gpuview>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="v"><button data-v="chip" aria-pressed="true">整卡</button><button data-v="sm" aria-pressed="false">一个 SM</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const INFO: Record<string, string> = {
+    sm: '<b>SM（流式多处理器）</b>：GPU 的基本计算单元，H100 有 132 个。每个 SM 有自己的 Tensor Core、CUDA 核、寄存器和共享内存，可以同时驻留最多 2048 个线程。一个线程块整个跑在一个 SM 上（第 77 讲）。点它看里面。',
+    l2: '<b>L2 缓存</b>：所有 SM 共享，H100 约 50 MB。从显存读来的数据先经过这里，被多个 SM 重复读取时可以直接命中，不用再去显存。',
+    hbm: '<b>HBM 显存</b>：高带宽内存，5 个堆栈叠在芯片旁边，共 80 GB，带宽约 3.35 TB/s。模型权重、KV Cache 都在这里。容量大，但比片上存储慢得多（第 53 讲）。',
+    nvlink: '<b>NVLink</b>：GPU 与 GPU 之间的高速连接，H100 每张卡双向合计约 900 GB/s，经 NVSwitch 和同一台机器里的其他 7 张卡互连（第 56 讲）。',
+    pcie: '<b>PCIe</b>：GPU 和 CPU、网卡之间的连接，PCIe 5.0 x16 每个方向约 64 GB/s（标称）。数据从 CPU 内存来，或者经网卡去别的机器，都走这里。',
+    tc: '<b>Tensor Core</b>：专门做小矩阵乘加的单元，每个 SM 4 个。一个周期能完成 512 次 BF16 乘加（稠密），全卡合计约 989 TFLOPS，是普通 CUDA 核的十几倍。大模型几乎所有的矩阵乘法都靠它。',
+    cuda: '<b>CUDA 核（FP32）</b>：通用的标量运算单元，每个分区 32 个，每个 SM 128 个，每周期做一次 FP32 乘加。逐元素运算、softmax、归一化等用它们，全卡约 60 多 TFLOPS。',
+    reg: '<b>寄存器文件</b>：每个 SM 256 KB，分给各个线程，最快的存储。矩阵乘法的累加结果就放在这里。',
+    smem: '<b>L1 / 共享内存</b>：每个 SM 256 KB 的片上存储，其中最多 228 KB 可以当作共享内存，由程序员控制（第 77 讲）。FlashAttention 把 Q、K、V 的小块放在这里（第 75 讲）。',
+    sched: '<b>线程调度器</b>：每个分区一个，每个周期从准备好的 warp（32 个线程一组）里挑一个发射指令。某个 warp 在等数据时，就换另一个 warp 执行，用海量线程掩盖等待。',
+    tma: '<b>TMA（张量内存加速器）</b>：H100 新增的数据搬运单元，可以异步地把一整块张量从显存搬进共享内存，让计算单元不用自己去搬（FlashAttention-3 用到了它）。',
+  };
+  function init(fig: HTMLElement) {
+    let view = 'chip', pick = 'sm';
+    const box = (id: string, x: number, y: number, w: number, h: number, label: string, cls = '') => `<g class="ai-gv-p ${cls}${pick === id ? ' is-pick' : ''}" data-p="${id}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="4"/>${label ? `<text x="${x + w / 2}" y="${y + h / 2 + 4}" text-anchor="middle">${label}</text>` : ''}</g>`;
+    function draw() {
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 300">';
+      if (view === 'chip') {
+        s += box('hbm', 10, 40, 60, 220, 'HBM', 'hbm') + box('hbm', 530, 40, 60, 220, 'HBM', 'hbm');
+        s += `<rect class="ai-gv-die" x="80" y="20" width="440" height="260" rx="8"/>`;
+        for (let g = 0; g < 8; g++) {
+          const gx = 92 + (g % 4) * 106, gy = g < 4 ? 32 : 186;
+          for (let i = 0; i < 16; i++) s += box('sm', gx + (i % 4) * 24, gy + Math.floor(i / 4) * 21, 21, 18, '', 'sm');
+        }
+        s += box('l2', 92, 125, 416, 52, 'L2 缓存（约 50 MB）', 'l2');
+        s += box('nvlink', 160, 284, 200, 14, 'NVLink', 'io') + box('pcie', 380, 284, 120, 14, 'PCIe', 'io');
+        s += `<text class="ai-al-gl" x="300" y="14" text-anchor="middle">132 个 SM（示意画成 8 组 × 16 个）</text>`;
+      } else {
+        s += `<rect class="ai-gv-die" x="20" y="10" width="560" height="280" rx="8"/><text class="ai-al-gl" x="30" y="26">一个 SM</text>`;
+        for (let p = 0; p < 4; p++) {
+          const x = 34 + p * 136;
+          s += `<rect class="ai-gv-part" x="${x}" y="34" width="128" height="170" rx="5"/><text class="ai-al-gl" x="${x + 6}" y="48">分区 ${p + 1}</text>`;
+          s += box('sched', x + 6, 54, 116, 22, 'warp 调度器', 'sm') + box('reg', x + 6, 80, 116, 30, '寄存器 64 KB', 'reg');
+          s += box('cuda', x + 6, 114, 56, 52, '32 个 FP32 核', 'cu') + box('tc', x + 66, 114, 56, 52, 'Tensor Core', 'tc');
+          s += `<text class="ai-al-gl" x="${x + 64}" y="190" text-anchor="middle">加载/存储、特殊函数单元…</text>`;
+        }
+        s += box('smem', 34, 212, 400, 36, 'L1 / 共享内存（256 KB）', 'l2') + box('tma', 444, 212, 124, 36, 'TMA', 'io');
+        s += `<text class="ai-al-gl" x="300" y="274" text-anchor="middle">↕ 通往 L2 和显存</text>`;
+      }
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = INFO[pick] + '<br><span class="ai-faint">点图里的部件看说明。数字以 H100 SXM 的公开规格为准。</span>';
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element, b = t.closest<HTMLElement>('[data-group] [data-v]'), p = t.closest<SVGGElement>('[data-p]');
+      if (b) { view = b.dataset.v!; pick = view === 'chip' ? 'sm' : 'tc'; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); }
+      else if (p) { pick = p.dataset.p!; if (view === 'chip' && pick === 'sm') { view = 'sm'; pick = 'tc'; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', (x as HTMLElement).dataset.v === 'sm' ? 'true' : 'false')); } }
+      else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-gpuview]').forEach(init);
+</script>

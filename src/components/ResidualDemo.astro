@@ -1,0 +1,88 @@
+---
+// 残差连接：一个很深的网络（每层 16 维，随机初始化），比较有无残差时，梯度传回各层后有多大。
+//   普通：x_{l+1} = f(x_l · W_l)；残差：x_{l+1} = x_l + f(x_l · W_l)。f 可选 tanh 或 ReLU。
+//   从最后一层放进一个长度为 1 的梯度，用反向传播（第 18 讲）一层层传回去，画出每层梯度的长度（对数坐标）。
+// 读者可以：改层数、改初始化的大小（权重标准差 = 系数 / √16）、切换 f、勾选要显示的曲线。
+interface Props { title?: string; caption?: string }
+const { title = '梯度传回每一层时还剩多少', caption } = Astro.props;
+---
+<figure class="ai-gt ai-res" data-resdemo>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>层数 = <b data-v="L"></b></span><input type="range" min="5" max="60" step="1" value="30" data-s="L" /></label>
+    <label class="ai-tl-lr"><span>初始化系数 = <b data-v="g"></b></span><input type="range" min="0.5" max="2" step="0.05" value="1" data-s="g" /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="f"><span class="ai-tl-k">f</span><button data-v="tanh" aria-pressed="true">tanh</button><button data-v="relu" aria-pressed="false">ReLU</button></div>
+    <div class="ai-gt-pre ai-pc-sets"><label class="ai-al-chk"><input type="checkbox" data-show="plain" checked />普通网络</label><label class="ai-al-chk"><input type="checkbox" data-show="res" checked />加残差</label></div>
+  </div>
+  <svg class="ai-tl-svg ai-res-svg" viewBox="0 0 600 240" data-svg role="img" aria-label={title}></svg>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const rng = (seed: number) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const normal = (r: () => number) => Math.sqrt(-2 * Math.log(1 - r())) * Math.cos(2 * Math.PI * r());
+  const fmtE = (v: number) => { if (!isFinite(v)) return '∞'; if (v === 0) return '0'; const e = Math.floor(Math.log10(v)); return e >= -2 && e <= 3 ? String(Math.round(v * 1000) / 1000) : `${(v / 10 ** e).toFixed(2)}×10^${e}`; };
+  const D = 16;
+  function init(fig: HTMLElement) {
+    const svg = fig.querySelector<SVGSVGElement>('[data-svg]')!, eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+    const sl = (k: string) => fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!;
+    let f: 'tanh' | 'relu' = 'tanh';
+    function run(L: number, g: number, res: boolean) {
+      const r = rng(29), Ws: number[][][] = [];
+      for (let l = 0; l < L; l++) Ws.push(Array.from({ length: D }, () => Array.from({ length: D }, () => normal(r) * g / Math.sqrt(D))));
+      const r2 = rng(7);
+      let x = Array.from({ length: D }, () => normal(r2));
+      const zs: number[][] = [];
+      for (let l = 0; l < L; l++) {
+        const z = Ws[l][0].map((_, j) => x.reduce((s, xi, i) => s + xi * Ws[l][i][j], 0));
+        zs.push(z);
+        const a = z.map((v) => (f === 'tanh' ? Math.tanh(v) : Math.max(0, v)));
+        x = res ? x.map((v, j) => v + a[j]) : a;
+      }
+      // 反向：从最后一层放进一个长度为 1 的梯度
+      let gr = Array.from({ length: D }, (_, j) => (j === 0 ? 1 : 0));
+      const norms: number[] = new Array(L + 1);
+      norms[L] = 1;
+      for (let l = L - 1; l >= 0; l--) {
+        const dz = gr.map((v, j) => v * (f === 'tanh' ? 1 - Math.tanh(zs[l][j]) ** 2 : zs[l][j] > 0 ? 1 : 0));
+        const back = Ws[l].map((row) => row.reduce((s, w, j) => s + w * dz[j], 0));
+        gr = res ? gr.map((v, i) => v + back[i]) : back;
+        norms[l] = Math.sqrt(gr.reduce((s, v) => s + v * v, 0));
+      }
+      return norms;
+    }
+    function draw() {
+      const L = Number(sl('L').value), g = Number(sl('g').value);
+      fig.querySelector('[data-v="L"]')!.textContent = String(L);
+      fig.querySelector('[data-v="g"]')!.textContent = g.toFixed(2);
+      const show = (k: string) => fig.querySelector<HTMLInputElement>(`[data-show="${k}"]`)!.checked;
+      const P = run(L, g, false), R = run(L, g, true);
+      const lo = -10, hi = 10, X0 = 50, X1 = 590, Y0 = 14, Y1 = 206;
+      const X = (l: number) => X0 + l / L * (X1 - X0), Y = (v: number) => { const e = v > 0 ? Math.log10(v) : lo; return Y1 - (Math.max(lo, Math.min(hi, e)) - lo) / (hi - lo) * (Y1 - Y0); };
+      let s = '<g class="ai-vp-grid">';
+      for (let e = lo; e <= hi; e += 5) s += `<line x1="${X0}" y1="${Y(10 ** e)}" x2="${X1}" y2="${Y(10 ** e)}"/>`;
+      s += '</g><g class="ai-vp-tick">';
+      for (let e = lo; e <= hi; e += 5) s += `<text x="${X0 - 6}" y="${Y(10 ** e) + 3}" text-anchor="end">${e === 0 ? '1' : `10^${e}`}</text>`;
+      s += `<text x="${X0}" y="${Y1 + 16}" text-anchor="middle">第 0 层（最前）</text><text x="${X1}" y="${Y1 + 16}" text-anchor="end">第 ${L} 层（最后）</text></g>`;
+      s += `<line class="ai-al-zl" x1="${X0}" y1="${Y(1)}" x2="${X1}" y2="${Y(1)}"/>`;
+      const line = (arr: number[], cls: string) => `<path class="${cls}" d="${arr.map((v, l) => `${l ? 'L' : 'M'}${X(l).toFixed(1)} ${Y(v).toFixed(1)}`).join(' ')}"/>` + arr.map((v, l) => `<circle class="${cls}-dot" cx="${X(l)}" cy="${Y(v)}" r="2.2"/>`).join('');
+      if (show('plain')) s += line(P, 'ai-res-p');
+      if (show('res')) s += line(R, 'ai-res-r');
+      s += `<text class="ai-al-lab" x="${X1}" y="${Y0 + 4}" text-anchor="end"><tspan class="c-key">— 普通网络</tspan>　<tspan class="c-accent">— 加残差</tspan></text>`;
+      svg.innerHTML = s;
+      eq.innerHTML = `从最后一层传回一个长度为 1 的梯度，到第 0 层时：普通网络剩 <b class="c-key">${fmtE(P[0])}</b>，加残差的网络是 <b class="c-accent">${fmtE(R[0])}</b>。`
+        + `<br><span class="ai-faint">普通网络里，梯度每过一层都要乘一次“这一层的斜率”，乘了 ${L} 次；${P[0] < 1e-3 ? '每次都小于 1，越乘越小，前面的层几乎收不到训练信号（梯度消失）。' : P[0] > 1e3 ? '每次都大于 1，越乘越大（梯度爆炸）。' : '这组设置下还没有明显失控，把层数调大试试。'}加了残差，每层多了一条“原样传回”的路，梯度至少能沿着它走回来。${R[0] > 30 ? '不过注意，残差网络的梯度在一路变大：每层都往信号上“加”东西，越叠越大。光靠残差还不够，下一讲的 LayerNorm 就是来管这件事的。' : ''}</span>`;
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group="f"] [data-v]');
+      if (!b) return;
+      f = b.dataset.v as 'tanh' | 'relu';
+      fig.querySelectorAll('[data-group="f"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-resdemo]').forEach(init);
+</script>

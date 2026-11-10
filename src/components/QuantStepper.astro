@@ -1,0 +1,67 @@
+---
+// 量化与反量化步进器（规则与第 80 讲的代码相同）。
+// 对称：scale = max|x| / (2^(bits−1) − 1)，q = round(x / scale) 截断到 ±qmax，x̂ = q · scale。
+// 非对称：scale = (max − min) / (2^bits − 1)，z = round(−min / scale)，q = round(x / scale) + z 截断到 [0, 2^bits − 1]，x̂ = (q − z) · scale。
+// 分组：每 4 个数各算一个 scale（和零点）。读者可以：改 8 个数（逗号分隔）、调位宽、切换对称/非对称、整体/分组，
+// 一步一步看 x / scale → 取整 → 反量化 → 误差；上方数轴画出可以表示的格点和每个数落到哪里。
+interface Props { title?: string; caption?: string }
+const { title = '量化：除以 scale，取整，再乘回去', caption } = Astro.props;
+---
+<figure class="ai-gt ai-qs" data-quantstepper>
+  <div class="ai-ms-title">{title}</div>
+  <label class="ai-bpe-lab">8 个数（可以改，例如把 2.31 改成 12 试试离群值）<input data-x value="0.82, -1.47, 0.05, 2.31, -0.66, 1.12, -0.29, 0.94" /></label>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>位宽 = <b data-bv></b> bit</span><input type="range" min="2" max="8" step="1" value="4" data-b /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="sym" aria-pressed="true">对称</button><button data-v="asym" aria-pressed="false">非对称（带零点）</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="g"><button data-v="8" aria-pressed="true">8 个共用一个 scale</button><button data-v="4" aria-pressed="false">每 4 个一组</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-qs-tab" data-tab></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    let mode = 'sym', G = 8;
+    const xIn = fig.querySelector<HTMLInputElement>('[data-x]')!, bIn = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    const f = (v: number, n = 4) => (Math.abs(v) < 1e-12 ? 0 : v).toFixed(n);
+    function draw() {
+      const bits = Number(bIn.value); fig.querySelector('[data-bv]')!.textContent = String(bits);
+      let x = xIn.value.split(/[,，\s]+/).map(Number).filter((v) => Number.isFinite(v)).slice(0, 8);
+      if (x.length < 2) x = [0, 1];
+      const rows: { x: number; r: number; q: number; xh: number; s: number; z: number; g: number }[] = [], groups: { s: number; z: number; lo: number; hi: number }[] = [];
+      for (let g0 = 0; g0 < x.length; g0 += G) {
+        const xs = x.slice(g0, g0 + G); let s: number, z = 0, lo: number, hi: number;
+        if (mode === 'sym') { const qm = 2 ** (bits - 1) - 1; s = Math.max(...xs.map(Math.abs)) / qm || 1; lo = -qm; hi = qm; }
+        else { const qm = 2 ** bits - 1; s = (Math.max(...xs) - Math.min(...xs)) / qm || 1; z = Math.round(-Math.min(...xs) / s); lo = 0; hi = qm; }
+        groups.push({ s, z, lo, hi });
+        xs.forEach((v) => { const r = v / s + z, q = Math.min(hi, Math.max(lo, Math.round(r))); rows.push({ x: v, r, q, xh: (q - z) * s, s, z, g: groups.length - 1 }); });
+      }
+      // 数轴
+      const mx = Math.max(...x.map(Math.abs)) * 1.08 || 1, X = (v: number) => 300 + (v / mx) * 285;
+      let svg = `<svg class="ai-tl-svg" viewBox="0 0 600 ${30 + groups.length * 34}"><line class="ai-bc-ax" x1="15" x2="585" y1="${12 + groups.length * 34}" y2="${12 + groups.length * 34}"/>`;
+      groups.forEach((gr, gi) => {
+        const y = 14 + gi * 34;
+        for (let q = gr.lo; q <= gr.hi; q++) { const v = (q - gr.z) * gr.s; if (Math.abs(v) <= mx) svg += `<line class="ai-qs-grid" x1="${X(v)}" x2="${X(v)}" y1="${y - 8}" y2="${y + 8}"/>`; }
+        rows.filter((r) => r.g === gi).forEach((r) => { svg += `<line class="ai-qs-err" x1="${X(r.x)}" x2="${X(r.xh)}" y1="${y}" y2="${y}"/><circle class="ai-qs-x" cx="${X(r.x)}" cy="${y}" r="3.5"/><circle class="ai-qs-xh" cx="${X(r.xh)}" cy="${y}" r="2.5"/>`; });
+        if (groups.length > 1) svg += `<text class="ai-al-gl" x="4" y="${y + 3}">${gi + 1}</text>`;
+      });
+      svg += `<text class="ai-al-gl" x="300" y="${26 + groups.length * 34}" text-anchor="middle">0</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = svg;
+      fig.querySelector<HTMLElement>('[data-tab]')!.innerHTML = `<table><tr><th>x</th>${rows.map((r) => `<td>${r.x}</td>`).join('')}</tr><tr><th>x / scale${mode === 'asym' ? ' + z' : ''}</th>${rows.map((r) => `<td>${f(r.r, 2)}</td>`).join('')}</tr><tr><th>q（取整）</th>${rows.map((r) => `<td><b>${r.q}</b></td>`).join('')}</tr><tr><th>x̂ = ${mode === 'asym' ? '(q − z)' : 'q'} · scale</th>${rows.map((r) => `<td>${f(r.xh, 3)}</td>`).join('')}</tr><tr><th>误差</th>${rows.map((r) => `<td>${f(r.x - r.xh, 3)}</td>`).join('')}</tr></table>`;
+      const err = rows.reduce((a, r) => a + Math.abs(r.x - r.xh), 0) / rows.length;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = groups.map((g, i) => `${groups.length > 1 ? `第 ${i + 1} 组：` : ''}scale = ${f(g.s, 4)}${mode === 'asym' ? `，零点 z = ${g.z}` : ''}，q 的范围 [${g.lo}, ${g.hi}]（${bits} bit，${2 ** bits} 个格点）`).join('<br>')
+        + `<br>平均误差 ${f(err, 4)}；每个数存 ${bits} bit，另外每组存一个 16 bit 的 scale${mode === 'asym' ? '和零点' : ''}。`
+        + '<br><span class="ai-faint">数轴上竖线是能表示的值（格点），空心圆是原来的数，实心点是反量化后的值。最大的那个数决定了 scale：它越大，格点越稀，其他数的误差越大。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return;
+      const g = b.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      if (g.dataset.group === 'm') mode = b.dataset.v!; else G = Number(b.dataset.v); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-quantstepper]').forEach(init);
+</script>

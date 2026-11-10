@@ -1,0 +1,90 @@
+---
+// KV Cache 块池模拟器（缩小版：每块 4 个 token，池子 24 块）。
+// 5 个请求（到达步数、提示长度、要生成的 token 数），到达那一步一次写入整段提示（prefill），之后每步多 1 个 token。
+//   分页：需要新块时从空闲列表里取一块（物理位置不必连续），请求结束就把块还回空闲列表。
+//   连续预留：每个请求一到达就按“最大长度 32 个 token”预留 8 个连续的块；找不到连续的 8 块就只能等。
+// 读者可以：切换两种方式、拖动步数或播放；点一个请求看它的块表（逻辑块 → 物理块）。
+interface Props { title?: string; caption?: string }
+const { title = 'KV Cache 的块池：分页 vs 连续预留', caption } = Astro.props;
+const REQS = [{ n: 'A', at: 0, p: 5, o: 6 }, { n: 'B', at: 0, p: 3, o: 9 }, { n: 'C', at: 0, p: 7, o: 3 }, { n: 'D', at: 2, p: 2, o: 5 }, { n: 'E', at: 5, p: 6, o: 4 }];
+---
+<figure class="ai-gt ai-bp" data-blockpool data-reqs={JSON.stringify(REQS)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="paged" aria-pressed="true">分页（PagedAttention）</button><button data-v="contig" aria-pressed="false">按最大长度连续预留</button></div>
+    <label class="ai-tl-lr"><span>第 <b data-tv></b> 步</span><input type="range" min="0" max="14" step="1" value="5" data-t /></label>
+    <div class="ai-gt-pre ai-pc-sets"><button data-act="play">▶ 播放</button></div>
+  </div>
+  <div class="ai-bp-pool" data-pool></div>
+  <div class="ai-bp-reqs" data-reqs-view></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Req = { n: string; at: number; p: number; o: number };
+  const BS = 4, NB = 24, MAXLEN = 32;
+  function simulate(R: Req[], mode: string, T: number) {
+    const owner: (number | null)[] = Array(NB).fill(null), fill: number[] = Array(NB).fill(0);
+    const free: number[] = [3, 17, 8, 21, 0, 12, 5, 19, 10, 1, 14, 23, 6, 16, 2, 9, 20, 11, 4, 18, 7, 13, 22, 15]; // 空闲列表（顺序打乱，模拟用久了的池子）
+    const st = R.map(() => ({ len: 0, table: [] as number[], state: 'wait' as 'wait' | 'run' | 'done', waited: 0, joinedAt: -1 }));
+    const need = (len: number) => Math.ceil(len / BS);
+    for (let step = 0; step <= T; step++) {
+      // 1. 结束的请求释放块
+      R.forEach((r, i) => { const s = st[i]; if (s.state === 'run' && s.len >= r.p + r.o) { s.state = 'done'; s.table.forEach((b) => { owner[b] = null; fill[b] = 0; free.push(b); }); } });
+      // 2. 到达的请求尝试加入：写入提示
+      R.forEach((r, i) => {
+        const s = st[i]; if (s.state !== 'wait' || r.at > step) return;
+        if (mode === 'contig') {
+          let start = -1; for (let b = 0; b + MAXLEN / BS <= NB; b++) { let ok = true; for (let k = 0; k < MAXLEN / BS; k++) if (owner[b + k] !== null) ok = false; if (ok) { start = b; break; } }
+          if (start < 0) { s.waited++; return; }
+          for (let k = 0; k < MAXLEN / BS; k++) { owner[start + k] = i; s.table.push(start + k); const fi = free.indexOf(start + k); if (fi >= 0) free.splice(fi, 1); }
+        } else {
+          if (free.length < need(r.p)) { s.waited++; return; }
+          for (let k = 0; k < need(r.p); k++) { const b = free.shift()!; owner[b] = i; s.table.push(b); }
+        }
+        s.len = r.p; s.state = 'run'; s.joinedAt = step;
+      });
+      // 3. 正在运行的请求（不是这一步刚加入的）各生成 1 个 token，需要时追加一个块
+      R.forEach((r, i) => {
+        const s = st[i]; if (s.state !== 'run' || s.joinedAt === step) return;   // 这一步刚做完 prefill 的，下一步才开始生成
+        if (s.len >= r.p + r.o) return;
+        if (mode === 'paged' && need(s.len + 1) > s.table.length) { if (!free.length) return; const b = free.shift()!; owner[b] = i; s.table.push(b); }
+        s.len++;
+      });
+      // 每块装了多少
+      fill.fill(0);
+      R.forEach((r, i) => { const s = st[i]; if (s.state !== 'run') return; s.table.forEach((b, k) => { fill[b] = Math.max(0, Math.min(BS, s.len - k * BS)); }); });
+    }
+    return { owner, fill, st, free };
+  }
+  function init(fig: HTMLElement) {
+    const R: Req[] = JSON.parse(fig.dataset.reqs!);
+    let mode = 'paged', sel = 0, timer = 0;
+    const tIn = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    function draw() {
+      const T = Number(tIn.value);
+      fig.querySelector('[data-tv]')!.textContent = String(T);
+      const { owner, fill, st } = simulate(R, mode, T);
+      fig.querySelector<HTMLElement>('[data-pool]')!.innerHTML = owner.map((o, b) => `<div class="ai-bp-blk${o === null ? '' : ' is-own'}${o === sel ? ' is-sel' : ''}" style="--h:${(o ?? 0) * 70}"><small>${b}</small>${o === null ? '' : `<b>${R[o].n}</b>`}<span class="ai-bp-fill">${Array.from({ length: BS }, (_, k) => `<i class="${k < fill[b] ? 'on' : ''}"></i>`).join('')}</span></div>`).join('');
+      fig.querySelector<HTMLElement>('[data-reqs-view]')!.innerHTML = R.map((r, i) => { const s = st[i]; const lab = s.state === 'wait' ? (r.at > T ? '未到达' : '等待中（放不下）') : s.state === 'done' ? '已完成，块已归还' : `${s.len} 个 token`; return `<button class="ai-bp-req${i === sel ? ' is-sel' : ''}" data-r="${i}" style="--h:${i * 70}"><b>${r.n}</b><small>${lab}</small></button>`; }).join('');
+      const used = st.reduce((a, s) => a + (s.state === 'run' ? s.len : 0), 0), taken = owner.filter((o) => o !== null).length * BS;
+      const s = st[sel], r = R[sel];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `请求 ${r.n}（提示 ${r.p}、生成 ${r.o}）的块表：${s.table.length && s.state === 'run' ? s.table.map((b, k) => `逻辑块 ${k} → 物理块 ${b}`).join('，') : '（没有占用块）'}`
+        + `<br>池子：占用 ${taken} 个 token 的空间，真正存了 ${used} 个，利用率 ${taken ? Math.round(used / taken * 100) : 0}%。`
+        + (mode === 'contig' ? '<br><span class="ai-faint">连续预留：每个请求一到就占 8 个相邻的块（最大长度 32），没写满的部分别人也不能用；找不到 8 个相邻的空块，新请求只能等。</span>' : '<br><span class="ai-faint">分页：块按需一个一个分配，物理位置可以不相邻；浪费的只是每个请求最后一块里没写满的位置。</span>');
+    }
+    const stop = () => { clearInterval(timer); timer = 0; };
+    fig.addEventListener('input', () => { stop(); draw(); });
+    fig.addEventListener('click', (e) => {
+      const t = e.target as HTMLElement, mb = t.closest<HTMLElement>('[data-group="m"] [data-v]'), rb = t.closest<HTMLElement>('[data-r]'), act = t.closest<HTMLElement>('[data-act]');
+      if (mb) { mode = mb.dataset.v!; fig.querySelectorAll('[data-group="m"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === mb ? 'true' : 'false')); }
+      else if (rb) sel = Number(rb.dataset.r);
+      else if (act) { stop(); tIn.value = '0'; draw(); timer = window.setInterval(() => { const v = Number(tIn.value) + 1; if (v > 14) { stop(); return; } tIn.value = String(v); draw(); }, 600); return; }
+      else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-blockpool]').forEach(init);
+</script>

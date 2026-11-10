@@ -18,7 +18,6 @@ const lectures = defineCollection({
     demos: z.array(z.string()).default([]),
     video: z.string().default(''),
     formula: z.string().optional(),
-    shape: z.string().optional(),
   }),
 });
 

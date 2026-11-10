@@ -1,0 +1,132 @@
+---
+// 自注意力逐步查看。
+//   model="tiny"：TinyLM 第 1 层的 W_q、W_k、W_v（权重是随机的），输入“我 爱 学 AI”的嵌入 X（4×4）。
+//                 heads=1：一个头，d_k = 4；heads=2：拆成两个头，每头 2 维，可切换，并显示拼接后乘 W_o 的结果。
+//   model="copy"：训练过的复读模型（tinylm.json examples["27"]）：输入“a b c 。 a b c”，a、b、c 可选；
+//                 x = 词嵌入 + 位置嵌入（8 维），两个头，每头 4 维；下方显示每个位置预测的下一个词。
+//   causal：'off' 不加掩码，'on' 加因果掩码，'toggle' 可开关。
+// 读者可以：点注意力矩阵的某一行（或左边的词）选一个“提问的词”，下方逐步写出这一行的计算：
+//   q·k 打分 → 除以 √d_k →（掩码）→ softmax → 用权重给 v 加权求和。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { model?: 'tiny' | 'copy'; heads?: 1 | 2; causal?: 'off' | 'on' | 'toggle'; row?: number; title?: string; caption?: string }
+const { model = 'tiny', heads = model === 'copy' ? 2 : 1, causal = model === 'copy' ? 'on' : 'off', row = model === 'copy' ? 4 : 0, caption } = Astro.props;
+const { title = model === 'copy' ? '训练过的复读模型：每个头在看哪里' : heads === 2 ? '两个头，各算各的注意力' : '自注意力：每个词给其他词打分，再加权求和' } = Astro.props;
+const L0 = tiny.weights.layers[0];
+const cfg = model === 'tiny'
+  ? { model, heads, causal, row, tokens: tiny.examples['03'].tokens, X: tiny.examples['03'].X, Wq: L0.W_q, Wk: L0.W_k, Wv: L0.W_v, Wo: L0.W_o }
+  : { model, heads: 2, causal: 'on', row, vocab: tiny.examples['27'].vocab, E: tiny.examples['27'].E, P: tiny.examples['27'].P, Wq: tiny.examples['27'].Wq, Wk: tiny.examples['27'].Wk, Wv: tiny.examples['27'].Wv, Wo: tiny.examples['27'].Wo, WU: tiny.examples['27'].WU };
+---
+<figure class="ai-gt ai-att" data-attview data-cfg={JSON.stringify(cfg)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    {model === 'copy' && <div class="ai-gt-pre ai-pc-sets ai-att-pick" data-pick></div>}
+    {(model === 'copy' || heads === 2) && <div class="ai-gt-pre ai-pc-sets" data-group="head"><span class="ai-tl-k">看哪个头</span><button data-v="0" aria-pressed="true">头 1</button><button data-v="1" aria-pressed="false">头 2</button></div>}
+    {causal === 'toggle' && <label class="ai-al-chk"><input type="checkbox" data-mask />因果掩码：每个词只能看自己和前面的词</label>}
+  </div>
+  <div class="ai-att-body">
+    <div><div class="ai-mlp-pt" data-hmtitle></div><div class="ai-att-hm" data-hm></div>{model === 'copy' && <div class="ai-att-pred" data-pred></div>}</div>
+    {model === 'tiny' && <div class="ai-att-mats" data-mats></div>}
+  </div>
+  <div class="ai-cg-eq ai-att-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type M = number[][];
+  const mm = (A: M, B: M) => A.map((r) => B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)));
+  const cols = (A: M, a: number, b: number) => A.map((r) => r.slice(a, b));
+  const fmt = (v: number, d = 3) => { if (!isFinite(v)) return v > 0 ? '∞' : '−∞'; const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const par = (v: number, d = 3) => (v < 0 ? '(' + fmt(v, d) + ')' : fmt(v, d));
+  const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+  function init(fig: HTMLElement) {
+    const C = JSON.parse(fig.dataset.cfg!);
+    const q = (s: string) => fig.querySelector<HTMLElement>(s);
+    const isCopy = C.model === 'copy';
+    let head = 0, row: number = C.row, masked = C.causal === 'on';
+    let pick = [C.vocab ? C.vocab.indexOf('我') : 0, C.vocab ? C.vocab.indexOf('学') : 0, C.vocab ? C.vocab.indexOf('AI') : 0];
+    if (isCopy) {
+      q('[data-pick]')!.innerHTML = '<span class="ai-tl-k">输入 a b c：</span>' + [0, 1, 2].map((k) => `<select data-slot="${k}">${C.vocab.map((w: string, i: number) => (i ? `<option value="${i}"${i === pick[k] ? ' selected' : ''}>${esc(w)}</option>` : '')).join('')}</select>`).join('') + '<span class="ai-faint">　模型要在“。”之后把它复读一遍</span>';
+    }
+
+    function compute() {
+      let toks: string[], X: M;
+      if (isCopy) {
+        const ids = [...pick, 0, ...pick];
+        toks = ids.map((i) => C.vocab[i]);
+        X = ids.map((id, p) => C.E[id].map((v: number, j: number) => v + C.P[p][j]));
+      } else { toks = C.tokens; X = C.X; }
+      const D = X[0].length, H = isCopy || C.heads === 2 ? 2 : 1, dk = D / H;
+      const Q = mm(X, C.Wq), K = mm(X, C.Wk), V = mm(X, C.Wv);
+      const per = Array.from({ length: H }, (_, h) => {
+        const a = h * dk, b = a + dk, Qh = cols(Q, a, b), Kh = cols(K, a, b), Vh = cols(V, a, b);
+        const raw = Qh.map((qi) => Kh.map((kj) => qi.reduce((s, v, t) => s + v * kj[t], 0)));
+        const S = raw.map((r) => r.map((v) => v / Math.sqrt(dk)));
+        const Sm = S.map((r, i) => r.map((v, j) => (masked && j > i ? -Infinity : v)));
+        const A = Sm.map((r) => { const m = Math.max(...r); const e = r.map((v) => (isFinite(v) ? Math.exp(v - m) : 0)); const s = e.reduce((x, y) => x + y, 0); return e.map((v) => v / s); });
+        const O = mm(A, Vh);
+        return { Qh, Kh, Vh, raw, S, A, O };
+      });
+      const Ocat = X.map((_, i) => per.flatMap((p) => p.O[i]));
+      const Oproj = mm(Ocat, C.Wo);
+      let pred: string[] = [];
+      if (isCopy) { const Hd = X.map((x, i) => x.map((v, j) => v + Oproj[i][j])); pred = mm(Hd, C.WU).map((r) => C.vocab[r.indexOf(Math.max(...r))]); }
+      return { toks, X, D, H, dk, per, Ocat, Oproj, pred };
+    }
+
+    const table = (name: string, A: M, rowsL: string[], hiRow = -1, cls = '') => `<div class="ai-att-mat ${cls}"><div class="ai-mlp-pt"><i>${name}</i>（${A.length}×${A[0].length}）</div><table class="ai-emb-tbl"><tbody>${A.map((r, i) => `<tr class="${i === hiRow ? 'is-sel' : ''}"><th>${esc(rowsL[i])}</th>${r.map((v) => `<td>${fmt(v, 2)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+
+    function draw() {
+      const R = compute(), n = R.toks.length, P = R.per[head];
+      if (row >= n) row = n - 1;
+      q('[data-hmtitle]')!.innerHTML = `注意力权重 A${R.H > 1 ? `（头 ${head + 1}）` : ''}：第 i 行是“第 i 个词”分给每个词的权重，每行加起来是 1。点一行看它怎么算`;
+      // 热力图
+      let h = `<table class="ai-att-tbl"><thead><tr><th></th>${R.toks.map((t, j) => `<th>${esc(t)}<small>${j + 1}</small></th>`).join('')}</tr></thead><tbody>`;
+      P.A.forEach((r, i) => {
+        h += `<tr data-row="${i}" class="${i === row ? 'is-sel' : ''}"><th>${esc(R.toks[i])}<small>${i + 1}</small></th>`;
+        r.forEach((v, j) => { const m = masked && j > i; h += `<td class="${m ? 'is-mask' : ''}" style="--a:${m ? 0 : v.toFixed(3)}" title="${m ? '被掩码遮住' : fmt(v)}">${m ? '' : fmt(v, 2)}</td>`; });
+        h += '</tr>';
+      });
+      q('[data-hm]')!.innerHTML = h + '</tbody></table>';
+      if (isCopy) q('[data-pred]')!.innerHTML = '<span class="ai-tl-k">每个位置预测的下一个词：</span>' + R.pred.map((w, i) => `<span class="ai-bpe-tok${i >= 3 && i <= 5 ? (w === R.toks[i + 1] ? ' is-m' : ' is-unk') : ''}">${esc(w)}</span>`).join('') + '<span class="ai-faint">　第 4–6 个是复读，绿色表示和第一遍一致</span>';
+      if (!isCopy) {
+        const labs = R.toks;
+        let m = table('X', R.X, labs, row) + table(R.H > 1 ? `Q（头 ${head + 1}）` : 'Q = X·W_q', P.Qh, labs, row) + table(R.H > 1 ? `K（头 ${head + 1}）` : 'K = X·W_k', P.Kh, labs) + table(R.H > 1 ? `V（头 ${head + 1}）` : 'V = X·W_v', P.Vh, labs);
+        q('[data-mats]')!.innerHTML = m;
+      }
+      // 这一行的逐步计算
+      const t = R.toks, qi = P.Qh[row], dk = R.dk;
+      const vis = (j: number) => !(masked && j > row);
+      let e = `<b>第 ${row + 1} 个词“${esc(t[row])}”作为提问者</b>${R.H > 1 ? `（头 ${head + 1}，每头 ${dk} 维）` : ''}`;
+      e += `<br>① 它的 q = (${qi.map((v) => fmt(v, 2)).join(', ')})`;
+      e += `<br>② 和每个词的 k 做点积：` + P.raw[row].map((v, j) => `q·k<sub>${j + 1}</sub> = ${fmt(v)}`).join('，');
+      e += `<br>③ 除以 √${dk} = ${fmt(Math.sqrt(dk), 3)}：` + P.S[row].map((v) => fmt(v)).join('，');
+      if (masked) e += `<br>④ 因果掩码：排在它后面的 ${n - row - 1} 个词的分数换成 −∞` + (row === n - 1 ? '（它是最后一个，什么也不遮）' : '');
+      e += `<br>${masked ? '⑤' : '④'} softmax 变成权重：` + P.A[row].map((v, j) => (vis(j) ? `${esc(t[j])} ${fmt(v)}` : `${esc(t[j])} 0`)).join('，');
+      const terms = P.A[row].map((a, j) => (a > 0.0005 ? `${fmt(a, 2)}×v<sub>${j + 1}</sub>` : '')).filter(Boolean);
+      e += `<br>${masked ? '⑥' : '⑤'} 输出 = ${terms.join(' + ')} = (${P.O[row].map((v) => fmt(v, 3)).join(', ')})`;
+      if (R.H > 1) e += `<br><span class="ai-faint">两个头的输出拼起来是 ${R.D} 维：(${R.Ocat[row].map((v) => fmt(v, 2)).join(', ')})，再乘 W_o 得到这个词的最终输出 (${R.Oproj[row].map((v) => fmt(v, 2)).join(', ')})</span>`;
+      const mx = Math.max(...P.A[row]), arg = P.A[row].indexOf(mx);
+      e += `<br><span class="ai-faint">${isCopy ? `这一行最大的权重 ${fmt(mx, 2)} 落在第 ${arg + 1} 个词“${esc(t[arg])}”上。` : mx < 0.4 ? '权重分得很平均：TinyLM 的权重是随机的，还没学会“该看谁”。' : ''}</span>`;
+      q('[data-eq]')!.innerHTML = e;
+    }
+
+    fig.addEventListener('click', (ev) => {
+      const t = ev.target as HTMLElement;
+      const r = t.closest<HTMLElement>('[data-row]'), hb = t.closest<HTMLElement>('[data-group="head"] [data-v]');
+      if (r) row = Number(r.dataset.row);
+      else if (hb) { head = Number(hb.dataset.v); fig.querySelectorAll('[data-group="head"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === hb ? 'true' : 'false')); }
+      else return;
+      draw();
+    });
+    fig.addEventListener('change', (ev) => {
+      const t = ev.target as HTMLElement;
+      if (t.matches('[data-mask]')) masked = (t as HTMLInputElement).checked;
+      else if (t.matches('[data-slot]')) pick[Number((t as HTMLSelectElement).dataset.slot)] = Number((t as HTMLSelectElement).value);
+      else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-attview]').forEach(init);
+</script>

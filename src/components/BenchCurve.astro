@@ -1,0 +1,57 @@
+---
+// 吞吐-延迟曲线（数据由第 73 讲的模拟导出：Llama-3-8B + H100，连续批处理 + 分块 prefill，600 个请求按泊松过程到达，
+// 提示 200–2000、输出 50–500 个 token）。每一行：[到达率, 输出吞吐, TTFT 中位, TTFT P99, TPOT 中位, TPOT P99]。
+// 读者可以：拖到达率看这一点的各项指标；调 SLO（TTFT P99、TPOT P99 的上限），看满足 SLO 的最大到达率（goodput）。
+interface Props { title?: string; caption?: string }
+const { title = '加压：吞吐和延迟怎么变', caption } = Astro.props;
+const DATA = [[2, 546, 19.6, 38.6, 5.1, 5.56], [4, 1084, 20.9, 46.5, 5.38, 5.98], [6, 1612, 21.2, 52.1, 5.68, 6.47], [8, 2130, 21.9, 59.9, 6.03, 6.88], [10, 2639, 22.8, 64.6, 6.43, 7.35], [12, 3138, 23.3, 64.8, 6.88, 8.05], [14, 3625, 24.4, 67.4, 7.32, 8.57], [16, 4099, 25.0, 74.3, 7.9, 9.24], [18, 4561, 26.1, 78.0, 8.48, 10.12], [20, 5011, 26.9, 81.9, 9.15, 11.08], [22, 5445, 28.2, 87.9, 9.97, 12.22], [24, 5863, 29.8, 99.5, 10.94, 13.18], [26, 6255, 31.6, 102.0, 12.07, 14.28], [28, 6624, 33.5, 117.8, 13.28, 16.12], [30, 6972, 35.7, 130.8, 14.6, 17.61], [32, 7296, 39.0, 142.1, 16.05, 19.34], [34, 7590, 42.5, 151.5, 17.3, 20.47], [36, 7853, 46.2, 164.6, 18.42, 21.79], [38, 8089, 52.7, 169.7, 19.82, 23.47], [40, 8316, 59.2, 196.7, 21.03, 25.24], [42, 8454, 73.6, 579.4, 22.0, 26.49], [44, 8529, 103.9, 1109.5, 22.54, 26.98], [46, 8612, 119.4, 1497.0, 22.85, 26.49], [48, 8679, 152.5, 1910.9, 23.07, 27.09], [50, 8660, 211.1, 2473.6, 23.24, 27.71], [52, 8721, 248.0, 2751.5, 23.08, 28.58], [54, 8762, 328.3, 3115.6, 23.12, 29.76], [56, 8750, 590.8, 3521.9, 23.28, 31.86], [58, 8759, 742.8, 3865.2, 23.3, 31.86], [60, 8780, 906.3, 4176.1, 23.24, 31.86]];
+---
+<figure class="ai-gt ai-bc" data-benchcurve data-pts={JSON.stringify(DATA)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>到达率 = <b data-rv></b> 个/s</span><input type="range" min="0" max="29" step="1" value="19" data-r /></label>
+    <label class="ai-tl-lr"><span>SLO：TTFT P99 ≤ <b data-av></b> ms</span><input type="range" min="50" max="2000" step="50" value="500" data-a /></label>
+    <label class="ai-tl-lr"><span>SLO：TPOT P99 ≤ <b data-bv></b> ms</span><input type="range" min="8" max="40" step="1" value="30" data-b /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const P: number[][] = JSON.parse(fig.dataset.pts!);
+    const [rIn, aIn, bIn] = ['r', 'a', 'b'].map((k) => fig.querySelector<HTMLInputElement>(`[data-${k}]`)!);
+    const X0 = 50, X1 = 285, xs = (r: number) => X0 + (r / 60) * (X1 - X0);
+    function panel(off: number, title: string, ys: (v: number) => number, ticks: [number, string][], series: [number, string][], lim: [number, string][]) {
+      let s = `<g transform="translate(${off},0)"><text class="ai-np-ptitle" x="${X0}" y="12">${title}</text>`;
+      s += `<line class="ai-bc-ax" x1="${X0}" y1="170" x2="${X1}" y2="170"/><line class="ai-bc-ax" x1="${X0}" y1="22" x2="${X0}" y2="170"/>`;
+      for (const [v, lab] of ticks) s += `<text class="ai-al-gl" x="${X0 - 4}" y="${ys(v) + 3}" text-anchor="end">${lab}</text><line class="ai-bc-grid" x1="${X0}" x2="${X1}" y1="${ys(v)}" y2="${ys(v)}"/>`;
+      for (const r of [0, 20, 40, 60]) s += `<text class="ai-al-gl" x="${xs(r)}" y="183" text-anchor="middle">${r}</text>`;
+      for (const [v, cls] of lim) s += `<line class="ai-bc-slo ${cls}" x1="${X0}" x2="${X1}" y1="${ys(v)}" y2="${ys(v)}"/>`;
+      for (const [col, cls] of series) s += `<polyline class="ai-bc-line ${cls}" points="${P.map((p) => `${xs(p[0])},${ys(p[col])}`).join(' ')}"/>`;
+      return s;
+    }
+    function draw() {
+      const k = Number(rIn.value), p = P[k], A = Number(aIn.value), Bv = Number(bIn.value);
+      fig.querySelector('[data-rv]')!.textContent = String(p[0]); fig.querySelector('[data-av]')!.textContent = String(A); fig.querySelector('[data-bv]')!.textContent = String(Bv);
+      const ok = (q: number[]) => q[3] <= A && q[5] <= Bv;
+      let good = -1; for (let i = 0; i < P.length; i++) { if (ok(P[i])) good = i; else break; }
+      const yT = (v: number) => 170 - (v / 10000) * 148;
+      const yL = (v: number) => 170 - (Math.log10(Math.max(v, 3)) - Math.log10(3)) / (Math.log10(10000) - Math.log10(3)) * 148;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 192">';
+      s += panel(0, '输出吞吐（token/s）', yT, [[0, '0'], [5000, '5k'], [10000, '10k']], [[1, 'c-acc']], []);
+      if (good >= 0) s += `<rect class="ai-bc-good" x="${X0}" y="22" width="${xs(P[good][0]) - X0}" height="148"/>`;
+      s += `<circle class="ai-bc-dot" cx="${xs(p[0])}" cy="${yT(p[1])}" r="4"/></g>`;
+      s += panel(300, '延迟（ms，对数坐标）：TTFT P99 / TPOT P99', yL, [[10, '10'], [100, '100'], [1000, '1000'], [10000, '1e4']], [[3, 'c-key'], [5, 'c-acc']], [[A, 'c-key'], [Bv, 'c-acc']]);
+      s += `<circle class="ai-bc-dot" cx="${xs(p[0])}" cy="${yL(p[3])}" r="4"/><circle class="ai-bc-dot" cx="${xs(p[0])}" cy="${yL(p[5])}" r="4"/></g>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `到达率 ${p[0]} 个/s：输出吞吐 ${p[1].toLocaleString()} token/s，TTFT 中位 ${p[2]} ms、P99 ${p[3]} ms，TPOT 中位 ${p[4]} ms、P99 ${p[5]} ms ${ok(p) ? '→ 满足 SLO' : '→ <b>不满足 SLO</b>'}`
+        + `<br>满足 SLO 的最大到达率：${good >= 0 ? `${P[good][0]} 个/s，此时吞吐 ${P[good][1].toLocaleString()} token/s（goodput，左图的阴影）` : '没有（SLO 太严）'}。`
+        + '<br><span class="ai-faint">吞吐先随压力线性增长，到四十多个/s 时饱和；再加压，吞吐几乎不涨，请求开始排队，TTFT 一下子涨了一两个数量级。</span>';
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-benchcurve]').forEach(init);
+</script>

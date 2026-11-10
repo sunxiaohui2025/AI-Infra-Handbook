@@ -1,0 +1,58 @@
+---
+// CUDA 的线程网格映射到矩阵：每个线程负责矩阵的一个元素。
+// 网格 = gridDim.y × gridDim.x 个块，每块 blockDim.y × blockDim.x 个线程；线程 (blockIdx, threadIdx) 负责
+//   row = blockIdx.y × blockDim.y + threadIdx.y，col = blockIdx.x × blockDim.x + threadIdx.x，越界的线程什么也不做。
+// 块内的线程按 threadIdx.y × blockDim.x + threadIdx.x 的顺序每 32 个编成一个 warp，同一个 warp 一起执行同一条指令。
+// 读者可以：调矩阵大小、块的形状；点一个格子看它由哪个块的哪个线程负责、属于哪个 warp。
+interface Props { title?: string; caption?: string }
+const { title = '线程网格怎么盖住一个矩阵', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cu" data-cudagrid>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>矩阵 <b data-mv></b> 行</span><input type="range" min="4" max="24" step="1" value="20" data-m /></label>
+    <label class="ai-tl-lr"><span>矩阵 <b data-nv></b> 列</span><input type="range" min="4" max="36" step="1" value="30" data-n /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="b"><span class="ai-tl-k">每块（行 × 列）：</span><button data-v="8x8" aria-pressed="true">8 × 8</button><button data-v="4x16" aria-pressed="false">4 × 16</button><button data-v="16x16" aria-pressed="false">16 × 16</button><button data-v="1x32" aria-pressed="false">1 × 32</button></div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    let by = 8, bx = 8, sel = [9, 13];
+    const mIn = fig.querySelector<HTMLInputElement>('[data-m]')!, nIn = fig.querySelector<HTMLInputElement>('[data-n]')!;
+    function draw() {
+      const M = Number(mIn.value), N = Number(nIn.value);
+      fig.querySelector('[data-mv]')!.textContent = String(M); fig.querySelector('[data-nv]')!.textContent = String(N);
+      const gy = Math.ceil(M / by), gx = Math.ceil(N / bx), R = gy * by, C = gx * bx;
+      if (sel[0] >= R || sel[1] >= C) sel = [0, 0];
+      const cs = Math.min(16, Math.floor(560 / C), Math.floor(380 / R)), W = C * cs + 30, H = R * cs + 24;
+      const [sr, sc] = sel, sb = [Math.floor(sr / by), Math.floor(sc / bx)], st = [sr % by, sc % bx], lin = st[0] * bx + st[1], warp = Math.floor(lin / 32);
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 ${W} ${H}" style="max-width:${W * 1.1}px">`;
+      for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+        const b = [Math.floor(r / by), Math.floor(c / bx)], t = [r % by, c % bx], out = r >= M || c >= N;
+        const sameBlock = b[0] === sb[0] && b[1] === sb[1], sameWarp = sameBlock && Math.floor((t[0] * bx + t[1]) / 32) === warp;
+        const hue = ((b[0] * gx + b[1]) * 47) % 360;
+        s += `<rect class="ai-cu-c${out ? ' is-out' : ''}${sameWarp ? ' is-warp' : ''}${r === sr && c === sc ? ' is-sel' : ''}" style="--h:${hue}" data-rc="${r},${c}" x="${24 + c * cs}" y="${4 + r * cs}" width="${cs - 1}" height="${cs - 1}"/>`;
+      }
+      s += `<rect class="ai-cu-mat" x="23.5" y="3.5" width="${N * cs}" height="${M * cs}"/>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const total = R * C, warps = Math.ceil(by * bx / 32);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `网格 gridDim = (${gy}, ${gx})，共 ${gy * gx} 个块；每块 blockDim = (${by}, ${bx}) = ${by * bx} 个线程（${warps} 个 warp）；一共 ${total} 个线程，${total - M * N} 个越界（灰色），什么也不做。`
+        + `<br>选中的格子 (${sr}, ${sc})：blockIdx = (${sb[0]}, ${sb[1]})，threadIdx = (${st[0]}, ${st[1]})`
+        + `<br>row = ${sb[0]} × ${by} + ${st[0]} = ${sr}，col = ${sb[1]} × ${bx} + ${st[1]} = ${sc}${sr >= M || sc >= N ? '　→ 越界，跳过' : ''}`
+        + `<br><span class="ai-faint">深色框出的是和它同一个 warp 的 32 个线程（块内编号 ${lin}，第 ${warp} 个 warp）：它们同时执行同一条指令。1 × 32 的块里，一个 warp 正好是一整行，读相邻的 32 个元素，显存访问最整齐。</span>`;
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element, b = t.closest<HTMLElement>('[data-group="b"] [data-v]'), c = t.closest<SVGRectElement>('[data-rc]');
+      if (b) { [by, bx] = b.dataset.v!.split('x').map(Number); fig.querySelectorAll('[data-group="b"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); }
+      else if (c) sel = c.dataset.rc!.split(',').map(Number); else return;
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-cudagrid]').forEach(init);
+</script>

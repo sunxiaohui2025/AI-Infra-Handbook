@@ -1,0 +1,57 @@
+---
+// 生成一个新 token 时，注意力部分的代价随上下文长度 n 怎么变（对数坐标）。
+//   普通（softmax）注意力：和前面 n 个 token 都打分，~ n·d，KV Cache ~ n·d；
+//   线性注意力 / 状态空间模型：只更新、读取一个 d×d 的状态，~ d²，和 n 无关；
+//   混合：每 r 层里有 1 层是普通注意力，其余是线性的。
+// 读者可以：调每头维度 d、混合比例，看三条曲线和交叉点。
+interface Props { title?: string; caption?: string }
+const { title = '上下文越长，差距越大', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cx" data-complexity>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="d"><span class="ai-tl-k">每头维度 d</span>{[64, 128, 256].map((v) => <button data-v={v} aria-pressed={v === 128 ? 'true' : 'false'}>{v}</button>)}</div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="r"><span class="ai-tl-k">混合：每几层有 1 层普通注意力</span>{[2, 4, 8].map((v) => <button data-v={v} aria-pressed={v === 8 ? 'true' : 'false'}>{v}</button>)}</div>
+  </div>
+  <svg class="ai-tl-svg" viewBox="0 0 560 240" data-svg role="img" aria-label={title}></svg>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const sci = (v: number) => { const e = Math.floor(Math.log10(v)); return `${(v / 10 ** e).toFixed(1)}×10^${e}`; };
+  function init(fig: HTMLElement) {
+    let d = 128, r = 8;
+    function draw() {
+      const n0 = 2 ** 8, n1 = 2 ** 20, L = 56, R = 548, T = 14, B = 200;
+      const soft = (n: number) => n * d, lin = () => d * d, mix = (n: number) => (soft(n) + (r - 1) * lin()) / r;
+      const lo = Math.log10(Math.min(lin(), soft(n0)) / 2), hi = Math.log10(soft(n1) * 2);
+      const X = (n: number) => L + (Math.log2(n) - 8) / 12 * (R - L), Y = (v: number) => B - (Math.log10(v) - lo) / (hi - lo) * (B - T);
+      const ns = Array.from({ length: 61 }, (_, i) => 2 ** (8 + i * 0.2));
+      const path = (f: (n: number) => number, cls: string) => `<path class="${cls}" d="${ns.map((n, i) => `${i ? 'L' : 'M'}${X(n).toFixed(1)} ${Y(f(n)).toFixed(1)}`).join(' ')}"/>`;
+      let s = '<g class="ai-vp-grid">';
+      for (let p = 8; p <= 20; p += 2) s += `<line x1="${X(2 ** p)}" y1="${T}" x2="${X(2 ** p)}" y2="${B}"/>`;
+      s += '</g><g class="ai-vp-tick">';
+      for (let p = 8; p <= 20; p += 2) s += `<text x="${X(2 ** p)}" y="${B + 14}" text-anchor="middle">${2 ** p >= 1024 ? 2 ** p / 1024 + 'K' : 2 ** p}</text>`;
+      s += `<text x="${L - 4}" y="${T + 8}" text-anchor="end">多</text><text x="${L - 4}" y="${B}" text-anchor="end">少</text></g>`;
+      s += path(soft, 'ai-cx-soft') + path(() => lin(), 'ai-cx-lin') + path(mix, 'ai-cx-mix');
+      s += `<line class="ai-al-zl" x1="${X(d)}" y1="${T}" x2="${X(d)}" y2="${B}"/><text class="ai-al-gl" x="${X(d) + 4}" y="${T + 10}">n = d = ${d}</text>`;
+      s += `<text class="ai-al-lab" x="${R}" y="${T + 6}" text-anchor="end"><tspan class="c-key">— 普通注意力 n·d</tspan>　<tspan class="c-accent">— 线性 d²</tspan>　<tspan class="ai-cx-mix-t">— 混合（1/${r}）</tspan></text>`;
+      s += `<text class="ai-al-gl" x="${R}" y="${B - 4}" text-anchor="end">上下文长度 n →</text>`;
+      fig.querySelector('[data-svg]')!.innerHTML = s;
+      const n = 131072;
+      fig.querySelector('[data-eq]')!.innerHTML = `生成一个新 token 时，每层每头注意力的代价（同时也正比于要存的东西）：n = ${n.toLocaleString()} 时，普通注意力 ${sci(soft(n))}，线性 ${sci(lin())}，差 ${Math.round(soft(n) / lin())} 倍；混合（每 ${r} 层 1 层普通）是普通注意力的 1/${(soft(n) / mix(n)).toFixed(1)}。`
+        + `<br><span class="ai-faint">上下文短于 d（${d}）时，线性注意力反而更贵；越长，它的优势越大。混合架构的总代价主要由那几层普通注意力决定。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]');
+      if (!b) return;
+      const g = (b.parentElement as HTMLElement).dataset.group;
+      if (g === 'd') d = Number(b.dataset.v); else r = Number(b.dataset.v);
+      b.parentElement!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-complexity]').forEach(init);
+</script>

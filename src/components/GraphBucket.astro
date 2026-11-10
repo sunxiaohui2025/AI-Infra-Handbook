@@ -1,0 +1,47 @@
+---
+// CUDA Graph 的档位（与 nano-vllm engine/model_runner.py 的 capture_cudagraph、run_model 相同）：
+//   graph_bs = [1, 2, 4, 8] + [16, 32, …, max_bs]，max_bs = min(max_num_seqs, 512)；
+//   decode 时取第一个 ≥ 实际 batch 的档位重放；prefill 不用图。max_num_seqs 不是 16 的倍数时，最大的几个 batch 找不到档位（源码会抛 StopIteration）。
+// 读者可以：拖动这一步 decode 的请求数，看用哪张图、补了几行空位；改 max_num_seqs，看一共要录多少张图。
+interface Props { title?: string; caption?: string }
+const { title = 'decode 用哪一张图', caption } = Astro.props;
+---
+<figure class="ai-gt ai-gb" data-graphbucket>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-k">这一步 decode 的请求数 <input type="range" min="1" max="512" value="37" data-bs /> <b data-bsv></b></label>
+    <label class="ai-tl-k">max_num_seqs <input type="range" min="8" max="512" step="8" value="512" data-mx /> <b data-mxv></b></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const bsI = fig.querySelector<HTMLInputElement>('[data-bs]')!, mxI = fig.querySelector<HTMLInputElement>('[data-mx]')!;
+    function draw() {
+      const mx = +mxI.value, maxBs = Math.min(mx, 512);
+      bsI.max = String(Math.max(mx, 1)); const bs = Math.min(+bsI.value, mx);
+      const graphs = [1, 2, 4, 8]; for (let x = 16; x <= maxBs; x += 16) graphs.push(x);
+      const use = graphs.find((g) => g >= bs) ?? null;
+      fig.querySelector('[data-bsv]')!.textContent = String(bs);
+      fig.querySelector('[data-mxv]')!.textContent = String(mx);
+      const W = 880, H = 70, n = graphs.length, cw = Math.min(28, (W - 20) / n);
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 ${W} ${H + 30}">`;
+      graphs.forEach((g, i) => {
+        const x = 10 + i * cw, h = 8 + (H - 8) * Math.sqrt(g / 512), on = g === use;
+        s += `<rect x="${x}" y="${H - h}" width="${cw - 3}" height="${h}" rx="2" class="${on ? 'ai-gb-on' : 'ai-gb-bar'}"><title>batch ${g} 的图</title></rect>`;
+        if (on || i < 5 || i === n - 1) s += `<text class="ai-al-gl" x="${x + (cw - 3) / 2}" y="${H + 14}" text-anchor="middle">${g}</text>`;
+      });
+      s += `<text class="ai-al-gl" x="10" y="${H + 28}">一共 ${n} 张图（${n <= 4 ? '1、2、4、8' : '1、2、4、8，再每 16 一档到 ' + maxBs}），从大到小依次录制，共用一个显存池</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = use === null
+        ? `${bs} 个请求：没有不小于 ${bs} 的档位（最大的一张图是 ${graphs[n - 1]}）。nano-vllm 在这里用 <code>next(x for x in self.graph_bs if x >= bs)</code> 找档位，找不到会抛出 StopIteration。max_num_seqs 不是 16 的倍数（又大于 16）时就会碰到这个边界情况。`
+        : `${bs} 个请求 → 用 batch <b>${use}</b> 的图，补 ${use - bs} 行空位（slot_mapping 填 −1、context_lens 填 0），多算了 ${((use - bs) / use * 100).toFixed(0)}% 的行。decode 时线性层是读权重受限的，多算几行几乎不花时间；省下的是几百次 kernel 发射。`;
+    }
+    bsI.addEventListener('input', draw); mxI.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-graphbucket]').forEach(init);
+</script>

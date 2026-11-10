@@ -1,0 +1,243 @@
+---
+// Loss 曲面：用直线 ŷ = w·x + b 拟合 4 个点，损失是均方误差 L(w, b)。
+//   data="reg"   ：x = (0, 1, 2, 3)，y = (1, 3, 4, 6)，最优点 (1.6, 1.1)，碗比较圆
+//   data="shift" ：x 整体加 2 = (2, 3, 4, 5)，y 不变，最优点 (1.6, −2.1)，碗变成狭长的山谷
+//   mode="1d"：只调 w（b 固定在最优值），画 L(w) 抛物线、切线和每一步
+//   mode="2d"：等高线图，可同时跑多个优化器（opts：gd / momentum / adam），比较轨迹
+// 读者可以：调学习率、点“一步”“播放”“重置”、在图上点一下换起点；2d 下可勾选“随机小批量”（每步只用 1 个样本）。
+interface Props {
+  data?: 'reg' | 'shift';
+  mode?: '1d' | '2d';
+  opts?: ('gd' | 'momentum' | 'adam')[];
+  lr?: number;
+  adamLr?: number;
+  start?: [number, number];
+  noise?: boolean;
+  title?: string;
+  caption?: string;
+}
+const {
+  data = 'reg', mode = '2d', opts = ['gd'], lr = mode === '1d' ? 0.05 : 0.1, adamLr = 0.3,
+  start = mode === '1d' ? [0, 1.1] : data === 'reg' ? [-0.5, -2] : [-0.5, 2], noise = false, caption,
+} = Astro.props;
+const { title = mode === '1d' ? '只调一个参数 w：沿着斜率的反方向走' : opts.length > 1 ? '同一个曲面，三种优化器' : '在 loss 曲面上一步步往下走' } = Astro.props;
+const NAME = { gd: opts.length > 1 ? 'SGD' : '梯度下降', momentum: 'Momentum', adam: 'Adam' };
+const lrMax = mode === '1d' ? 0.35 : data === 'reg' ? 0.3 : 0.08;
+---
+<figure class="ai-gt ai-ls" data-losssurf data-cfg={JSON.stringify({ data, mode, opts, start })}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-vp-body">
+    <svg class="ai-vp-svg" viewBox="0 0 360 340" role="img" aria-label={title}></svg>
+    <div class="ai-vp-side">
+      <div class="ai-pc-sl ai-ls-sl">
+        {opts.some((o) => o !== 'adam') && <label><span>学习率 η = <b data-v="lr"></b></span><input type="range" min="0.005" max={lrMax} step="0.005" value={lr} data-s="lr" /></label>}
+        {opts.includes('adam') && <label><span>Adam 的 η = <b data-v="alr"></b></span><input type="range" min="0.02" max="1" step="0.02" value={adamLr} data-s="alr" /></label>}
+      </div>
+      {mode === '2d' && opts.length > 1 && (
+        <div class="ai-ls-legend">{opts.map((o) => <span class={`is-${o}`}>{NAME[o]}</span>)}</div>
+      )}
+      {mode === '2d' && <label class="ai-al-chk"><input type="checkbox" data-noise checked={noise} />随机小批量：每步只用 1 个样本算梯度</label>}
+      <div class="ai-vp-read" data-read></div>
+    </div>
+  </div>
+  <div class="ai-gt-play">
+    <button class="ai-pill ai-pill--solid" data-act="step">走一步</button>
+    <button class="ai-pill" data-act="play">▶ 连续走</button>
+    <button class="ai-pill" data-act="reset">重置</button>
+    <span class="ai-ms-count" data-count></span>
+  </div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Opt = 'gd' | 'momentum' | 'adam';
+  interface Run { opt: Opt; th: [number, number]; path: [number, number][]; m: [number, number]; v: [number, number]; t: number; dead: boolean; last: string }
+  const fmt = (v: number, d = 3) => { if (!isFinite(v)) return '∞'; const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const par = (v: number, d = 3) => (v < 0 ? '(' + fmt(v, d) + ')' : fmt(v, d));
+  const YS = [1, 3, 4, 6];
+
+  function init(fig: HTMLElement) {
+    const cfg = JSON.parse(fig.dataset.cfg!);
+    const XS = cfg.data === 'reg' ? [0, 1, 2, 3] : [2, 3, 4, 5];
+    const BSTAR = cfg.data === 'reg' ? 1.1 : -2.1;
+    const is1d = cfg.mode === '1d';
+    const opts: Opt[] = cfg.opts;
+    const NAME: Record<Opt, string> = { gd: opts.length > 1 ? 'SGD' : '梯度下降', momentum: 'Momentum', adam: 'Adam' };
+    const svg = fig.querySelector<SVGSVGElement>('svg')!;
+    const read = fig.querySelector<HTMLElement>('[data-read]')!;
+    const countEl = fig.querySelector<HTMLElement>('[data-count]')!;
+    const noiseEl = fig.querySelector<HTMLInputElement>('[data-noise]');
+    const lrIn = fig.querySelector<HTMLInputElement>('[data-s="lr"]');
+    const alrIn = fig.querySelector<HTMLInputElement>('[data-s="alr"]');
+    const playBtn = fig.querySelector<HTMLButtonElement>('[data-act="play"]')!;
+    let start: [number, number] = [...cfg.start];
+    let runs: Run[] = [];
+    let step = 0, timer = 0, seed = 7;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+
+    const loss = (w: number, b: number, idx = [0, 1, 2, 3]) => idx.reduce((s, i) => s + (w * XS[i] + b - YS[i]) ** 2, 0) / idx.length;
+    const grad = (w: number, b: number, idx = [0, 1, 2, 3]): [number, number] => {
+      let gw = 0, gb = 0;
+      for (const i of idx) { const r = w * XS[i] + b - YS[i]; gw += 2 * r * XS[i]; gb += 2 * r; }
+      return [gw / idx.length, gb / idx.length];
+    };
+    const LMIN = loss(1.6, BSTAR);
+
+    // 视图范围
+    const [W0, W1] = [-1, 4];
+    const [B0, B1] = cfg.data === 'reg' ? [-3, 5] : [-6, 4];
+    const L = 40, R = 350, T = 12, B = 300;
+    const PX = (w: number) => L + (w - W0) / (W1 - W0) * (R - L);
+    const PY2 = (b: number) => B - (b - B0) / (B1 - B0) * (B - T);
+    const L1MAX = 10;
+    const PY1 = (l: number) => B - Math.min(l, L1MAX * 1.2) / L1MAX * (B - T);
+
+    function reset() {
+      runs = opts.map((o) => ({ opt: o, th: [...start] as [number, number], path: [[...start] as [number, number]], m: [0, 0], v: [0, 0], t: 0, dead: false, last: '' }));
+      step = 0; seed = 7;
+    }
+
+    function doStep() {
+      step++;
+      const noisy = !!noiseEl?.checked;
+      const idx = noisy ? [Math.floor(rnd() * 4)] : [0, 1, 2, 3];
+      const lr = lrIn ? parseFloat(lrIn.value) : 0.1, alr = alrIn ? parseFloat(alrIn.value) : 0.3;
+      for (const r of runs) {
+        if (r.dead) continue;
+        let g = grad(r.th[0], is1d ? BSTAR : r.th[1], idx);
+        if (is1d) g = [g[0], 0];
+        const old = [...r.th];
+        r.t++;
+        if (r.opt === 'gd') {
+          r.th = [r.th[0] - lr * g[0], r.th[1] - lr * g[1]];
+          r.last = is1d
+            ? `斜率 dL/dw = ${fmt(g[0])}<br>w ← w − η · 斜率 = ${fmt(old[0])} − ${fmt(lr)} × ${par(g[0])} = <b>${fmt(r.th[0])}</b>`
+            : `梯度 ∇L = (${fmt(g[0])}, ${fmt(g[1])})${noisy ? `　只用了样本 ${idx[0] + 1}：(${XS[idx[0]]}, ${YS[idx[0]]})` : ''}<br>(w, b) ← (${fmt(old[0])}, ${fmt(old[1])}) − ${fmt(lr)} × (${fmt(g[0])}, ${fmt(g[1])}) = <b>(${fmt(r.th[0])}, ${fmt(r.th[1])})</b>`;
+        } else if (r.opt === 'momentum') {
+          r.m = [0.9 * r.m[0] + g[0], 0.9 * r.m[1] + g[1]];
+          r.th = [r.th[0] - lr * r.m[0], r.th[1] - lr * r.m[1]];
+          r.last = `速度 v ← 0.9 · v + 梯度 = (${fmt(r.m[0])}, ${fmt(r.m[1])})`;
+        } else {
+          r.m = [0.9 * r.m[0] + 0.1 * g[0], 0.9 * r.m[1] + 0.1 * g[1]];
+          r.v = [0.999 * r.v[0] + 0.001 * g[0] ** 2, 0.999 * r.v[1] + 0.001 * g[1] ** 2];
+          const c1 = 1 - 0.9 ** r.t, c2 = 1 - 0.999 ** r.t;
+          const u = [0, 1].map((k) => (r.m[k] / c1) / (Math.sqrt(r.v[k] / c2) + 1e-8));
+          r.th = [r.th[0] - alr * u[0], r.th[1] - alr * u[1]];
+          r.last = `每个参数的步长 ≈ η × (${fmt(u[0], 2)}, ${fmt(u[1], 2)})`;
+        }
+        r.path.push([...r.th] as [number, number]);
+        if (!isFinite(r.th[0]) || Math.abs(r.th[0]) > 1e4 || Math.abs(r.th[1]) > 1e4) r.dead = true;
+      }
+    }
+
+    // 等高线（marching squares）只在初始化时算一次
+    let contour = '';
+    if (!is1d) {
+      const N = 90, G: number[][] = [];
+      for (let i = 0; i <= N; i++) { G.push([]); for (let j = 0; j <= N; j++) G[i].push(loss(W0 + (W1 - W0) * j / N, B0 + (B1 - B0) * i / N)); }
+      const levels = Array.from({ length: 12 }, (_, k) => LMIN + 0.08 * 1.75 ** k);
+      for (const lv of levels) {
+        let d = '';
+        for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+          const v = [G[i][j], G[i][j + 1], G[i + 1][j + 1], G[i + 1][j]];
+          const P = [[j, i], [j + 1, i], [j + 1, i + 1], [j, i + 1]];
+          const pts: [number, number][] = [];
+          for (let e = 0; e < 4; e++) {
+            const a = v[e], c = v[(e + 1) % 4];
+            if ((a < lv) !== (c < lv)) {
+              const t = (lv - a) / (c - a), pa = P[e], pc = P[(e + 1) % 4];
+              const gj = pa[0] + t * (pc[0] - pa[0]), gi = pa[1] + t * (pc[1] - pa[1]);
+              pts.push([PX(W0 + (W1 - W0) * gj / N), PY2(B0 + (B1 - B0) * gi / N)]);
+            }
+          }
+          for (let k = 0; k + 1 < pts.length; k += 2) d += `M${pts[k][0].toFixed(1)} ${pts[k][1].toFixed(1)}L${pts[k + 1][0].toFixed(1)} ${pts[k + 1][1].toFixed(1)}`;
+        }
+        contour += `<path class="ai-ls-ct" d="${d}"/>`;
+      }
+    }
+
+    function draw() {
+      const lr = lrIn ? parseFloat(lrIn.value) : 0;
+      if (lrIn) fig.querySelector('[data-v="lr"]')!.textContent = fmt(lr);
+      if (alrIn) fig.querySelector('[data-v="alr"]')!.textContent = fmt(parseFloat(alrIn.value), 2);
+      let s = `<defs><clipPath id="ls-${fig.dataset.uid}"><rect x="${L}" y="${T}" width="${R - L}" height="${B - T}"/></clipPath></defs>`;
+      s += `<g class="ai-vp-axis"><line x1="${L}" y1="${B}" x2="${R}" y2="${B}"/><line x1="${L}" y1="${T}" x2="${L}" y2="${B}"/></g><g class="ai-vp-tick">`;
+      for (let w = W0; w <= W1; w++) s += `<text x="${PX(w)}" y="${B + 14}" text-anchor="middle">${fmt(w)}</text>`;
+      if (is1d) for (let l = 0; l <= L1MAX; l += 2) s += `<text x="${L - 5}" y="${PY1(l) + 3}" text-anchor="end">${l}</text>`;
+      else for (let b = B0; b <= B1; b += 2) s += `<text x="${L - 5}" y="${PY2(b) + 3}" text-anchor="end">${fmt(b)}</text>`;
+      s += `</g><text class="ai-vp-axlabel" x="${R}" y="${B - 6}" text-anchor="end">w →</text><text class="ai-vp-axlabel" x="${L + 6}" y="${T + 10}">${is1d ? `↑ L(w)　b 固定为 ${fmt(BSTAR)}` : '↑ b'}</text>`;
+      s += `<g clip-path="url(#ls-${fig.dataset.uid})">`;
+      if (is1d) {
+        let d = '';
+        for (let i = 0; i <= 200; i++) { const w = W0 + (W1 - W0) * i / 200; d += `${i ? 'L' : 'M'}${PX(w).toFixed(1)} ${PY1(loss(w, BSTAR)).toFixed(1)} `; }
+        s += `<path class="ai-al-f" d="${d}"/>`;
+        const r = runs[0], w = r.th[0];
+        if (!r.dead) {
+          const g = grad(w, BSTAR)[0], l0 = loss(w, BSTAR);
+          s += `<line class="ai-al-tan" x1="${PX(w - 0.6)}" y1="${PY1(l0 - 0.6 * g)}" x2="${PX(w + 0.6)}" y2="${PY1(l0 + 0.6 * g)}"/>`;
+        }
+        for (let k = 1; k < r.path.length; k++) {
+          const a = r.path[k - 1][0], c = r.path[k][0];
+          s += `<line class="ai-ls-hop" x1="${PX(a)}" y1="${PY1(loss(a, BSTAR))}" x2="${PX(c)}" y2="${PY1(loss(c, BSTAR))}"/>`;
+        }
+        r.path.forEach(([pw], k) => { s += `<circle class="ai-ls-pt${k === r.path.length - 1 ? ' is-cur' : ''}" cx="${PX(pw)}" cy="${PY1(loss(pw, BSTAR))}" r="${k === r.path.length - 1 ? 5 : 3}"/>`; });
+        s += `<line class="ai-al-zl" x1="${PX(1.6)}" y1="${T}" x2="${PX(1.6)}" y2="${B}"/>`;
+      } else {
+        s += contour + `<circle class="ai-ls-min" cx="${PX(1.6)}" cy="${PY2(BSTAR)}" r="4"/>`;
+        for (const r of runs) {
+          const d = r.path.map(([w, b], k) => `${k ? 'L' : 'M'}${PX(w).toFixed(1)} ${PY2(b).toFixed(1)}`).join(' ');
+          s += `<path class="ai-ls-path is-${r.opt}" d="${d}"/>`;
+          r.path.forEach(([w, b], k) => { if (k % Math.max(1, Math.floor(r.path.length / 60)) === 0 || k === r.path.length - 1) s += `<circle class="ai-ls-dot is-${r.opt}" cx="${PX(w)}" cy="${PY2(b)}" r="${k === r.path.length - 1 ? 4.5 : 2}"/>`; });
+        }
+        s += `<circle class="ai-ls-start" cx="${PX(start[0])}" cy="${PY2(start[1])}" r="5"/>`;
+      }
+      s += `</g><rect class="ai-ls-hit" x="${L}" y="${T}" width="${R - L}" height="${B - T}"/>`;
+      svg.innerHTML = s;
+
+      countEl.textContent = `已走 ${step} 步`;
+      let h = '';
+      if (is1d) {
+        const r = runs[0], w = r.th[0];
+        h += `<div class="ai-vp-row"><span>当前</span><div>w = ${fmt(w)}，L = ${fmt(loss(w, BSTAR), 4)}</div></div>`;
+        if (r.last && !r.dead) h += `<div class="ai-vp-row"><span>这一步</span><div>${r.last}</div></div>`;
+        const crit = 2 / 7;
+        h += `<div class="ai-vp-row ai-vp-hint">${r.dead ? '<b>发散了</b>：每一步都跳过了谷底，而且越跳越远。' : lr > crit ? `η 超过了 2/7 ≈ 0.286：每一步都会跳到对面更高的地方，越跳越远。` : lr > 1 / 7 ? 'η 在 1/7 和 2/7 之间：每一步都跳过谷底，在两边来回震荡，但越来越靠近。' : 'η 比较小：一步一步从同一侧往谷底挪，越靠近谷底步子越小（因为斜率越来越小）。'}</div>`;
+      } else {
+        h += `<table class="ai-vp-tbl"><thead><tr><th>${opts.length > 1 ? '优化器' : ''}</th><th>(w, b)</th><th>L</th></tr></thead><tbody>`;
+        for (const r of runs) h += `<tr><td class="ai-ls-name is-${r.opt}">${NAME[r.opt]}</td><td>${r.dead ? '发散' : `(${fmt(r.th[0], 2)}, ${fmt(r.th[1], 2)})`}</td><td>${r.dead ? '∞' : fmt(loss(r.th[0], r.th[1]), 4)}</td></tr>`;
+        h += `</tbody></table>`;
+        if (opts.length === 1 && runs[0].last && !runs[0].dead) h += `<div class="ai-vp-row ai-ls-step"><div>${runs[0].last}</div></div>`;
+        else if (opts.length > 1) for (const r of runs) if (r.last && r.opt !== 'gd' && !r.dead) h += `<div class="ai-vp-row ai-ls-step"><div><b class="ai-ls-name is-${r.opt}">${NAME[r.opt]}</b>　${r.last}</div></div>`;
+        h += `<div class="ai-vp-row ai-vp-hint">最低点在 (1.6, ${fmt(BSTAR)})，L = ${fmt(LMIN, 2)}（实心小圆）。等高线越密，坡越陡。点图上任意位置换起点。</div>`;
+      }
+      read.innerHTML = h;
+    }
+
+    const stop = () => { clearInterval(timer); timer = 0; playBtn.textContent = '▶ 连续走'; };
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as HTMLElement).closest<HTMLElement>('[data-act]');
+      if (!b) return;
+      const a = b.dataset.act;
+      if (a === 'step') { stop(); doStep(); }
+      else if (a === 'reset') { stop(); reset(); }
+      else if (a === 'play') {
+        if (timer) { stop(); return; }
+        playBtn.textContent = '❚❚ 暂停';
+        timer = window.setInterval(() => { doStep(); draw(); if (step >= 300 || runs.every((r) => r.dead)) stop(); }, is1d ? 450 : 90);
+      }
+      draw();
+    });
+    fig.addEventListener('input', (e) => { if ((e.target as HTMLElement).dataset.s || (e.target as HTMLElement).dataset.noise !== undefined) { stop(); reset(); draw(); } });
+    svg.addEventListener('pointerdown', (e) => {
+      if (!(e.target as SVGElement).classList.contains('ai-ls-hit')) return;
+      const pt = new DOMPoint(e.clientX, e.clientY).matrixTransform(svg.getScreenCTM()!.inverse());
+      const w = Math.round((W0 + (pt.x - L) / (R - L) * (W1 - W0)) * 10) / 10;
+      const bb = Math.round((B0 + (B - pt.y) / (B - T) * (B1 - B0)) * 10) / 10;
+      start = is1d ? [w, BSTAR] : [w, bb];
+      stop(); reset(); draw();
+    });
+    reset(); draw();
+  }
+  let n = 0;
+  document.querySelectorAll<HTMLElement>('[data-losssurf]').forEach((f) => { f.dataset.uid = String(n++); init(f); });
+</script>

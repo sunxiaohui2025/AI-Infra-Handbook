@@ -1,0 +1,68 @@
+---
+// 混合部署与 PD 分离的时间线（每步耗时的估算与第 100 讲的代码相同：Llama-3-8B、H100）。
+// 小场景：2 张卡，原本有 16 个请求在 decode（上下文各 1500）；第 10、40、70 ms 各来一个长提示（4000、3000、2000 token）。
+// 混合部署：两张卡各 8 个 decode，长提示轮流分给两张卡，按每步预算 2048 切块和 decode 一起做。
+// PD 分离：卡 0 只做 prefill（每步最多 8192 token），卡 1 跑全部 16 个 decode；prefill 完的 KV 经 50 GB/s 传给卡 1 后加入 decode。
+// 读者可以：切换两种部署，看两张卡每一步的耗时（琥珀 = 这一步带着 prefill），以及某个 decode 请求出 token 的时刻（竖线）。
+interface Props { title?: string; caption?: string }
+const { title = '同样两张卡：混在一起，还是分开', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pd2" data-pdcompare>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-v="mix" aria-pressed="true">混合部署（分块 prefill）</button><button data-v="pd" aria-pressed="false">PD 分离（1 P + 1 D）</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const N = 8.03e9, NE = 128256 * 4096, L = 32, d = 4096, W = 16.06e9, KV = 131072, F = 989e12, BW = 3.35e12, T_END = 0.24;
+  const stepT = (work: [number, number][]) => Math.max(work.reduce((a, [c, p]) => a + 2 * (N - NE) * c + 4 * L * d * c * (p + c / 2), 0) / F, (W + KV * work.reduce((a, [c, p]) => a + p + c, 0)) / BW);
+  const PROMPTS = [[0.01, 4000], [0.04, 3000], [0.07, 2000]];
+  type R = { done: number; p: number; ctx: number; at: number; first?: number; times: number[] };
+  function sim(mode: string) {
+    const gpus = [0, 1].map((g) => ({ t: 0, run: [] as R[], q: [] as R[], steps: [] as { t0: number; t1: number; pre: number }[] }));
+    const dec: R[] = Array.from({ length: 16 }, () => ({ done: 1500, p: 1500, ctx: 1500, at: 0, times: [] }));
+    if (mode === 'mix') dec.forEach((r, i) => gpus[i % 2].run.push(r)); else dec.forEach((r) => gpus[1].run.push(r));
+    const prompts: R[] = PROMPTS.map(([at, p]) => ({ done: 0, p, ctx: 0, at, times: [] })); let pi = 0; const hand: [number, R][] = [];
+    for (let it = 0; it < 2000; it++) {
+      const g = gpus[0].t <= gpus[1].t ? 0 : 1, G = gpus[g], now = G.t; if (now > T_END) break;
+      while (pi < prompts.length && prompts[pi].at <= now) { (mode === 'mix' ? gpus[pi % 2] : gpus[0]).q.push(prompts[pi]); pi++; }
+      for (const h of hand.filter((h) => h[0] <= now)) { hand.splice(hand.indexOf(h), 1); gpus[1].run.push(h[1]); }
+      const work: [R, number][] = []; let budget = mode === 'mix' ? 2048 : 8192;
+      if (mode === 'mix' || g === 1) for (const r of G.run) { work.push([r, 1]); budget--; }
+      if (mode === 'mix' || g === 0) for (const r of G.q) { if (budget <= 0) break; const c = Math.min(budget, r.p - r.done); work.push([r, c]); budget -= c; }
+      if (!work.length) { const nx = [pi < prompts.length ? prompts[pi].at : Infinity, ...hand.map((h) => h[0]), gpus[1 - g].t]; G.t = Math.max(now + 1e-4, Math.min(...nx)); continue; }
+      const dt = stepT(work.map(([r, c]) => [c, r.ctx])), pre = work.filter(([r]) => r.done < r.p).reduce((a, [, c]) => a + c, 0);
+      G.t = now + dt; G.steps.push({ t0: now, t1: G.t, pre });
+      for (const [r, c] of work) {
+        if (r.done < r.p) { r.done += c; r.ctx += c; if (r.done >= r.p) { G.q.splice(G.q.indexOf(r), 1); r.first = G.t; if (mode === 'mix') G.run.push(r); else hand.push([G.t + r.p * KV / 50e9, r]); } }
+        else { r.ctx++; r.times.push(G.t); }
+      }
+    }
+    return { gpus, track: dec[0], prompts };
+  }
+  function init(fig: HTMLElement) {
+    let mode = 'mix';
+    function draw() {
+      const r = sim(mode), X0 = 60, Wd = 530, sx = Wd / T_END;
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 600 150">';
+      r.gpus.forEach((G, g) => {
+        const y = 10 + g * 40;
+        s += `<text class="ai-al-gl" x="${X0 - 6}" y="${y + 17}" text-anchor="end">卡 ${g}${mode === 'pd' ? (g ? '（D）' : '（P）') : ''}</text>`;
+        G.steps.forEach((st) => { if (st.t0 < T_END) s += `<rect class="${st.pre ? 'ai-ck-pre' : 'ai-ck-dec'}" x="${X0 + st.t0 * sx + 0.3}" y="${y}" width="${Math.max(0.5, (Math.min(st.t1, T_END) - st.t0) * sx - 0.6)}" height="26"><title>${((st.t1 - st.t0) * 1e3).toFixed(1)} ms${st.pre ? `，含 ${st.pre} 个 prefill token` : ''}</title></rect>`; });
+      });
+      r.track.times.forEach((t) => { if (t < T_END) s += `<line class="ai-ck-tick" x1="${X0 + t * sx}" x2="${X0 + t * sx}" y1="92" y2="104"/>`; });
+      r.prompts.forEach((p) => { s += `<line class="ai-ck-ft" x1="${X0 + p.at * sx}" x2="${X0 + p.at * sx}" y1="112" y2="122"/>`; if (p.first && p.first < T_END) s += `<circle class="ai-bc-dot" cx="${X0 + p.first * sx}" cy="117" r="3"/>`; });
+      s += `<text class="ai-al-gl" x="${X0}" y="88">↓ 某个 decode 请求每出 1 个 token 的时刻</text><text class="ai-al-gl" x="${X0}" y="138">虚线：长提示到达；圆点：它的第 1 个 token。时间轴 0 – 240 ms</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const gaps = r.track.times.slice(1).map((t, i) => t - r.track.times[i]), mx = Math.max(...gaps), md = gaps.slice().sort((a, b) => a - b)[Math.floor(gaps.length / 2)];
+      const tt = r.prompts.map((p) => (p.first ? `${((p.first - p.at) * 1e3).toFixed(0)} ms` : '—')).join('、');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `被跟踪的 decode 请求：token 间隔中位 ${(md * 1e3).toFixed(1)} ms，最长 <b>${(mx * 1e3).toFixed(1)} ms</b>。三个长提示的 TTFT：${tt}。`
+        + `<br><span class="ai-faint">${mode === 'mix' ? '混合部署时，长提示的分块挤进 decode 的步里（琥珀色），这些步变长，正在 decode 的请求就卡一下。' : 'PD 分离时，decode 卡上的每一步都只有 decode，间隔始终平稳；prefill 卡专心做 prefill。代价是 decode 卡要承担全部 16 个请求，每步稍慢，长提示的 KV 还要传一次。'}</span>`;
+    }
+    fig.addEventListener('click', (e) => { const b = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!b) return; mode = b.dataset.v!; fig.querySelectorAll('[data-group] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); draw(); });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pdcompare]').forEach(init);
+</script>

@@ -1,0 +1,61 @@
+---
+// SwiGLU 门控 FFN：h_j = SiLU(g_j) × u_j，g = x·W_gate（门），u = x·W_up（内容），输出 y = h·W_down。
+// 数据：tinylm.json examples["38"]（输入是 TinyLM 第 1 层“AI”那一行 LayerNorm 的输出，三组权重另外生成）。
+// 读者可以：拖“门的偏移”给所有 g 加上同一个数，看门开大、关小时每个神经元放行多少；
+//   切换“不用门（ReLU FFN）”，对比 h = ReLU(u)。
+import tiny from '../../../tinylm/tinylm.json';
+interface Props { title?: string; caption?: string }
+const { title = '门控 FFN：门决定每个神经元放行多少', caption } = Astro.props;
+const ex = tiny.examples['38'];
+---
+<figure class="ai-gt ai-gate" data-gate data-cfg={JSON.stringify(ex)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="mode"><button data-v="swiglu" aria-pressed="true">SwiGLU：SiLU(门) × 内容</button><button data-v="relu" aria-pressed="false">不用门：ReLU(内容)</button></div>
+    <label class="ai-tl-lr"><span>门的偏移 = <b data-bv></b></span><input type="range" min="-3" max="3" step="0.1" value="0" data-b /></label>
+  </div>
+  <div class="ai-gate-grid" data-grid></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmt = (v: number, d = 3) => { const k = 10 ** d; v = Math.round(v * k) / k; if (Object.is(v, -0)) v = 0; return v < 0 ? '−' + -v : String(v); };
+  const silu = (z: number) => z / (1 + Math.exp(-z));
+  function init(fig: HTMLElement) {
+    const C = JSON.parse(fig.dataset.cfg!);
+    const bIn = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    let mode: 'swiglu' | 'relu' = 'swiglu';
+    function draw() {
+      const b = Number(bIn.value);
+      fig.querySelector('[data-bv]')!.textContent = fmt(b, 1);
+      const g: number[] = C.g.map((v: number) => v + b), u: number[] = C.u;
+      const gate = g.map(silu);
+      const h = mode === 'swiglu' ? gate.map((s, j) => s * u[j]) : u.map((v) => Math.max(0, v));
+      const y = C.Wd[0].map((_: number, k: number) => h.reduce((s, hj, j) => s + hj * C.Wd[j][k], 0));
+      const mx = Math.max(...h.map(Math.abs), ...u.map(Math.abs), 1e-6);
+      const bar = (v: number) => `<span class="ai-gate-bar"><i class="${v < 0 ? 'is-neg' : ''}" style="width:${(Math.abs(v) / mx * 100).toFixed(1)}%"></i></span>`;
+      let t = `<table class="ai-vp-tbl ai-gate-tbl"><thead><tr><th>神经元</th>${mode === 'swiglu' ? '<th>门 g</th><th>SiLU(g)</th>' : ''}<th>内容 u</th><th>放行 h</th><th></th></tr></thead><tbody>`;
+      h.forEach((hv, j) => {
+        t += `<tr><td>${j + 1}</td>${mode === 'swiglu' ? `<td>${fmt(g[j])}</td><td class="${gate[j] > 0.5 ? 'c-accent' : ''}">${fmt(gate[j])}</td>` : ''}<td>${fmt(u[j])}</td><td><b>${fmt(hv)}</b></td><td>${bar(hv)}</td></tr>`;
+      });
+      fig.querySelector('[data-grid]')!.innerHTML = t + '</tbody></table>';
+      const open = gate.filter((s) => s > 0.5).length, shut = gate.filter((s) => Math.abs(s) < 0.1).length;
+      fig.querySelector('[data-eq]')!.innerHTML = mode === 'swiglu'
+        ? `h = SiLU(g) × u，逐个神经元相乘。现在 SiLU(g) 大于 0.5 的有 ${open} 个（门开得比较大），绝对值小于 0.1 的有 ${shut} 个（几乎关上）。`
+          + `<br>输出 y = h · W_down = (${y.map((v: number) => fmt(v)).join(', ')})`
+          + `<br><span class="ai-faint">门和内容来自同一个输入的两次不同投影：门由输入自己决定“放多少”，而且可以是小数，放行一部分；ReLU 只有全放（u 大于 0）和全关两种。</span>`
+        : `h = ReLU(u)：u 是负数的神经元全关，正数的原样放行，${u.filter((v) => v > 0).length} 个放行。<br>输出 y = h · W_down = (${y.map((v: number) => fmt(v)).join(', ')})`;
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLElement>('[data-group="mode"] [data-v]');
+      if (!btn) return;
+      mode = btn.dataset.v as 'swiglu' | 'relu';
+      fig.querySelectorAll('[data-group="mode"] [data-v]').forEach((x) => x.setAttribute('aria-pressed', x === btn ? 'true' : 'false'));
+      draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-gate]').forEach(init);
+</script>

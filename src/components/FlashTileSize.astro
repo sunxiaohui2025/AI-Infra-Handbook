@@ -1,0 +1,65 @@
+---
+// FlashAttention 的块大小怎么选（公式与第 75 讲第二段代码相同）。一个头，头维度 128，BF16 输入，无掩码。
+//   一个线程块的共享内存：Q 2ad + K/V 槽 2bd + 分数/概率 4ab + FP32 输出累加器 4ad + 逐行状态 12a ≤ 容量
+//   Q 分成 ⌈L/a⌉ 块，每块扫一遍整份 K/V（4Ld 字节）；读写 = 扫描次数 × 4Ld + 读 Q 写 O 4Ld
+//   在线更新次数 = 扫描次数 × L/b（每对 Q 块、K/V 块一次：比最大值、算指数、缩放累加器）
+// 读者可以：调 K/V 块的行数 b、共享内存容量和序列长度，看能放几行 Q、扫描几次、读写多少、更新多少次。
+interface Props { title?: string; caption?: string }
+const { title = 'K/V 块切多大', caption } = Astro.props;
+---
+<figure class="ai-gt ai-fts" data-flashtile>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>K/V 块 b = <b data-bv></b> 行</span><input type="range" min="0" max="7" step="1" value="4" data-b /></label>
+    <div class="ai-gt-pre ai-pc-sets" data-group="c"><span class="ai-tl-k">共享内存：</span><button data-v="101376" aria-pressed="true">99 KB（RTX PRO 6000）</button><button data-v="232448" aria-pressed="false">227 KB（H100）</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="l"><span class="ai-tl-k">序列：</span>{[2048, 8192, 32768].map((v) => <button data-v={v} aria-pressed={v === 8192 ? 'true' : 'false'}>{v}</button>)}</div>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const BS = [1, 8, 16, 32, 64, 128, 256, 512], d = 128;
+  const need = (a: number, b: number) => 2 * a * d + 2 * b * d + 4 * a * b + 4 * a * d + 12 * a;
+  function calc(b: number, cap: number, L: number) {
+    let a = 0; while (need(a + 1, b) <= cap) a++;
+    if (a < 1) return null;
+    const scans = Math.ceil(L / a);
+    return { a, scans, traffic: scans * 4 * L * d + 4 * L * d, upd: scans * Math.ceil(L / b) };
+  }
+  function init(fig: HTMLElement) {
+    let cap = 101376, L = 8192;
+    const bIn = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    function draw() {
+      const b = BS[Number(bIn.value)]; fig.querySelector('[data-bv]')!.textContent = String(b);
+      const r = calc(b, cap, L), all = BS.map((x) => calc(x, cap, L));
+      const x0 = 70, w = 520, valid = all.filter(Boolean) as NonNullable<ReturnType<typeof calc>>[];
+      const tmax = Math.max(...valid.map((v) => v.traffic)), umax = Math.log10(Math.max(...valid.map((v) => v.upd)));
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 640 250"><text class="ai-np-ptitle" x="10" y="14">不同 b 下的读写量（上，线性）与在线更新次数（下，对数）</text>';
+      BS.forEach((x, i) => {
+        const v = all[i], cx = x0 + i * (w / BS.length) + 10, bw = w / BS.length - 20, on = x === b;
+        s += `<text class="ai-al-gl" x="${cx + bw / 2}" y="240" text-anchor="middle">b=${x}</text>`;
+        if (!v) { s += `<text class="ai-al-gl" x="${cx + bw / 2}" y="110" text-anchor="middle">放不下</text>`; return; }
+        const h1 = v.traffic / tmax * 80, h2 = Math.log10(v.upd) / umax * 80;
+        s += `<rect class="${on ? 'ai-sn-a' : 'ai-sn-b'}" x="${cx}" y="${110 - h1}" width="${bw}" height="${h1}"/><text class="ai-al-gl" x="${cx + bw / 2}" y="${106 - h1}" text-anchor="middle">${(v.traffic / 2 ** 20).toFixed(0)}</text>`;
+        s += `<rect class="${on ? 'ai-sn-a' : 'ai-eps-cp'}" x="${cx}" y="${222 - h2}" width="${bw}" height="${h2}"/><text class="ai-al-gl" x="${cx + bw / 2}" y="${218 - h2}" text-anchor="middle">${v.upd.toLocaleString()}</text>`;
+      });
+      s += `<text class="ai-al-gl" x="${x0 - 6}" y="70" text-anchor="end">MiB</text><text class="ai-al-gl" x="${x0 - 6}" y="182" text-anchor="end">次</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = r
+        ? `容量 ${cap.toLocaleString()} 字节：2a·128 + 2·${b}·128 + 4a·${b} + 4a·128 + 12a ≤ 容量 → 最多 <b>a = ${r.a}</b> 行 Q。Q 分成 ⌈${L} ÷ ${r.a}⌉ = ${r.scans} 块，每块扫一遍 K/V（${(4 * L * d / 2 ** 20).toFixed(0)} MiB），读写 ${r.scans} × ${(4 * L * d / 2 ** 20).toFixed(0)} + ${(4 * L * d / 2 ** 20).toFixed(0)} = <b>${(r.traffic / 2 ** 20).toFixed(0)} MiB</b>；在线更新 ${r.scans} × ${Math.ceil(L / b)} = <b>${r.upd.toLocaleString()} 次</b>。`
+          + `<br>对照：标准实现把 S、P（FP32）写出再读回，要 ${(16 * L * L / 2 ** 30).toFixed(L >= 8192 ? 0 : 2)} GiB。`
+        : `b = ${b} 时一行 Q 都放不下。`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML += '<br><span class="ai-faint">K/V 块越小，能放的 Q 行越多，K/V 被重读的次数越少；可在线更新的次数暴涨，矩阵乘的一个维度也太小，用不满矩阵单元。实际 kernel 一般取 64 或 128。</span>';
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const bt = (e.target as HTMLElement).closest<HTMLElement>('[data-group] [data-v]'); if (!bt) return;
+      const g = bt.closest<HTMLElement>('[data-group]')!; g.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false'));
+      if (g.dataset.group === 'c') cap = Number(bt.dataset.v); else L = Number(bt.dataset.v); draw();
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-flashtile]').forEach(init);
+</script>
