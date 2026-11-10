@@ -16,6 +16,10 @@ export default defineConfig({
   },
   vite: {
     // 文章从课程目录下的 tinylm/tinylm.json 读取数字（在 site/ 之外）
-    server: { fs: { allow: ['..'] } },
+    server: {
+      fs: { allow: ['..'] },
+      // dev 时把 /api/* 代理到本地的运营后台，埋点/反馈就能真正存进去（生产静态站靠 PUBLIC_BACKEND_BASE）
+      proxy: { '/api': 'http://localhost:8787' },
+    },
   },
 });
