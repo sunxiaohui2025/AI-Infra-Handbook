@@ -1,0 +1,23 @@
+---
+// 反馈页面：匿名提交意见，入库到运营后台的「反馈意见」板块。
+import Base from '../layouts/Base.astro';
+import Feedback from '../components/Feedback.astro';
+---
+<Base title="反馈意见" view="home">
+  <main class="ai-scroll" id="main">
+    <div class="ai-fb-wrap">
+      <div class="ai-fb-head">
+        <h1>反馈意见</h1>
+        <p>遇到讲不清楚、图错了、链接打不开，或想提改进建议，都可以在这里告诉我。无需注册。</p>
+      </div>
+      <Feedback />
+    </div>
+  </main>
+</Base>
+
+<style>
+  .ai-fb-wrap { max-width: 720px; margin: 0 auto; padding: 48px 20px 90px; }
+  .ai-fb-head { text-align: center; margin-bottom: 26px; }
+  .ai-fb-head h1 { font-size: 30px; margin: 0 0 8px; }
+  .ai-fb-head p { color: #6b7280; margin: 0; font-size: 14px; }
+</style>

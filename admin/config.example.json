@@ -1,0 +1,5 @@
+{
+  "adminPassword": "请改成你自己的口令",
+  "port": 8787,
+  "allowedOrigins": ["*"]
+}

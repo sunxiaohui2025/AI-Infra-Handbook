@@ -1,0 +1,237 @@
+// 运营后台数据库层：用 Node 内置 node:sqlite（Node 22.5+），零 npm 依赖。
+// 数据文件默认放在 admin/data/app.db，可通过环境变量 AI_DB 覆盖。
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const DB_PATH = process.env.AI_DB || join(__dirname, 'data', 'app.db');
+mkdirSync(dirname(DB_PATH), { recursive: true });
+
+export const db = new DatabaseSync(DB_PATH);
+
+// 页面在被看作「新一次回访」前，允许的最大间隔（毫秒）。超过则 visit_count +1。
+export const SESSION_GAP_MS = 30 * 60 * 1000;
+
+// 必须先建表，再 prepare 语句（prepare 在模块加载时就会执行）
+initSchema();
+
+export function initSchema() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS visitors (
+      vid         TEXT PRIMARY KEY,
+      first_seen  TEXT NOT NULL,
+      last_seen   TEXT NOT NULL,
+      visit_count INTEGER NOT NULL DEFAULT 1,
+      page_views  INTEGER NOT NULL DEFAULT 0,
+      pages       TEXT NOT NULL DEFAULT '[]',
+      ua          TEXT NOT NULL DEFAULT '',
+      last_ref    TEXT NOT NULL DEFAULT '',
+      last_path   TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS pageviews (
+      id    INTEGER PRIMARY KEY AUTOINCREMENT,
+      vid   TEXT NOT NULL,
+      path  TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      ua    TEXT NOT NULL DEFAULT '',
+      ref   TEXT NOT NULL DEFAULT '',
+      ts    TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS feedback (
+      id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      vid     TEXT NOT NULL DEFAULT '',
+      kind    TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL,
+      page    TEXT NOT NULL DEFAULT '',
+      contact TEXT NOT NULL DEFAULT '',
+      ua      TEXT NOT NULL DEFAULT '',
+      ts      TEXT NOT NULL,
+      status  TEXT NOT NULL DEFAULT 'new'
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      token      TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_pv_vid  ON pageviews(vid);
+    CREATE INDEX IF NOT EXISTS idx_pv_path ON pageviews(path);
+    CREATE INDEX IF NOT EXISTS idx_pv_ts   ON pageviews(ts);
+    CREATE INDEX IF NOT EXISTS idx_fb_status ON feedback(status);
+  `);
+}
+
+/* ---------- 访问统计 ---------- */
+
+const upsertVisitor = db.prepare(`
+  INSERT INTO visitors (vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_ref, last_path)
+  VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?)
+`);
+const getVisitor = db.prepare(`SELECT * FROM visitors WHERE vid = ?`);
+const bumpVisitor = db.prepare(`
+  UPDATE visitors
+  SET visit_count = ?, page_views = page_views + 1, pages = ?, ua = ?, last_ref = ?, last_path = ?, last_seen = ?
+  WHERE vid = ?
+`);
+const insertPageview = db.prepare(`
+  INSERT INTO pageviews (vid, path, title, ua, ref, ts) VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+export function recordVisit({ vid, path, title, ua, ref }) {
+  const ts = new Date().toISOString();
+  const now = Date.now();
+  const existing = getVisitor.get(vid);
+
+  if (!existing) {
+    upsertVisitor.run(vid, ts, ts, JSON.stringify([{ path, title, views: 1 }]), ua, ref, path);
+  } else {
+    // 距上次访问超过会话窗口 => 记为新一次回访
+    let visitCount = existing.visit_count;
+    if (now - Date.parse(existing.last_seen) > SESSION_GAP_MS) visitCount += 1;
+
+    let pages = JSON.parse(existing.pages || '[]');
+    const hit = pages.find((p) => p.path === path);
+    if (hit) hit.views += 1;
+    else pages.push({ path, title, views: 1 });
+    if (pages.length > 30) pages = pages.slice(-30); // 只保留最近 30 个路径，避免单个访客行无限膨胀
+
+    bumpVisitor.run(visitCount, JSON.stringify(pages), ua, ref, path, ts, vid);
+  }
+  insertPageview.run(vid, path, title, ua, ref, ts);
+}
+
+/* ---------- 运营指标 ---------- */
+
+const kpiOne = db.prepare(`
+  SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u FROM pageviews
+`);
+const kpiSince = db.prepare(`
+  SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u FROM pageviews WHERE ts >= ?
+`);
+const visitorsSince = db.prepare(`
+  SELECT COUNT(DISTINCT vid) AS u FROM visitors WHERE first_seen >= ?
+`);
+const returnRate = db.prepare(`
+  SELECT COUNT(*) AS c FROM visitors WHERE visit_count > 1
+`);
+const totalVisitors = db.prepare(`SELECT COUNT(*) AS c FROM visitors`);
+const dailySeries = db.prepare(`
+  SELECT substr(ts, 1, 10) AS d,
+         COUNT(*) AS pv,
+         COUNT(DISTINCT vid) AS uv
+  FROM pageviews
+  WHERE ts >= ?
+  GROUP BY d ORDER BY d
+`);
+const topPages = db.prepare(`
+  SELECT path, COUNT(*) AS views, COUNT(DISTINCT vid) AS uv
+  FROM pageviews
+  WHERE path LIKE ?
+  GROUP BY path
+  ORDER BY views DESC
+  LIMIT ?
+`);
+const latestTitle = db.prepare(`
+  SELECT title FROM pageviews WHERE path = ? ORDER BY ts DESC LIMIT 1
+`);
+const visitorList = db.prepare(`
+  SELECT vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_path
+  FROM visitors
+  ORDER BY last_seen DESC
+  LIMIT ?
+`);
+const visitorDetail = db.prepare(`
+  SELECT path, title, ts FROM pageviews WHERE vid = ? ORDER BY ts DESC LIMIT ?
+`);
+const feedbackCount = db.prepare(`SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'`);
+
+export function getDashboard() {
+  const nowIso = new Date().toISOString();
+  const dayAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+  const startDay = new Date(Date.now() - 13 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+
+  const t = kpiOne.get();
+  const td = kpiSince.get(dayAgo);
+  const tw = kpiSince.get(weekAgo);
+  const nv = visitorsSince.get(weekAgo).u;
+  const ret = returnRate.get().c;
+  const total = totalVisitors.get().c;
+  const fb = feedbackCount.get().c;
+  const series = dailySeries.all(startDay);
+
+  return {
+    kpi: {
+      totalPv: t.c,
+      totalUv: t.u,
+      today: td.c,
+      todayUv: td.u,
+      weekPv: tw.c,
+      weekUv: tw.u,
+      newVisitors: nv,
+      totalVisitors: total,
+      returnRate: total ? Math.round((ret / total) * 100) : 0,
+      newFeedback: fb,
+    },
+    series,
+  };
+}
+
+export function getLectureRanking(limit = 25) {
+  const rows = topPages.all('/l/%', limit);
+  return rows.map((r) => ({ ...r, title: latestTitle.get(r.path)?.title || '' }));
+}
+
+export function getVisitorList(limit = 100) {
+  return visitorList.all(limit).map((v) => ({ ...v, pages: JSON.parse(v.pages || '[]') }));
+}
+
+export function getVisitorDetail(vid, limit = 200) {
+  return visitorDetail.all(vid, limit);
+}
+
+/* ---------- 反馈 ---------- */
+
+export function addFeedback({ vid, kind, content, page, contact, ua }) {
+  const info = db.prepare(`
+    INSERT INTO feedback (vid, kind, content, page, contact, ua, ts) VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(vid, kind || '', content, page || '', contact || '', ua || '', new Date().toISOString());
+  return Number(info.lastInsertRowid);
+}
+
+export function listFeedback(status) {
+  if (status && status !== 'all') {
+    return db.prepare(`
+      SELECT id, vid, kind, content, page, contact, ua, ts, status
+      FROM feedback WHERE status = ? ORDER BY ts DESC LIMIT 500
+    `).all(status);
+  }
+  return db.prepare(`
+    SELECT id, vid, kind, content, page, contact, ua, ts, status
+    FROM feedback ORDER BY ts DESC LIMIT 500
+  `).all();
+}
+
+export function setFeedbackStatus(id, status) {
+  db.prepare(`UPDATE feedback SET status = ? WHERE id = ?`).run(status, id);
+}
+
+/* ---------- 会话（后台登录） ---------- */
+
+export function createSession(token, expiresAt) {
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO sessions (token, created_at, expires_at) VALUES (?, ?, ?)`).run(token, now, expiresAt);
+}
+
+export function validSession(token) {
+  if (!token) return false;
+  const row = db.prepare(`SELECT expires_at FROM sessions WHERE token = ?`).get(token);
+  if (!row) return false;
+  return Date.parse(row.expires_at) > Date.now();
+}
+
+export function deleteSession(token) {
+  db.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
+}
+

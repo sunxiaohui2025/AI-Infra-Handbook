@@ -1,0 +1,135 @@
+:root {
+  --bg: #0f1220;
+  --panel: #181c2e;
+  --panel-2: #1f2438;
+  --line: #2a3148;
+  --text: #e7eaf4;
+  --muted: #8b93ab;
+  --accent: #6d8bff;
+  --accent-2: #4fd1a5;
+  --danger: #f2698b;
+  --warn: #f0b34e;
+  --radius: 12px;
+  --mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* 登录 */
+#login {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: radial-gradient(1200px 600px at 50% -10%, #1c2542, var(--bg));
+}
+#login[hidden] { display: none; }
+.login-card {
+  width: 320px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 28px; text-align: center;
+  box-shadow: 0 30px 80px rgba(0,0,0,.5);
+}
+.login-card h1 { font-size: 18px; margin: 0 0 4px; }
+.login-card p { color: var(--muted); margin: 0 0 22px; font-size: 13px; }
+.login-card input {
+  width: 100%; padding: 11px 12px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--text); font-size: 14px; outline: none;
+}
+.login-card input:focus { border-color: var(--accent); }
+.login-card button { margin-top: 14px; width: 100%; }
+.login-err { color: var(--danger); font-size: 12px; min-height: 18px; margin-top: 10px; }
+
+/* 布局 */
+#app { padding: 0 22px 40px; max-width: 1200px; margin: 0 auto; }
+#app[hidden] { display: none; }
+.topbar {
+  display: flex; align-items: center; gap: 14px; padding: 18px 0 12px;
+  border-bottom: 1px solid var(--line); margin-bottom: 18px;
+}
+.topbar .brand { font-size: 16px; font-weight: 700; }
+.topbar .brand small { color: var(--muted); font-weight: 400; margin-left: 8px; font-size: 12px; }
+.topbar .spacer { flex: 1; }
+.topbar .logout { cursor: pointer; color: var(--muted); }
+.topbar .logout:hover { color: var(--text); }
+
+.tabs { display: flex; gap: 6px; margin-bottom: 20px; flex-wrap: wrap; }
+.tab {
+  padding: 8px 16px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--muted); cursor: pointer; font-size: 13px;
+}
+.tab.active { background: var(--accent); border-color: var(--accent); color: #0b0e1a; font-weight: 600; }
+.tab .badge {
+  background: var(--danger); color: #fff; border-radius: 999px; padding: 1px 7px;
+  font-size: 11px; margin-left: 6px; display: inline-block;
+}
+.tab .badge.zero { background: var(--line); color: var(--muted); }
+
+/* KPI 卡片 */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.kpi {
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 16px 14px;
+}
+.kpi .k { color: var(--muted); font-size: 12px; }
+.kpi .v { font-size: 26px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.kpi .v.small { font-size: 20px; }
+.kpi .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+/* 面板 */
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 18px; }
+.panel h2 { font-size: 14px; margin: 0 0 14px; color: var(--text); }
+.panel h2 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+
+/* 表格 */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); }
+th { color: var(--muted); font-weight: 500; font-size: 12px; white-space: nowrap; }
+td { vertical-align: top; }
+td.mono { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+tr.clickable { cursor: pointer; }
+tr.clickable:hover td { background: var(--panel-2); }
+.num { font-variant-numeric: tabular-nums; }
+.bar { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden; min-width: 70px; }
+.bar i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+
+/* 标签 */
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); color: var(--muted); }
+.chip.k { border-color: var(--accent); color: var(--accent); }
+.chip.done { border-color: var(--accent-2); color: var(--accent-2); }
+.chip.ignored { color: var(--muted); }
+.chip.new { border-color: var(--warn); color: var(--warn); }
+
+/* 按钮 */
+button { font-size: 13px; padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel-2); color: var(--text); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.primary { background: var(--accent); border-color: var(--accent); color: #0b0e1a; font-weight: 600; }
+button.ghost { background: transparent; }
+button.mini { padding: 3px 9px; font-size: 12px; }
+button.danger { border-color: var(--danger); color: var(--danger); background: transparent; }
+
+/* 反馈内容块 */
+.fb-content { max-width: 46ch; white-space: pre-wrap; }
+.empty { color: var(--muted); text-align: center; padding: 30px 0; }
+.detail { border-left: 2px solid var(--accent); margin: 6px 0 0; padding: 4px 0 4px 12px; }
+.muted { color: var(--muted); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; }
+
+/* 简单柱状图 */
+.chart { display: flex; align-items: flex-end; gap: 6px; height: 150px; padding-top: 8px; }
+.chart .col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+.chart .col .bar-c { width: 100%; display: flex; flex-direction: column-reverse; justify-content: flex-start; height: 120px; }
+.chart .col .seg { width: 100%; border-radius: 4px 4px 0 0; background: var(--accent); display: block; }
+.chart .col .seg.uv { background: var(--accent-2); }
+.chart .col .lbl { font-size: 10px; color: var(--muted); white-space: nowrap; transform: rotate(0); }
+.chart .legend { color: var(--muted); font-size: 11px; }
+.chart .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 4px 0 12px; }
+
+@media (max-width: 640px) {
+  body { font-size: 13px; }
+  #app { padding: 0 12px 30px; }
+}

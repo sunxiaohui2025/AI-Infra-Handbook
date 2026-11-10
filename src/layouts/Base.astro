@@ -30,6 +30,7 @@ const { title, view } = Astro.props;
         </div>
         <button class="ai-searchbtn" data-act="pal"><span>搜索讲、篇或小节…</span><span class="ai-kbd">⌘K</span></button>
         <div class="ai-top-r">
+          <a class="ai-top-fb" href="/feedback">反馈</a>
           <div class="ai-seg" role="group" aria-label="学习路线">
             <button data-route-btn="full">完整路线</button>
             <button data-route-btn="fast">Infra 快速路线</button>
@@ -134,5 +135,16 @@ const { title, view } = Astro.props;
         else if (e.key === 'Enter') { e.preventDefault(); pick(psel); }
       });
     </script>
+
+    <script>
+      // 匿名访问埋点：在浏览器生成一个随机 ID，上报一次页面浏览。静默失败，不影响页面。
+      import { track } from '../data/anon';
+      track();
+    </script>
+
+    <style>
+      .ai-top-fb { display: inline-flex; align-items: center; padding: 6px 12px; border-radius: 999px; border: 1px solid #d7dbe3; color: #4b5563; font-size: 13px; text-decoration: none; margin-right: 10px; }
+      .ai-top-fb:hover { border-color: #16193c; color: #16193c; }
+    </style>
   </body>
 </html>

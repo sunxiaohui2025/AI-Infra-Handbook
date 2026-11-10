@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AI Infra 课程 · 运营后台</title>
+  <link rel="stylesheet" href="/admin/style.css" />
+</head>
+<body>
+  <!-- 登录 -->
+  <div id="login">
+    <div class="login-card">
+      <h1>运营后台</h1>
+      <p>AI Infra 学习网站 · 请输入口令</p>
+      <input id="pw" type="password" placeholder="口令" autocomplete="current-password" />
+      <button id="loginBtn" class="primary">进入</button>
+      <div class="login-err" id="loginErr"></div>
+    </div>
+  </div>
+
+  <!-- 主体 -->
+  <div id="app" hidden>
+    <div class="topbar">
+      <div class="brand">AI Infra 运营后台 <small>匿名统计 · 反馈</small></div>
+      <div class="spacer"></div>
+      <span class="logout" id="logout">退出</span>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="overview">总览</div>
+      <div class="tab" data-tab="lectures">每讲热度</div>
+      <div class="tab" data-tab="visitors">访客明细</div>
+      <div class="tab" data-tab="feedback">反馈意见<span class="badge zero" id="fbBadge">0</span></div>
+    </div>
+
+    <!-- 总览 -->
+    <section id="tab-overview">
+      <div class="kpis" id="kpis"></div>
+      <div class="panel">
+        <h2>近 14 天访问走势 <small>蓝=页面浏览 PV · 绿=独立访客 UV</small></h2>
+        <div class="chart" id="chart"></div>
+      </div>
+    </section>
+
+    <!-- 每讲热度 -->
+    <section id="tab-lectures" hidden>
+      <div class="panel">
+        <h2>讲热度排行 <small>按页面浏览 PV 排序（path = /l/讲号）</small></h2>
+        <table>
+          <thead><tr><th>#</th><th>讲</th><th>标题</th><th>浏览</th><th>独立访客</th><th style="width:20%">占比</th></tr></thead>
+          <tbody id="lectureRows"></tbody>
+        </table>
+        <div class="empty" id="lectureEmpty" hidden>暂无数据</div>
+      </div>
+    </section>
+
+    <!-- 访客明细 -->
+    <section id="tab-visitors" hidden>
+      <div class="panel">
+        <h2>访客明细 <small>匿名 ID，不含任何个人信息；点一行展开浏览轨迹</small></h2>
+        <table>
+          <thead><tr><th>匿名 ID</th><th>首次访问</th><th>最近访问</th><th>回访次数</th><th>浏览量</th><th>最近浏览</th></tr></thead>
+          <tbody id="visitorRows"></tbody>
+        </table>
+        <div class="empty" id="visitorEmpty" hidden>暂无数据</div>
+      </div>
+    </section>
+
+    <!-- 反馈 -->
+    <section id="tab-feedback" hidden>
+      <div class="panel">
+        <h2>反馈意见</h2>
+        <div class="row" style="margin-bottom:12px">
+          <button class="mini ghost" data-fstatus="all">全部</button>
+          <button class="mini ghost" data-fstatus="new">待处理</button>
+          <button class="mini ghost" data-fstatus="done">已处理</button>
+          <button class="mini ghost" data-fstatus="ignored">已忽略</button>
+          <div class="spacer"></div>
+          <span class="muted" id="fbCount"></span>
+        </div>
+        <table>
+          <thead><tr><th>时间</th><th>类型</th><th>内容</th><th>来源页</th><th>联系方式</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody id="feedbackRows"></tbody>
+        </table>
+        <div class="empty" id="feedbackEmpty" hidden>暂无数据</div>
+      </div>
+    </section>
+  </div>
+
+  <script src="/admin/app.js"></script>
+</body>
+</html>
