@@ -360,9 +360,9 @@ body.is-read .ai-top { background: var(--surface-glass); }
 .ai-top-l { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .ai-top-r { display: flex; justify-content: flex-end; align-items: center; gap: var(--space-3); min-width: 0; }
 /* ---------- 顶栏联系方式 ---------- */
-.ai-top-contact, .ai-top-fb { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 18px; color: var(--ink-2); text-decoration: none; white-space: nowrap; cursor: pointer; padding: 3px 10px; border: 1px solid var(--line); border-radius: var(--radius-pill); background: var(--surface); }
+.ai-top-contact, .ai-top-fb { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 10px; font-size: 12px; line-height: 18px; color: var(--ink-2); text-decoration: none; white-space: nowrap; cursor: pointer; border: 1px solid var(--line); border-radius: var(--radius-pill); background: var(--surface); }
 .ai-top-contact:hover, .ai-top-fb:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-.ai-top-x img { width: 14px; height: auto; display: block; }
+.ai-top-x img { height: 14px; width: auto; display: block; }
 .ai-top-gzh { position: relative; }
 .ai-top-gzh-label { display: inline-flex; align-items: center; }
 .ai-top-gzh-pop { position: absolute; top: calc(100% + 12px); right: 0; display: none; z-index: 30; }
