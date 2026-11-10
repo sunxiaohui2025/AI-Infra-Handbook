@@ -73,11 +73,35 @@ PUBLIC_BACKEND_BASE=https://your-admin-host node_modules/.bin/astro build
 
 ## 部署到哪里
 
-任何能跑 Node 的环境都行，例如：
+任何能跑 Node 的环境都行。
 
-- 本机/内网：`node server.js`，用 `nohup` 或 pm2 常驻。
-- VPS：配一个 systemd 服务或 `pm2 start server.js`。
-- 想给全站用 HTTPS：在它前面挂 nginx/Caddy 反代，把 `/`、`/api/*`、`/admin/*` 代理到这个服务，前端 `BACKEND_BASE` 留空即可同源。
+### 本机 / 内网
+```bash
+cd admin && node server.js   # 或 nohup / pm2 常驻
+```
+
+### VPS（推荐：systemd 一键部署）
+把 `admin/` 整个传上服务器后：
+```bash
+cd admin/deploy
+sudo bash install.sh                       # 默认端口 8787
+# 或指定口令和端口：
+sudo ADMIN_PASSWORD=你的口令 PORT=9000 bash install.sh
+```
+它会：装到 `/opt/ai-infra-admin`、以系统用户 `ai-infra-admin` 运行、开机自启、自动处理口令。
+
+```bash
+journalctl -u ai-infra-admin -f   # 看日志
+sudo bash install.sh --uninstall  # 卸载（会删数据）
+```
+
+### HTTPS 反代
+在它前面挂 nginx 或 Caddy，把 `/`、`/api/*`、`/admin/*` 代理到本地端口（如 `127.0.0.1:8787`）。
+
+- nginx：`admin/deploy/nginx.conf.example`
+- Caddy（自动 HTTPS）：`admin/deploy/Caddyfile.example`
+
+把后台域名/地址设成前端 `PUBLIC_BACKEND_BASE` 即可同域联调；若前端和后台同域，留空即可。
 
 ## 数据说明
 

@@ -107,7 +107,6 @@ html.ai-full, html.ai-full body { height: 100%; overflow: hidden; }
 .ai-lk { display: flex; align-items: baseline; gap: 8px; padding: 4px 8px 4px 14px; border-radius: var(--radius-sm); text-decoration: none; color: var(--ink-2); font-size: 13px; line-height: 20px; }
 .ai-lk .ai-num { font-size: 11px; line-height: 20px; flex: none; }
 .ai-lk:hover { color: var(--ink); background: var(--surface-sunk); }
-.ai-lk.is-opt { color: var(--ink-3); }
 .ai-lk.is-off { opacity: .45; }
 .ai-lk[aria-current="true"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .ai-lk[aria-current="true"] .ai-num { color: var(--accent); }
@@ -329,7 +328,6 @@ html[data-route="fast"] .route-note-fast { display: block; }
 /* ---------- Home: masonry directory (章 › 篇 › 讲, all expanded) ---------- */
 .ai-wf-legend { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); }
 .ai-wf-legend .ai-dot { margin: 0; }
-.ai-wf-opt { margin-left: var(--space-3); color: var(--ink-3); opacity: .8; }
 /* five chapter columns, side by side; each chapter's parts stack down its column */
 .ai-home:has(.ai-wf) { max-width: 1480px; }
 .ai-wf { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-4); align-items: start; }
@@ -346,7 +344,6 @@ html[data-route="fast"] .route-note-fast { display: block; }
 .ai-wf-ph .ai-num { font-size: 12px; white-space: nowrap; }
 .ai-wf-ph:hover b, .ai-wf-ph:hover .ai-num { color: var(--accent); }
 .ai-wf .ai-lk { padding: 4px 8px; color: var(--ink); }
-.ai-wf .ai-lk.is-opt { color: var(--ink-3); }
 .ai-wf .ai-lk:hover { color: var(--accent); }
 /* narrower screens: keep the five columns and scroll sideways; phones stack chapters */
 @media (max-width: 1180px) { .ai-wf { gap: var(--space-3); } .ai-wf .ai-lk { padding: 4px 6px; gap: 6px; } .ai-wf-ch small { margin-left: 0; } }
@@ -400,7 +397,7 @@ body.is-read .ai-searchbtn { background: var(--paper); }
 /* ---------- Progress on home ---------- */
 .ai-stat-done b { color: var(--accent); }
 .ai-wf .ai-lk.is-done > span:nth-child(2) { font-weight: 600; }
-.ai-wf .ai-lk.is-done::after { content: "已写"; margin-left: auto; padding: 0 5px; border-radius: var(--radius-sm); background: var(--accent-soft); color: var(--accent); font-size: 11px; line-height: 18px; flex: none; }
+.ai-wf .ai-lk.is-done::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-soft); margin-left: auto; align-self: center; flex: none; }
 .ai-wf .ai-lk.is-done .ai-dot { margin-left: 6px; }
 
 /* ---------- Note: 要点 / 专栏 / 注意 ---------- */

@@ -1,0 +1,8 @@
+# Caddy 反向代理 + 自动 HTTPS 示例（比 nginx 省事，证书自动申请续期）
+#
+# 用法：把下面内容存成 /etc/caddy/Caddyfile（或合并进已有 Caddyfile），
+# 然后  sudo systemctl reload caddy
+
+admin.example.com {
+    reverse_proxy 127.0.0.1:8787   # 与后台 PORT 一致
+}
