@@ -95,6 +95,40 @@ journalctl -u ai-infra-admin -f   # 看日志
 sudo bash install.sh --uninstall  # 卸载（会删数据）
 ```
 
+### Cloudflare（如果你已把站点发到 Workers）
+
+如果前端已经部署在 `*.workers.dev`，不再需要单独的 Node 服务——本后台可作为 **同域的 Cloudflare Worker** 一起部署，前端 `/api/*` 埋点/反馈直接打到 Worker，由 **D1（SQLite 兼容）** 存数据，**无需 `PUBLIC_BACKEND_BASE`**。
+
+配套文件：`admin/worker.js`（Worker 版）、`admin/schema.sql`（D1 表结构）、`admin/deploy/deploy-cloudflare.sh`（一键部署）。
+
+```bash
+# 0) 登录（只需一次）
+npx wrangler login
+
+# 1) 部署（在 site/ 目录下）
+sh admin/deploy/deploy-cloudflare.sh
+#    或指定口令：ADMIN_PASSWORD=你的口令 sh admin/deploy/deploy-cloudflare.sh
+```
+
+脚本自动完成：`astro build` → 把 `admin/public` 拷进 `dist/admin` → 创建/复用 D1 → 把 `database_id` 写进 `wrangler.jsonc` → 应用 `schema.sql` → 写入 `ADMIN_PASSWORD` 密文 → `wrangler deploy`。
+
+部署后：
+
+```
+前端:  https://<你的>.workers.dev
+后台:  https://<你的>.workers.dev/admin
+```
+
+`/admin`（无斜杠）会自动 302 到 `/admin/`；站点页面、`/admin/*` 走静态资源，`/api/*` 由 Worker 处理并读写 D1。
+
+本地验证 Worker 逻辑（用 node:sqlite 模拟 D1，跑通全部接口）：
+
+```bash
+node admin/worker-test.mjs
+```
+
+> 若你更想要独立 Node 服务而非 Cloudflare，用上一节「VPS（推荐）」即可，两种方案并存、互不影响。
+
 ### HTTPS 反代
 在它前面挂 nginx 或 Caddy，把 `/`、`/api/*`、`/admin/*` 代理到本地端口（如 `127.0.0.1:8787`）。
 

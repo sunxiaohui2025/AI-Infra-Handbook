@@ -1,12 +1,22 @@
 {
-  // 纯静态 Astro 站点：交给 Cloudflare Workers 静态资源托管。
-  // 只要有这个配置文件，`wrangler deploy` 就不再自动检测框架/运行 astro add cloudflare，
-  // 而是直接把 dist/ 作为静态资源部署。站点不需要 @astrojs/cloudflare 适配器。
+  // AI Infra 学习网站：静态站 + 运营后台，全部部署在一个 Cloudflare Worker 上。
+  // - assets.directory=./dist：静态站（astro build 产物）与 admin SPA（dist/admin/）
+  // - main=./admin/worker.js：处理 /api/*（埋点/反馈/后台接口）
+  // - d1_databases：数据存 D1（SQLite），绑定名 DB
+  // 部署：sh admin/deploy/deploy-cloudflare.sh
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ai-infra-handbook",
   "compatibility_date": "2026-11-10",
+  "main": "./admin/worker.js",
   "assets": {
-    // assets-only Worker 不能带 binding，只指定目录即可
-    "directory": "./dist"
-  }
+    "directory": "./dist",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-infra-handbook-db",
+      "database_id": "__D1_ID__"
+    }
+  ]
 }
