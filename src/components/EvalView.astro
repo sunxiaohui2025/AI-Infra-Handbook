@@ -2,7 +2,7 @@
 // 模型评测两例。
 // 上：用 ToyLM（tinylm.json examples["22"]）做 5 道选择题：给每个选项算模型的概率，选最大的，和标准答案比。点一道题看各选项的概率。
 // 下：Elo 对战排名：两个模型各有一个分，P(A 赢) = 1 / (1 + 10^((R_B − R_A)/400))；每场比赛后按“实际 − 预期”调整分数（K = 32）。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { title?: string; caption?: string }
 const { title = '选择题评测，以及对战排名', caption } = Astro.props;
 const ex = tiny.examples['22'];

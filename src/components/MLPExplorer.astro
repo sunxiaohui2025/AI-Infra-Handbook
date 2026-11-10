@@ -6,7 +6,7 @@
 // 每个隐藏层画一张图：横轴是输入 x，每条线是一个神经元的输出随 x 怎么变。
 // 读者可以：拖 x，看每层在这一点的数值；点神经元的小标签，把它“关掉”（输出强制为 0），看后面各层和最终输出怎么变；
 //   悬停标签，高亮这个神经元的曲线。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { net?: 'fit' | 'saw'; depth?: number; title?: string; caption?: string }
 const { net = 'fit', depth = 3, caption } = Astro.props;
 const { title = net === 'fit' ? '一个训练好的 1→8→8→1 网络，逐层看' : '每层只有 2 个神经元的“锯齿”网络' } = Astro.props;

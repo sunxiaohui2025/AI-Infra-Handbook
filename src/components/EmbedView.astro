@@ -4,7 +4,7 @@
 //                  点句子里的某个 token，看“独热向量 × E = E 的那一行”。
 //   mode="map"   ：小语料上训练的 ToyLM 的嵌入（14 个词 × 8 维），投影到二维画出来（tinylm.json examples["22"]）。
 //                  可切换“训练前 / 训练后”；点一个词，连线到 8 维空间里余弦相似度最高的 3 个词。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { mode?: 'lookup' | 'map'; title?: string; caption?: string }
 const { mode = 'lookup', caption } = Astro.props;
 const { title = mode === 'lookup' ? '查表：编号 → 嵌入表的一行' : '训练出来的嵌入：作用相近的词靠在一起' } = Astro.props;

@@ -3,7 +3,7 @@
 // 输入“我 爱 学 AI”，2 层 Post-Norm Transformer：嵌入 + 位置编码 → [注意力 → 残差 → LayerNorm → FFN → 残差 → LayerNorm] × 2 → lm_head → softmax。
 //   focus：'all' 全部 24 站（第 34 讲）；'ln' 残差 + LayerNorm（第 30 讲）；'ffn' 前馈网络（第 31 讲）；'output' 输出层（第 33 讲）。
 // 读者可以：点左边的站（或“上一站 / 下一站”）；点表格的某一行选一个词，下方写出这一站对这个词做了什么、形状怎么变。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { focus?: 'all' | 'ln' | 'ffn' | 'output'; start?: string; title?: string; caption?: string }
 const { focus = 'all', caption } = Astro.props;
 const FOCUS: Record<string, string[]> = {

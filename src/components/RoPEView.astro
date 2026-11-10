@@ -3,7 +3,7 @@
 // q、k 取第 3 讲结果 C 的第 4 行和第 1 行（4 维 = 2 对）。第 1 对每个位置转 θ₀ = 1 弧度，第 2 对转 θ₁ = 10000^(−2/4) = 0.01 弧度。
 // 左图：第 1 对维度所在的平面，浅色是旋转前，深色是 q 转 m 次、k 转 n 次之后。
 // 右图：整个 4 维点积随位置差 m − n 的变化。拖 m、n，或点“两个一起 +1”：位置差不变，点积不变。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { title?: string; caption?: string }
 const { title = '旋转 q 和 k：点积只看相对距离', caption } = Astro.props;
 const C = tiny.examples['03'].C;

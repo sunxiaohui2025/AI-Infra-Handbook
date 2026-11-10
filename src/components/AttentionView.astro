@@ -7,7 +7,7 @@
 //   causal：'off' 不加掩码，'on' 加因果掩码，'toggle' 可开关。
 // 读者可以：点注意力矩阵的某一行（或左边的词）选一个“提问的词”，下方逐步写出这一行的计算：
 //   q·k 打分 → 除以 √d_k →（掩码）→ softmax → 用权重给 v 加权求和。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { model?: 'tiny' | 'copy'; heads?: 1 | 2; causal?: 'off' | 'on' | 'toggle'; row?: number; title?: string; caption?: string }
 const { model = 'tiny', heads = model === 'copy' ? 2 : 1, causal = model === 'copy' ? 'on' : 'off', row = model === 'copy' ? 4 : 0, caption } = Astro.props;
 const { title = model === 'copy' ? '训练过的复读模型：每个头在看哪里' : heads === 2 ? '两个头，各算各的注意力' : '自注意力：每个词给其他词打分，再加权求和' } = Astro.props;

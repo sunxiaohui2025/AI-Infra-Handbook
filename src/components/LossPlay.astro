@@ -3,7 +3,7 @@
 //   mode="vocab" ：TinyLM 的 6 个词，默认是“我”后面下一个词的预测（tinylm.json examples["16"] 第 1 行），正确答案“爱”。
 //   mode="binary"：两个选项（好吃 / 不好吃），并排对比交叉熵和平方误差，以及它们给出的“修正信号”（对 logit 的斜率）。
 // 读者可以：上下拖动柱子改概率（其余选项按比例缩放，总和保持 1）；点选项名字换正确答案；点预设。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { mode?: 'vocab' | 'binary'; title?: string; caption?: string }
 const { mode = 'vocab', caption } = Astro.props;
 const ex = tiny.examples['16'];

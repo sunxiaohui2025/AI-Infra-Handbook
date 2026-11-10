@@ -3,7 +3,7 @@
 // 数据：tinylm.json examples["38"]（输入是 TinyLM 第 1 层“AI”那一行 LayerNorm 的输出，三组权重另外生成）。
 // 读者可以：拖“门的偏移”给所有 g 加上同一个数，看门开大、关小时每个神经元放行多少；
 //   切换“不用门（ReLU FFN）”，对比 h = ReLU(u)。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { title?: string; caption?: string }
 const { title = '门控 FFN：门决定每个神经元放行多少', caption } = Astro.props;
 const ex = tiny.examples['38'];

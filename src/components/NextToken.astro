@@ -3,7 +3,7 @@
 //   只看最后两个词：两个嵌入拼起来 → 线性层 + ReLU → 线性层 → 14 个词的打分 → softmax。句子开头用“。”补齐。
 //   mode="predict" ：点词拼前缀，看下一个词的概率排行，并和语料里数出来的频率对照。
 //   mode="generate"：一步一步生成；每步把选中的词接回输入。可选“贪心”或“采样”（温度可调，固定随机种子可复现）。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { mode?: 'predict' | 'generate'; title?: string; caption?: string }
 const { mode = 'predict', caption } = Astro.props;
 const { title = mode === 'predict' ? '给一个前缀，看下一个词的概率' : '一个词一个词地生成' } = Astro.props;

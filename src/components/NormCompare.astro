@@ -2,7 +2,7 @@
 // LayerNorm 与 RMSNorm 并排对比。
 // 输入一组数（默认是 TinyLM 第 1 层“AI”残差相加后的那一行），两边分别逐步计算；
 // 拖“整体平移”滑块给每个数都加上同一个常数：LayerNorm 的结果不变，RMSNorm 的结果会变。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { title?: string; caption?: string }
 const { title = 'LayerNorm 和 RMSNorm：同一组数，两种算法', caption } = Astro.props;
 const x0 = tiny.examples['34'].steps.find((s) => s.key === 'L1res1')!.v[3];

@@ -2,7 +2,7 @@
 // SFT 演示。
 // 上：一段对话套上对话模板后的样子（Llama-3 风格的特殊标记，示意），每一块标出“算不算损失”：只有助手的回答算。
 // 下：在 ToyLM 上做的一次最小 SFT（tinylm.json examples["47"]），几个前缀在微调前后对下一个词的概率。
-import tiny from '../../../tinylm/tinylm.json';
+import tiny from '../data/tinylm.json';
 interface Props { title?: string; caption?: string }
 const { title = '对话模板，以及只对回答算损失', caption } = Astro.props;
 const ex = tiny.examples['47'];
