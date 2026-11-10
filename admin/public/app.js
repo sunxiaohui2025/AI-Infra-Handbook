@@ -118,13 +118,14 @@ async function loadVisitors() {
   rows.innerHTML = list.map((v) => `
     <tr class="clickable" data-vid="${v.vid}">
       <td class="mono">${v.vid.slice(0, 12)}…</td>
+      <td class="mono">${v.ip || ''}</td>
       <td class="num">${fmt(v.first_seen)}</td>
       <td class="num">${fmt(v.last_seen)}</td>
       <td class="num">${v.visit_count}</td>
       <td class="num">${v.page_views}</td>
       <td class="mono">${v.last_path || ''}</td>
     </tr>
-    <tr class="det" data-det="${v.vid}" hidden><td colspan="6"><div class="detail" data-load></div></td></tr>
+    <tr class="det" data-det="${v.vid}" hidden><td colspan="7"><div class="detail" data-load></div></td></tr>
   `).join('');
   $$('#visitorRows tr.clickable').forEach((tr) =>
     tr.addEventListener('click', () => toggleVisitor(tr))
@@ -140,7 +141,7 @@ async function toggleVisitor(tr) {
       const d = await api('/api/admin/visitors?vid=' + encodeURIComponent(vid));
       const pv = d.detail || [];
       box.innerHTML = pv.length
-        ? pv.map((p) => `<div class="muted">${fmt(p.ts)} <span class="chip">${p.path}</span> ${p.title || ''}</div>`).join('')
+        ? pv.map((p) => `<div class="muted">${fmt(p.ts)} <span class="chip">${p.path}</span> ${p.title || ''} <span class="muted">${p.ip || ''}</span></div>`).join('')
         : '<div class="muted">暂无浏览记录</div>';
       box.dataset.loaded = '1';
     }

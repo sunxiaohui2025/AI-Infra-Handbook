@@ -39,13 +39,13 @@ ADMIN_PASSWORD=你的口令 PORT=8787 node server.js
 |---|---|
 | 总览 | 总 PV/UV、今日、近 7 天、回访率、待处理反馈；近 14 天走势图 |
 | 每讲热度 | 按 `/l/讲号` 的浏览量排行，可看哪些讲最受欢迎 |
-| 访客明细 | 匿名 ID 列表（首访/最近/回访次数/浏览量），点一行展开浏览轨迹 |
+| 访客明细 | 匿名 ID 列表（IP/首访/最近/回访次数/浏览量），点一行展开浏览轨迹 |
 | 反馈意见 | 用户通过 `/feedback` 提交的反馈，可标记 处理/忽略/重置 |
 
 ## 接口
 
 - 公开
-  - `POST /api/track` — 上报一次浏览，body `{ vid, path, title }`
+  - `POST /api/track` — 上报一次浏览，body `{ vid, path, title }`；服务端另取客户端 IP（有 `X-Forwarded-For`/`X-Real-IP` 则优先，适合放 nginx/CDN 反代后）
   - `POST /api/feedback` — 提交反馈，body `{ vid, kind, content, page, contact }`
 - 后台（需 `Authorization: Bearer <token>`，先 `POST /api/admin/login` 拿 token）
   - `POST /api/admin/login` — body `{ password }` → `{ token }`
@@ -106,5 +106,7 @@ sudo bash install.sh --uninstall  # 卸载（会删数据）
 ## 数据说明
 
 - 「用户」= 浏览器 localStorage 里的匿名随机 ID（`ai_vid`），**不含姓名/手机/邮箱**。
+- 另记**最近一次客户端 IP**（服务端取，含反代转发链）；本地访问通常显示 `::1`/`127.0.0.1`，线上部署后显示真实公网 IP。若需更严格的匿名，可去掉 `server.js` 里的 `getClientIp`。
+
 - 回访判定：距上次浏览超过 30 分钟算一次新的回访。
 - 表：`visitors`（访客），`pageviews`（每次浏览），`feedback`（反馈），`sessions`（后台登录会话）。

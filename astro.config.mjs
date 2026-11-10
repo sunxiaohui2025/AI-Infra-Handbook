@@ -19,7 +19,7 @@ export default defineConfig({
     server: {
       fs: { allow: ['..'] },
       // dev 时把 /api/* 代理到本地的运营后台，埋点/反馈就能真正存进去（生产静态站靠 PUBLIC_BACKEND_BASE）
-      proxy: { '/api': 'http://localhost:8787' },
+      proxy: { '/api': { target: 'http://localhost:8787', changeOrigin: true, xfwd: true } },
     },
   },
 });

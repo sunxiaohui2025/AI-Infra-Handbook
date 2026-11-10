@@ -76,6 +76,13 @@ function requireAuth(req) {
   return validSession(token) ? token : null;
 }
 function pathFrom(trackPath) { return trackPath || ''; }
+// 取客户端 IP：优先 X-Forwarded-For（反代/网关），其次 socket 地址；去掉 IPv4 映射前缀
+function getClientIp(req) {
+  const xff = req.headers['x-forwarded-for'] || req.headers['x-real-ip'] || '';
+  const first = (xff.split(',')[0] || '').trim();
+  const ip = first || req.socket.remoteAddress || '';
+  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
 
 /* ---------- 静态文件（后台页面） ---------- */
 const MIME = {
@@ -134,6 +141,7 @@ const server = createServer(async (req, res) => {
         title: (body.title || '').toString().slice(0, 300),
         ua: (req.headers['user-agent'] || '').slice(0, 300),
         ref: (req.headers.referer || '').slice(0, 500),
+        ip: getClientIp(req),
       });
       return send(res, 200, { ok: true });
     }

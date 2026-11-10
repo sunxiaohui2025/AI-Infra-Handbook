@@ -28,7 +28,8 @@ export function initSchema() {
       pages       TEXT NOT NULL DEFAULT '[]',
       ua          TEXT NOT NULL DEFAULT '',
       last_ref    TEXT NOT NULL DEFAULT '',
-      last_path   TEXT NOT NULL DEFAULT ''
+      last_path   TEXT NOT NULL DEFAULT '',
+      ip          TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS pageviews (
       id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,7 +38,8 @@ export function initSchema() {
       title TEXT NOT NULL DEFAULT '',
       ua    TEXT NOT NULL DEFAULT '',
       ref   TEXT NOT NULL DEFAULT '',
-      ts    TEXT NOT NULL
+      ts    TEXT NOT NULL,
+      ip    TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS feedback (
       id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,31 +62,35 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_pv_ts   ON pageviews(ts);
     CREATE INDEX IF NOT EXISTS idx_fb_status ON feedback(status);
   `);
+
+  // 迁移：给已有的库补 ip 列（新库 CREATE TABLE 已含该列，ALTER 已有列会抛错，忽略即可）
+  try { db.exec(`ALTER TABLE visitors ADD COLUMN ip TEXT NOT NULL DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE pageviews ADD COLUMN ip TEXT NOT NULL DEFAULT ''`); } catch {}
 }
 
 /* ---------- 访问统计 ---------- */
 
 const upsertVisitor = db.prepare(`
-  INSERT INTO visitors (vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_ref, last_path)
-  VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?)
+  INSERT INTO visitors (vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_ref, last_path, ip)
+  VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?)
 `);
 const getVisitor = db.prepare(`SELECT * FROM visitors WHERE vid = ?`);
 const bumpVisitor = db.prepare(`
   UPDATE visitors
-  SET visit_count = ?, page_views = page_views + 1, pages = ?, ua = ?, last_ref = ?, last_path = ?, last_seen = ?
+  SET visit_count = ?, page_views = page_views + 1, pages = ?, ua = ?, last_ref = ?, last_path = ?, ip = ?, last_seen = ?
   WHERE vid = ?
 `);
 const insertPageview = db.prepare(`
-  INSERT INTO pageviews (vid, path, title, ua, ref, ts) VALUES (?, ?, ?, ?, ?, ?)
+  INSERT INTO pageviews (vid, path, title, ua, ref, ts, ip) VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
 
-export function recordVisit({ vid, path, title, ua, ref }) {
+export function recordVisit({ vid, path, title, ua, ref, ip = '' }) {
   const ts = new Date().toISOString();
   const now = Date.now();
   const existing = getVisitor.get(vid);
 
   if (!existing) {
-    upsertVisitor.run(vid, ts, ts, JSON.stringify([{ path, title, views: 1 }]), ua, ref, path);
+    upsertVisitor.run(vid, ts, ts, JSON.stringify([{ path, title, views: 1 }]), ua, ref, path, ip);
   } else {
     // 距上次访问超过会话窗口 => 记为新一次回访
     let visitCount = existing.visit_count;
@@ -96,9 +102,9 @@ export function recordVisit({ vid, path, title, ua, ref }) {
     else pages.push({ path, title, views: 1 });
     if (pages.length > 30) pages = pages.slice(-30); // 只保留最近 30 个路径，避免单个访客行无限膨胀
 
-    bumpVisitor.run(visitCount, JSON.stringify(pages), ua, ref, path, ts, vid);
+    bumpVisitor.run(visitCount, JSON.stringify(pages), ua, ref, path, ip, ts, vid);
   }
-  insertPageview.run(vid, path, title, ua, ref, ts);
+  insertPageview.run(vid, path, title, ua, ref, ts, ip);
 }
 
 /* ---------- 运营指标 ---------- */
@@ -136,13 +142,13 @@ const latestTitle = db.prepare(`
   SELECT title FROM pageviews WHERE path = ? ORDER BY ts DESC LIMIT 1
 `);
 const visitorList = db.prepare(`
-  SELECT vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_path
+  SELECT vid, ip, first_seen, last_seen, visit_count, page_views, pages, ua, last_path
   FROM visitors
   ORDER BY last_seen DESC
   LIMIT ?
 `);
 const visitorDetail = db.prepare(`
-  SELECT path, title, ts FROM pageviews WHERE vid = ? ORDER BY ts DESC LIMIT ?
+  SELECT path, title, ts, ip FROM pageviews WHERE vid = ? ORDER BY ts DESC LIMIT ?
 `);
 const feedbackCount = db.prepare(`SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'`);
 
