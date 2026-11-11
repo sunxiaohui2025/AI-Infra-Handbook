@@ -63,12 +63,20 @@ const assert = (name, cond, extra = '') => {
 let r = await call('POST', '/api/track', { vid: 'v1', path: '/l/3', title: '矩阵乘法' });
 assert('track 缺失 vid → 400', (await call('POST', '/api/track', {})).status === 400);
 assert('track 返回 ok', r.status === 200 && r.data && r.data.ok, JSON.stringify(r.data));
+const pv1l3 = r.data.id;
+assert('track 返回 pageview id', !!pv1l3, 'id=' + pv1l3);
 await call('POST', '/api/track', { vid: 'v1', path: '/l/4', title: '线性变换' });
 await call('POST', '/api/track', { vid: 'v2', path: '/l/3', title: '矩阵乘法' });
 
 // 1.5 健康诊断（无需登录）
 r = await call('GET', '/api/health');
 assert('health 返回 admin:true', r.status === 200 && r.data.admin === true, JSON.stringify(r.data));
+
+// 1.6 停留时长心跳
+r = await call('POST', '/api/dwell', { vid: 'v1', id: pv1l3, dt: 45 });
+assert('dwell 累加 ok', r.status === 200 && r.data.ok, JSON.stringify(r.data));
+assert('dwell 缺 id → 400', (await call('POST', '/api/dwell', { vid: 'v1', dt: 5 })).status === 400);
+assert('异 vid 不能改他人 dwell(仍 ok)', (await call('POST', '/api/dwell', { vid: 'zz', id: pv1l3, dt: 10 })).status === 200);
 
 // 2. 后台未登录 → 401
 assert('未登录 stats → 401', (await call('GET', '/api/admin/stats')).status === 401);
@@ -84,6 +92,8 @@ r = await call('GET', '/api/admin/stats', null, token);
 assert('stats 返回 200', r.status === 200, JSON.stringify(r.data));
 assert('总PV=3', r.data.kpi.totalPv === 3, 'totalPv=' + r.data.kpi.totalPv);
 assert('总UV=2', r.data.kpi.totalUv === 2, 'totalUv=' + r.data.kpi.totalUv);
+assert('累计停留=45', r.data.kpi.totalDwell === 45, 'totalDwell=' + r.data.kpi.totalDwell);
+assert('平均停留=15', r.data.kpi.avgDwell === 15, 'avgDwell=' + r.data.kpi.avgDwell);
 assert('回访=0(同窗口内不算回访)', r.data.kpi.returnRate === 0, 'returnRate=' + r.data.kpi.returnRate);
 assert('走势14天', r.data.series.length === 14, 'len=' + r.data.series.length);
 
@@ -93,15 +103,20 @@ assert('lectures 返回 list', r.status === 200 && Array.isArray(r.data.list), J
 const l3 = r.data.list.find((x) => x.path === '/l/3');
 assert('标题补全=矩阵乘法', l3 && l3.title === '矩阵乘法', JSON.stringify(l3));
 assert('/l/3 views=2', l3 && l3.views === 2, 'views=' + (l3 && l3.views));
+assert('/l/3 dwell=45', l3 && l3.dwell === 45, 'dwell=' + (l3 && l3.dwell));
+assert('/l/3 avgDwell=22.5', l3 && l3.avgDwell === 22.5, 'avgDwell=' + (l3 && l3.avgDwell));
 
 // 6. 访客列表
 r = await call('GET', '/api/admin/visitors?limit=10', null, token);
 assert('visitors 有 2 条', r.status === 200 && r.data.list.length === 2, JSON.stringify(r.data));
 assert('visitors 带 ip 字段', r.data.list.every((v) => 'ip' in v));
+const vv1 = r.data.list.find((v) => v.vid === 'v1');
+assert('v1 停留=45', vv1 && vv1.dwell === 45, 'dwell=' + (vv1 && vv1.dwell));
 
 // 7. 访客明细
 r = await call('GET', '/api/admin/visitors?vid=v1', null, token);
 assert('明细最新为 /l/4', r.data.detail[0].path === '/l/4', JSON.stringify(r.data.detail));
+assert('明细带 dwell 字段', r.data.detail.every((p) => 'dwell' in p));
 
 // 8. 反馈
 r = await call('POST', '/api/feedback', { vid: 'v1', kind: 'error', content: '测试反馈', page: '/l/3' });

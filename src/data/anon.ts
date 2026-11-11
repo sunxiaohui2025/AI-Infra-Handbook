@@ -5,6 +5,14 @@ import { backendUrl } from './site';
 
 const KEY = 'ai_vid';
 
+const DWELL_INTERVAL_MS = 20000; // 每 20 秒心跳一次，累加停留时长
+const DWELL_MIN_S = 5;           // 大于 5 秒才计入，避免噪音
+
+// 本次浏览对应的 pageview id + 上次心跳时间，用于累加停留时长
+let pvId = 0;
+let lastPing = 0;
+let dwellTimer: number | undefined;
+
 /** 取得（或首次生成）匿名访客 ID。存 localStorage，跨页面、跨访问保持。 */
 export function getAnonId(): string {
   try {
@@ -20,7 +28,64 @@ export function getAnonId(): string {
   }
 }
 
-/** 上报一次页面浏览。静默失败，不影响页面本身。 */
+/** 发送一次停留心跳：把自上次心跳以来经过的秒数累加到这一条 pageview 上。 */
+function sendDwell(vid: string, id: number, seconds: number) {
+  if (!id || !(seconds > 0)) return;
+  const dt = Math.round(seconds);
+  if (dt <= 0) return;
+  try {
+    fetch(backendUrl('/api/dwell'), {
+      method: 'POST',
+      keepalive: true, // 页面跳转/关闭时也尽力送达
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vid, id, dt }),
+    }).catch(() => {});
+  } catch {
+    /* 忽略：埋点不能影响正常浏览 */
+  }
+}
+
+function stopDwell() {
+  if (dwellTimer !== undefined) {
+    clearInterval(dwellTimer);
+    dwellTimer = undefined;
+  }
+}
+
+/** 页面加载后启动停留统计：每 20 秒心跳一次；离开/切后台时补发剩余时长。只计“页面可见”的时间。 */
+function startDwell(vid: string) {
+  stopDwell();
+  lastPing = Date.now();
+
+  dwellTimer = window.setInterval(() => {
+    const now = Date.now();
+    const sec = (now - lastPing) / 1000;
+    if (document.visibilityState === 'visible' && sec >= DWELL_MIN_S) {
+      sendDwell(vid, pvId, sec);
+      lastPing = now;
+    }
+  }, DWELL_INTERVAL_MS);
+
+  const flush = () => {
+    const sec = (Date.now() - lastPing) / 1000;
+    if (sec >= 1) sendDwell(vid, pvId, sec);
+    lastPing = Date.now();
+  };
+
+  window.addEventListener('pagehide', () => {
+    flush();
+    stopDwell();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      flush(); // 切后台：把已过时间补上，之后暂停
+    } else {
+      lastPing = Date.now(); // 回前台：从头计，不算后台停留
+    }
+  });
+}
+
+/** 上报一次页面浏览，并启动停留时长统计。静默失败，不影响页面本身。 */
 export function track(path?: string, title?: string) {
   const vid = getAnonId();
   const payload = {
@@ -34,7 +99,15 @@ export function track(path?: string, title?: string) {
       keepalive: true, // 页面跳转/关闭时也尽力送达
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-    }).catch(() => {});
+    })
+      .then((r) => r.json().catch(() => ({})))
+      .then((d) => {
+        if (d && d.id) {
+          pvId = d.id;
+          startDwell(vid);
+        }
+      })
+      .catch(() => {});
   } catch {
     /* 忽略：埋点不能影响正常浏览 */
   }

@@ -8,7 +8,8 @@
 //   - ADMIN_PASSWORD : 后台登录口令（建议用 wrangler secret put ADMIN_PASSWORD）
 //
 // 路由：
-//   POST  /api/track                  埋点（body: { vid, path, title }）
+//   POST  /api/track                  埋点（body: { vid, path, title } -> { ok, id }）
+//   POST  /api/dwell                  停留心跳（body: { vid, id, dt }，累加 pageviews.dwell）
 //   POST  /api/feedback               反馈（body: { vid, kind, content, page, contact }）
 //   POST  /api/admin/login            登录（body: { password } -> { token }）
 //   GET   /api/admin/me               校验 token
@@ -73,7 +74,8 @@ const SCHEMA = [
     ua    TEXT NOT NULL DEFAULT '',
     ref   TEXT NOT NULL DEFAULT '',
     ts    TEXT NOT NULL,
-    ip    TEXT NOT NULL DEFAULT ''
+    ip    TEXT NOT NULL DEFAULT '',
+    dwell INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS feedback (
     id      INTEGER PRIMARY KEY,
@@ -102,12 +104,22 @@ function ensureTables(env) {
   if (!schemaPromise) {
     schemaPromise = (async () => {
       await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
+      await migrateDwellColumn(env);
     })().catch((err) => {
       schemaPromise = null; // 失败后可重试
       throw err;
     });
   }
   return schemaPromise;
+}
+
+// 迁移：给已存在（旧 schema）的 pageviews 表补 dwell 列，幂等
+async function migrateDwellColumn(env) {
+  const cols = await env.DB.prepare(`SELECT name FROM pragma_table_info('pageviews')`).all();
+  const names = (cols.results || []).map((r) => r.name);
+  if (!names.includes('dwell')) {
+    await env.DB.prepare(`ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0`).run();
+  }
 }
 
 /* ---------- 会话（D1 存 token） ---------- */
@@ -149,9 +161,10 @@ async function recordVisit(env, { vid, path, title, ua, ref, ip }) {
       WHERE vid = ?`)
       .bind(visitCount, JSON.stringify(pages), ua, ref, path, ip, ts, vid).run();
   }
-  await env.DB.prepare(`INSERT INTO pageviews (vid, path, title, ua, ref, ts, ip)
+  const res = await env.DB.prepare(`INSERT INTO pageviews (vid, path, title, ua, ref, ts, ip)
     VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .bind(vid, path, title, ua, ref, ts, ip).run();
+  return Number(res.meta.last_row_id || res.meta.changes || 0);
 }
 
 /* ---------- 运营指标 ---------- */
@@ -167,6 +180,7 @@ async function getDashboard(env) {
   const ret = await env.DB.prepare('SELECT COUNT(*) AS c FROM visitors WHERE visit_count > 1').first();
   const totalVis = await env.DB.prepare('SELECT COUNT(*) AS c FROM visitors').first();
   const fb = await env.DB.prepare("SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'").first();
+  const dwell = await env.DB.prepare('SELECT COALESCE(SUM(dwell),0) AS s, COALESCE(AVG(dwell),0) AS a FROM pageviews').first();
 
   // 每讲热度，附最近一次标题
   const lectures = await getLectureRanking(env, 100);
@@ -177,15 +191,15 @@ async function getDashboard(env) {
 
   // 近 14 天走势（补零）
   const raw = await env.DB.prepare(
-    `SELECT substr(ts, 1, 10) AS d, COUNT(*) AS pv, COUNT(DISTINCT vid) AS uv
+    `SELECT substr(ts, 1, 10) AS d, COUNT(*) AS pv, COUNT(DISTINCT vid) AS uv, COALESCE(SUM(dwell),0) AS dw
      FROM pageviews WHERE ts >= ? GROUP BY d ORDER BY d`
   ).bind(startDay).all();
   const map = {};
-  for (const r of raw.results) map[r.d] = { pv: r.pv, uv: r.uv };
+  for (const r of raw.results) map[r.d] = { pv: r.pv, uv: r.uv, dw: r.dw || 0 };
   const series = [];
   for (let i = 13; i >= 0; i--) {
     const d = new Date(Date.now() - i * 24 * 3600 * 1000).toISOString().slice(0, 10);
-    series.push({ d, pv: (map[d] || { pv: 0 }).pv, uv: (map[d] || { uv: 0 }).uv });
+    series.push({ d, pv: (map[d] || { pv: 0 }).pv, uv: (map[d] || { uv: 0 }).uv, dw: (map[d] || { dw: 0 }).dw });
   }
 
   return {
@@ -195,6 +209,7 @@ async function getDashboard(env) {
       weekPv: week.c, weekUv: week.u,
       newVisitors: nv.u, totalVisitors: totalVis.c,
       returnRate: ret.c, newFeedback: fb.c,
+      avgDwell: dwell.a, totalDwell: dwell.s,
     },
     series,
     lectures: lectures.slice(0, 20),
@@ -206,7 +221,9 @@ async function getLectureRanking(env, limit = 100) {
     `SELECT p.path,
         COALESCE((SELECT title FROM pageviews WHERE path = p.path ORDER BY ts DESC LIMIT 1), '') AS title,
         COUNT(*) AS views,
-        COUNT(DISTINCT p.vid) AS uv
+        COUNT(DISTINCT p.vid) AS uv,
+        COALESCE(SUM(p.dwell), 0) AS dwell,
+        ROUND(AVG(p.dwell), 1) AS avgDwell
      FROM pageviews p
      GROUP BY p.path
      ORDER BY views DESC
@@ -217,15 +234,16 @@ async function getLectureRanking(env, limit = 100) {
 
 async function getVisitorList(env, limit = 100) {
   const rows = await env.DB.prepare(
-    `SELECT vid, ip, first_seen, last_seen, visit_count, page_views, pages, ua, last_path
-     FROM visitors ORDER BY last_seen DESC LIMIT ?`
+    `SELECT v.vid, v.ip, v.first_seen, v.last_seen, v.visit_count, v.page_views, v.pages, v.ua, v.last_path,
+        (SELECT COALESCE(SUM(dwell),0) FROM pageviews WHERE vid = v.vid) AS dwell
+     FROM visitors v ORDER BY v.last_seen DESC LIMIT ?`
   ).bind(limit).all();
   return rows.results;
 }
 
 async function getVisitorDetail(env, vid, limit = 200) {
   const rows = await env.DB.prepare(
-    `SELECT path, title, ts, ip FROM pageviews WHERE vid = ? ORDER BY ts DESC LIMIT ?`
+    `SELECT path, title, ts, ip, dwell FROM pageviews WHERE vid = ? ORDER BY ts DESC LIMIT ?`
   ).bind(vid, limit).all();
   return rows.results;
 }
@@ -268,7 +286,7 @@ async function handleApi(request, env, url) {
     const body = await readBody(request);
     const vid = (body.vid || '').toString();
     if (!vid) return json({ error: 'missing vid' }, 400);
-    await recordVisit(env, {
+    const id = await recordVisit(env, {
       vid,
       path: (body.path || '').toString().slice(0, 500),
       title: (body.title || '').toString().slice(0, 300),
@@ -276,6 +294,18 @@ async function handleApi(request, env, url) {
       ref: (request.headers.get('referer') || '').slice(0, 500),
       ip: getClientIp(request),
     });
+    return json({ ok: true, id });
+  }
+
+  // 停留时长心跳：只累加该访客自己的 pageview，避免刷数
+  if (path === '/api/dwell' && method === 'POST') {
+    const body = await readBody(request);
+    const id = Number(body.id);
+    const dt = Math.round(Number(body.dt) || 0);
+    const vid = (body.vid || '').toString();
+    if (!id || !(dt > 0)) return json({ error: 'bad payload' }, 400);
+    await env.DB.prepare('UPDATE pageviews SET dwell = dwell + ? WHERE id = ? AND vid = ?')
+      .bind(dt, id, vid).run();
     return json({ ok: true });
   }
 

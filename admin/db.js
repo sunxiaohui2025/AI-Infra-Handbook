@@ -39,7 +39,8 @@ export function initSchema() {
       ua    TEXT NOT NULL DEFAULT '',
       ref   TEXT NOT NULL DEFAULT '',
       ts    TEXT NOT NULL,
-      ip    TEXT NOT NULL DEFAULT ''
+      ip    TEXT NOT NULL DEFAULT '',
+      dwell INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS feedback (
       id      INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,6 +67,7 @@ export function initSchema() {
   // 迁移：给已有的库补 ip 列（新库 CREATE TABLE 已含该列，ALTER 已有列会抛错，忽略即可）
   try { db.exec(`ALTER TABLE visitors ADD COLUMN ip TEXT NOT NULL DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE pageviews ADD COLUMN ip TEXT NOT NULL DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0`); } catch {}
 }
 
 /* ---------- 访问统计 ---------- */
@@ -104,7 +106,16 @@ export function recordVisit({ vid, path, title, ua, ref, ip = '' }) {
 
     bumpVisitor.run(visitCount, JSON.stringify(pages), ua, ref, path, ip, ts, vid);
   }
-  insertPageview.run(vid, path, title, ua, ref, ts, ip);
+  const res = insertPageview.run(vid, path, title, ua, ref, ts, ip);
+  return Number(res.lastInsertRowid);
+}
+
+const addDwellStmt = db.prepare(`
+  UPDATE pageviews SET dwell = dwell + ? WHERE id = ? AND vid = ?
+`);
+export function addDwell({ vid, id, dt }) {
+  addDwellStmt.run(dt, id, vid);
+  return true;
 }
 
 /* ---------- 运营指标 ---------- */
@@ -122,16 +133,19 @@ const returnRate = db.prepare(`
   SELECT COUNT(*) AS c FROM visitors WHERE visit_count > 1
 `);
 const totalVisitors = db.prepare(`SELECT COUNT(*) AS c FROM visitors`);
+const dwellAgg = db.prepare(`SELECT COALESCE(SUM(dwell),0) AS s, COALESCE(AVG(dwell),0) AS a FROM pageviews`);
 const dailySeries = db.prepare(`
   SELECT substr(ts, 1, 10) AS d,
          COUNT(*) AS pv,
-         COUNT(DISTINCT vid) AS uv
+         COUNT(DISTINCT vid) AS uv,
+         COALESCE(SUM(dwell),0) AS dw
   FROM pageviews
   WHERE ts >= ?
   GROUP BY d ORDER BY d
 `);
 const topPages = db.prepare(`
-  SELECT path, COUNT(*) AS views, COUNT(DISTINCT vid) AS uv
+  SELECT path, COUNT(*) AS views, COUNT(DISTINCT vid) AS uv,
+         COALESCE(SUM(dwell),0) AS dwell, ROUND(AVG(dwell),1) AS avgDwell
   FROM pageviews
   WHERE path LIKE ?
   GROUP BY path
@@ -142,13 +156,14 @@ const latestTitle = db.prepare(`
   SELECT title FROM pageviews WHERE path = ? ORDER BY ts DESC LIMIT 1
 `);
 const visitorList = db.prepare(`
-  SELECT vid, ip, first_seen, last_seen, visit_count, page_views, pages, ua, last_path
-  FROM visitors
-  ORDER BY last_seen DESC
+  SELECT v.vid, v.ip, v.first_seen, v.last_seen, v.visit_count, v.page_views, v.pages, v.ua, v.last_path,
+         (SELECT COALESCE(SUM(dwell),0) FROM pageviews WHERE vid = v.vid) AS dwell
+  FROM visitors v
+  ORDER BY v.last_seen DESC
   LIMIT ?
 `);
 const visitorDetail = db.prepare(`
-  SELECT path, title, ts, ip FROM pageviews WHERE vid = ? ORDER BY ts DESC LIMIT ?
+  SELECT path, title, ts, ip, dwell FROM pageviews WHERE vid = ? ORDER BY ts DESC LIMIT ?
 `);
 const feedbackCount = db.prepare(`SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'`);
 
@@ -165,6 +180,7 @@ export function getDashboard() {
   const ret = returnRate.get().c;
   const total = totalVisitors.get().c;
   const fb = feedbackCount.get().c;
+  const dw = dwellAgg.get();
   const series = dailySeries.all(startDay);
 
   return {
@@ -179,6 +195,7 @@ export function getDashboard() {
       totalVisitors: total,
       returnRate: total ? Math.round((ret / total) * 100) : 0,
       newFeedback: fb,
+      avgDwell: dw.a, totalDwell: dw.s,
     },
     series,
   };

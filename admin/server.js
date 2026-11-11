@@ -7,7 +7,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { dirname, join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  db, recordVisit, getDashboard, getLectureRanking,
+  db, recordVisit, addDwell, getDashboard, getLectureRanking,
   getVisitorList, getVisitorDetail,
   addFeedback, listFeedback, setFeedbackStatus,
   createSession, validSession, deleteSession,
@@ -135,7 +135,7 @@ const server = createServer(async (req, res) => {
       const body = await readBody(req);
       const vid = (body.vid || '').toString();
       if (!vid) return send(res, 400, { error: 'missing vid' });
-      recordVisit({
+      const id = recordVisit({
         vid,
         path: (body.path || '').toString().slice(0, 500),
         title: (body.title || '').toString().slice(0, 300),
@@ -143,6 +143,16 @@ const server = createServer(async (req, res) => {
         ref: (req.headers.referer || '').slice(0, 500),
         ip: getClientIp(req),
       });
+      return send(res, 200, { ok: true, id });
+    }
+
+    if (url.pathname === '/api/dwell' && req.method === 'POST') {
+      const body = await readBody(req);
+      const id = Number(body.id);
+      const dt = Math.round(Number(body.dt) || 0);
+      const vid = (body.vid || '').toString();
+      if (!id || !(dt > 0)) return send(res, 400, { error: 'bad payload' });
+      addDwell({ vid, id, dt });
       return send(res, 200, { ok: true });
     }
 

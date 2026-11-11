@@ -65,6 +65,7 @@ function renderKpis(k) {
     { k: '独立访客 (UV)', v: k.totalUv, h: `累计回访访客占比 ${k.returnRate}%` },
     { k: '今日访问', v: k.today, h: `今日独立访客 ${k.todayUv}` },
     { k: '近 7 天訪問', v: k.weekPv, h: `新增访客 ${k.newVisitors}` },
+    { k: '平均停留', v: fmtDur(k.avgDwell), h: `累计停留 ${fmtDur(k.totalDwell)}` },
     { k: '待处理反馈', v: k.newFeedback, h: '需要你查看', cls: k.newFeedback > 0 ? '' : 'small' },
   ];
   $('#kpis').innerHTML = cards.map((c) =>
@@ -87,12 +88,13 @@ function renderChart(series) {
 /* ---------- 每讲热度 ---------- */
 async function loadLectures() {
   const d = await api('/api/admin/lectures?limit=25');
+  const list = (d && d.list) ? d.list : (Array.isArray(d) ? d : []);
   const rows = $('#lectureRows');
   const empty = $('#lectureEmpty');
-  if (!d || !d.length) { rows.innerHTML = ''; empty.hidden = false; return; }
+  if (!list.length) { rows.innerHTML = ''; empty.hidden = false; return; }
   empty.hidden = true;
-  const max = Math.max(...d.map((r) => r.views), 1);
-  rows.innerHTML = d.map((r, i) => {
+  const max = Math.max(...list.map((r) => r.views), 1);
+  rows.innerHTML = list.map((r, i) => {
     const id = r.path.replace('/l/', '');
     const title = r.title || `第 ${id} 讲`;
     const pct = Math.round((r.views / max) * 100);
@@ -102,6 +104,7 @@ async function loadLectures() {
       <td>${title}</td>
       <td class="num">${r.views}</td>
       <td class="num">${r.uv}</td>
+      <td class="num">${fmtDur(r.avgDwell)}</td>
       <td><div class="bar"><i style="width:${pct}%"></i></div></td>
     </tr>`;
   }).join('');
@@ -123,9 +126,10 @@ async function loadVisitors() {
       <td class="num">${fmt(v.last_seen)}</td>
       <td class="num">${v.visit_count}</td>
       <td class="num">${v.page_views}</td>
+      <td class="num">${fmtDur(v.dwell)}</td>
       <td class="mono">${v.last_path || ''}</td>
     </tr>
-    <tr class="det" data-det="${v.vid}" hidden><td colspan="7"><div class="detail" data-load></div></td></tr>
+    <tr class="det" data-det="${v.vid}" hidden><td colspan="8"><div class="detail" data-load></div></td></tr>
   `).join('');
   $$('#visitorRows tr.clickable').forEach((tr) =>
     tr.addEventListener('click', () => toggleVisitor(tr))
@@ -141,7 +145,7 @@ async function toggleVisitor(tr) {
       const d = await api('/api/admin/visitors?vid=' + encodeURIComponent(vid));
       const pv = d.detail || [];
       box.innerHTML = pv.length
-        ? pv.map((p) => `<div class="muted">${fmt(p.ts)} <span class="chip">${p.path}</span> ${p.title || ''} <span class="muted">${p.ip || ''}</span></div>`).join('')
+        ? pv.map((p) => `<div class="muted">${fmt(p.ts)} <span class="chip">${p.path}</span> ${p.title || ''} <span class="muted">${p.ip || ''} · 停留 ${fmtDur(p.dwell)}</span></div>`).join('')
         : '<div class="muted">暂无浏览记录</div>';
       box.dataset.loaded = '1';
     }
@@ -203,6 +207,15 @@ function fmt(iso) {
   return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function fmtDur(s) {
+  let n = Math.round(Number(s) || 0);
+  if (n <= 0) return '0 秒';
+  if (n < 60) return n + ' 秒';
+  const m = Math.floor(n / 60); const r = n % 60;
+  if (m < 60) return r ? `${m} 分 ${r} 秒` : `${m} 分`;
+  const h = Math.floor(m / 60); const mr = m % 60;
+  return mr ? `${h} 小时 ${mr} 分` : `${h} 小时`;
+}
 function kindCn(k) { return ({ bug: '问题', suggest: '建议', praise: '表扬', other: '其他' })[k] || (k || '未分类'); }
 function statusCn(s) { return ({ new: '待处理', done: '已处理', ignored: '已忽略' })[s] || s; }
 
