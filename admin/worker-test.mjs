@@ -139,6 +139,49 @@ assert('/admin 无斜杠 → 302', admin.status === 302, 'status=' + admin.statu
 assert('/admin → Location /admin/', admin.headers.get('location') === '/admin/');
 assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200);
 
+// 11. 旧 schema 迁移：pageviews 没有 dwell 列时，首次请求自动补列（不走 pragma，用 try/catch）
+{
+  // 用带 query 的动态 import 拿到全新的 worker 模块（schemaPromise 单例为 null），
+  // 才能让 ensureTables 真正在旧库上跑。生产是单隔离单 env，不涉及此问题。
+  const workerFresh = (await import('./worker.js?mig=' + Date.now())).default;
+  const old = new DatabaseSync(':memory:');
+  old.exec(`
+    CREATE TABLE visitors (
+      vid TEXT PRIMARY KEY, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+      visit_count INTEGER NOT NULL DEFAULT 1, page_views INTEGER NOT NULL DEFAULT 0,
+      pages TEXT NOT NULL DEFAULT '[]', ua TEXT NOT NULL DEFAULT '',
+      last_ref TEXT NOT NULL DEFAULT '', last_path TEXT NOT NULL DEFAULT '', ip TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE pageviews (
+      id INTEGER PRIMARY KEY, vid TEXT NOT NULL, path TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+      ua TEXT NOT NULL DEFAULT '', ref TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL, ip TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE feedback (
+      id INTEGER PRIMARY KEY, vid TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL, page TEXT NOT NULL DEFAULT '', contact TEXT NOT NULL DEFAULT '',
+      ua TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'new'
+    );
+    CREATE TABLE sessions (
+      token TEXT PRIMARY KEY, created_at TEXT NOT NULL, expires_at TEXT NOT NULL
+    );
+  `);
+  const oldEnv = {
+    DB: makeMockD1(old),
+    ASSETS: { fetch: () => new Response('static', { status: 200 }) },
+    ADMIN_PASSWORD: 'fuyao',
+  };
+  const rr = await workerFresh.fetch(new Request('https://example.com/api/track', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ vid: 'm1', path: '/l/9', title: '迁移测试' }),
+  }), oldEnv);
+  assert('旧库 track 成功(自动迁移)', rr.status === 200, 'status=' + rr.status);
+  const cols = old.prepare(`SELECT name FROM pragma_table_info('pageviews')`).all().map((r) => r.name);
+  assert('迁移后 pageviews 有 dwell 列', cols.includes('dwell'), cols.join(','));
+  const row = old.prepare(`SELECT dwell FROM pageviews WHERE vid = 'm1'`).get();
+  assert('迁移后 dwell 默认 0', row && row.dwell === 0, JSON.stringify(row));
+}
+
 console.log('');
 console.log(fail === 0 ? '✅ 全部通过' : '❌ ' + fail + ' 项失败');
 process.exit(fail === 0 ? 0 : 1);

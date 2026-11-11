@@ -113,12 +113,14 @@ function ensureTables(env) {
   return schemaPromise;
 }
 
-// 迁移：给已存在（旧 schema）的 pageviews 表补 dwell 列，幂等
+// 迁移：给已存在（旧 schema）的 pageviews 表补 dwell 列。
+// 用 try/catch 而非 pragma_table_info（D1 对某些 pragma 表值函数会报 SQLITE_AUTH），
+// 列已存在时 ALTER 抛“duplicate column”，忽略即可，幂等。
 async function migrateDwellColumn(env) {
-  const cols = await env.DB.prepare(`SELECT name FROM pragma_table_info('pageviews')`).all();
-  const names = (cols.results || []).map((r) => r.name);
-  if (!names.includes('dwell')) {
+  try {
     await env.DB.prepare(`ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0`).run();
+  } catch {
+    // 列已存在（新表由 CREATE TABLE 已带列）或临时失败：忽略，下次可重试
   }
 }
 
