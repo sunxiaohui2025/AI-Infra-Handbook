@@ -1499,7 +1499,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-gb-bar { fill: var(--surface-sunk); stroke: var(--line-strong); stroke-width: 0.8; }
 .ai-gb-on { fill: var(--key-soft); stroke: var(--key); stroke-width: 2; }
 
-/* RadixTree（第 118 讲） */
+/* RadixTree（第 119 讲） */
 .ai-rt-tree { font-size: 13px; margin: var(--space-2) 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunk); }
 .ai-rt-node { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 3px 0; border-left: 2px solid var(--line); padding-left: 8px; }
 .ai-rt-node.is-hot { border-left-color: var(--key); }

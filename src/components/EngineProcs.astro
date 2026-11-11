@@ -1,12 +1,14 @@
 ---
-// 推理引擎的进程结构和一个请求的路径（第 16 篇共用）：engine="vllm"（vLLM V1，提交 821851e）或 "sglang"（提交 48da6bd）。
+// 推理引擎的进程结构和一个请求的路径（第 16 篇共用）：engine="vllm"（vLLM V1，提交 821851e）、"sglang"（提交 48da6bd），
+// 以及第 118 讲的 "vllm-dp"（两个节点、4 个数据并行副本）和 "vllm-pd"（PD 分离的 KV connector）。
 // 虚线框是进程，实线框是进程里的模块。按步骤播放：每一步高亮参与的模块，下方说明这一步发生了什么、在哪个文件。
 // 读者可以：上一步 / 下一步，或直接点某一步；点模块看说明。
-interface Props { engine: 'vllm' | 'sglang'; title?: string; caption?: string }
+interface Props { engine: 'vllm' | 'sglang' | 'vllm-dp' | 'vllm-pd'; title?: string; caption?: string }
+const TITLES: Record<string, string> = { vllm: 'vLLM V1：一个请求经过的三个进程', sglang: 'SGLang：一个请求经过的三个进程', 'vllm-dp': '两个节点、4 个数据并行副本：一个请求怎么找到它的引擎', 'vllm-pd': 'PD 分离：KV 怎么从 prefill 实例到 decode 实例' };
 const { engine, title, caption } = Astro.props;
 ---
 <figure class="ai-gt ai-ea" data-engineprocs={engine}>
-  <div class="ai-ms-title">{title ?? (engine === 'vllm' ? 'vLLM V1：一个请求经过的三个进程' : 'SGLang：一个请求经过的三个进程')}</div>
+  <div class="ai-ms-title">{title ?? TITLES[engine]}</div>
   <div class="ai-gt-pre ai-pc-sets" data-steps></div>
   <div data-svg></div>
   <div class="ai-cg-eq" data-eq></div>
@@ -44,6 +46,53 @@ const { engine, title, caption } = Astro.props;
         { t: '5 前向', on: ['attn', 'graph', 'sampler'], body: '模型前向：命中档位时重放 CUDA Graph；注意力后端按块表读 KV；最后在 GPU 上采样，投机解码时验证草稿。rank 0 把采样结果返回。' },
         { t: '6 更新', on: ['busy', 'sched'], body: '<code>update_from_output()</code>：把新 token 接到请求后面，推进 num_computed_tokens，检查结束条件，释放结束请求的块，组装每个请求这一步的输出。打开异步调度时，下一步的调度和这一步的执行是重叠的。' },
         { t: '7 返回', on: ['outq', 'client', 'outproc', 'http'], body: '输出线程把结果发回前端。OutputProcessor 增量反分词、检查停止字符串，HTTP 层把新的文本片段流式推给客户端。' },
+      ],
+    },
+    'vllm-dp': {
+      boxes: [
+        { id: 'pa', x: 10, y: 10, w: 560, h: 300, group: true, label: '节点 A：API 服务器 + 副本 0、1', info: '带 API 服务器的节点。启动命令不带 --headless，DP 起始编号为 0。' },
+        { id: 'api', x: 26, y: 44, w: 250, h: 40, label: 'API 服务器：FastAPI + AsyncLLM', info: '<code>vllm/entrypoints/openai/</code> 收 HTTP 请求，<code>v1/engine/async_llm.py</code> 分词、为每个请求建一个输出流。' },
+        { id: 'lb', x: 26, y: 100, w: 250, h: 40, label: 'DPLBAsyncMPClient：挑副本', info: '<code>v1/engine/core_client.py</code> 第 1777 行起。用协调器发来的负载快照、加上自己记的在途请求数，给每个副本打分，挑分最低的。' },
+        { id: 'coord', x: 26, y: 156, w: 250, h: 40, label: 'DP 协调器（单独的进程）', info: '<code>v1/engine/coordinator.py</code>：收集各副本的等待数、运行数、KV 占用率，最快每 100 ms 发布给前端；MoE 模型时还负责“请求波次”的启停。' },
+        { id: 'e0', x: 296, y: 44, w: 258, h: 64, label: '副本 0：EngineCore（GPU 0–3）', info: '一个完整的 EngineCore 进程（第 117 讲），里面的 MultiprocExecutor 带 4 个 worker 做张量并行。' },
+        { id: 'e1', x: 296, y: 124, w: 258, h: 64, label: '副本 1：EngineCore（GPU 4–7）', info: '和副本 0 一样，用这个节点的另外 4 张卡。' },
+        { id: 'mq', x: 26, y: 228, w: 528, h: 40, label: '副本内部：共享内存消息队列 → 4 个 worker，只有一个 worker 回结果', info: '<code>v1/executor/multiproc_executor.py</code>：调度结果写进共享内存的广播队列，4 个 worker 同时读到、一起前向，只由输出 rank 把结果写回。' },
+        { id: 'pb', x: 590, y: 10, w: 300, h: 300, group: true, label: '节点 B：headless（无 API 服务器）', info: '启动命令带 --headless，DP 起始编号为 2。它只跑引擎，通过 ZMQ 和节点 A 的前端、协调器通信。' },
+        { id: 'e2', x: 606, y: 44, w: 268, h: 64, label: '副本 2：EngineCore（GPU 0–3）', info: '远端副本。对前端来说，它和本地的副本没有区别，只是 ZMQ 地址不同。' },
+        { id: 'e3', x: 606, y: 124, w: 268, h: 64, label: '副本 3：EngineCore（GPU 4–7）', info: '远端副本。' },
+        { id: 'grp', x: 606, y: 228, w: 268, h: 40, label: '仅 MoE：跨副本的 DP 通信组', info: 'MoE 模型的专家层要跨副本做 All-to-All，所有副本必须一起前向。非 MoE 模型的副本彼此独立，没有这个通信组。' },
+      ],
+      steps: [
+        { t: '1 收请求', on: ['api'], body: 'HTTP 请求到达节点 A 的 API 服务器，分词、生成请求编号，调用 <code>AsyncLLM.generate</code>。' },
+        { t: '2 挑副本', on: ['lb', 'coord'], body: '<code>DPLBAsyncMPClient.get_core_engine_for_request</code> 给 4 个副本打分：取“快照里的等待数 + 运行数”和“自己发出、还没完成的请求数”中较大的那个；有排队时，再按 KV 占用率加罚分。挑分最低的，比如副本 2。' },
+        { t: '3 发出去', on: ['lb', 'e2'], body: '请求经 ZMQ 发到副本 2 的输入套接字（在节点 B 上）。前端在本地把副本 2 的等待数先加一，免得 100 ms 内的下一个请求又挑中它。' },
+        { t: '4 副本内执行', on: ['e2', 'mq'], body: '副本 2 的 EngineCore 和单机时完全一样：调度、执行器把调度结果写进共享内存队列、4 个 worker 一起前向、输出 rank 回结果、更新状态。' },
+        { t: '5 汇报负载', on: ['e0', 'e1', 'e2', 'e3', 'coord', 'lb'], body: '每个副本把自己的等待数、运行数、KV 占用率发给协调器，协调器合并后发布给所有前端。前端只保留最新的一份快照。' },
+        { t: '6 MoE：锁步', on: ['e0', 'e1', 'e2', 'e3', 'grp'], body: '如果是 MoE 模型：只要有一个副本有活，所有副本都要一起前向，没有请求的副本跑一个空批次陪着做 All-to-All；每 16 步做一次全局同步，确认是否大家都空闲了。' },
+        { t: '7 返回', on: ['e2', 'api'], body: '副本 2 的输出线程把新 token 发回节点 A，AsyncLLM 的输出任务反分词、按请求分发，HTTP 层流式推给客户端。' },
+      ],
+    },
+    'vllm-pd': {
+      boxes: [
+        { id: 'pr', x: 10, y: 10, w: 220, h: 240, group: true, label: '路由 / 代理', info: 'vLLM 之外的一层（例如 Dynamo、llm-d 或一个简单的代理），决定请求先去哪个 prefill 实例、再去哪个 decode 实例。' },
+        { id: 'router', x: 26, y: 44, w: 188, h: 64, label: '先 prefill，再 decode', info: '常见做法：先让 prefill 实例只生成 1 个 token，拿到 KV 的位置信息（kv_transfer_params），再把请求连同这些信息发给 decode 实例。' },
+        { id: 'pp', x: 250, y: 10, w: 310, h: 240, group: true, label: 'Prefill 实例', info: '一个普通的 vLLM 实例，配置成 KV 的生产者。' },
+        { id: 'ps', x: 266, y: 44, w: 278, h: 56, label: '调度器侧 connector：标记“算完要存”', info: '<code>build_connector_meta</code> 把这一步要保存 KV 的请求打包进 SchedulerOutput；<code>request_finished</code> 决定请求结束后块要不要先留着，等对方取走再释放。' },
+        { id: 'pw', x: 266, y: 116, w: 278, h: 56, label: 'worker 侧：save_kv_layer / wait_for_save', info: '前向时每算完一层就可以开始发这一层的 KV（逐层流水），前向之后 <code>wait_for_save</code> 做必要的同步。' },
+        { id: 'pk', x: 266, y: 188, w: 278, h: 44, label: 'KV 块池', info: '和单机时一样的分页 KV。' },
+        { id: 'dp', x: 580, y: 10, w: 310, h: 240, group: true, label: 'Decode 实例', info: '一个普通的 vLLM 实例，配置成 KV 的消费者。' },
+        { id: 'ds', x: 596, y: 44, w: 278, h: 56, label: '调度器侧：外部命中 → 分块 → 登记', info: '<code>get_num_new_matched_tokens</code> 回答“外部有多少个 token 的 KV”；<code>allocate_slots</code> 为它们分块；<code>update_state_after_alloc</code> 告诉 connector 往哪些块里写。' },
+        { id: 'dw', x: 596, y: 116, w: 278, h: 56, label: 'worker 侧：start_load_kv', info: '把远端的 KV 读进刚分好的块。同步加载在前向之前做；异步加载在前向之后发起，请求在加载完成前留在等待状态。' },
+        { id: 'dk', x: 596, y: 188, w: 278, h: 44, label: 'KV 块池', info: '外部 KV 写进来之后，和自己算出来的 KV 没有区别。' },
+        { id: 'xfer', x: 250, y: 266, w: 640, h: 40, label: 'KV 传输：NIXL、Mooncake、LMCache…（不同的 connector 实现）', info: '<code>vllm/distributed/kv_transfer/kv_connector/v1/</code> 下每个子目录或文件是一种实现。由具体实现决定是推还是拉、走 RDMA 还是存储。' },
+      ],
+      steps: [
+        { t: '1 先去 prefill', on: ['router', 'ps'], body: '路由把请求发给 prefill 实例，通常只要求生成 1 个 token。prefill 实例照常调度（先查本地前缀缓存），connector 在调度结果里标记“这个请求算完后要存 KV”。' },
+        { t: '2 算并存', on: ['pw', 'pk'], body: 'prefill 前向，KV 写进本地块池；worker 侧 connector 逐层或在最后把 KV 发出去。请求结束时 <code>request_finished</code> 返回“先别释放块”和 KV 的位置信息。' },
+        { t: '3 传输', on: ['xfer'], body: 'KV 通过 connector 的传输后端搬到 decode 实例那边（RDMA 直读、经存储中转等，取决于实现）。' },
+        { t: '4 decode 调度', on: ['router', 'ds'], body: '路由把请求连同 KV 位置信息发给 decode 实例。调度器先查本地前缀缓存，再问 connector 外部还有多少个 token；<code>allocate_slots</code> 把这些外部 token 也分好块，<code>update_state_after_alloc</code> 记下要写进哪些块。' },
+        { t: '5 加载', on: ['dw', 'dk'], body: 'decode 的 worker 调 <code>start_load_kv</code> 把 KV 写进分好的块。加载完成后，请求的 <code>num_computed_tokens</code> 已经覆盖整个提示，直接进入 decode。' },
+        { t: '6 释放', on: ['ps', 'pk'], body: 'decode 一侧报告传输完成后，prefill 实例才释放这些块。之后 decode 实例像普通请求一样逐 token 生成、流式返回。' },
       ],
     },
     sglang: {

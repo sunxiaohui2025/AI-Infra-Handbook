@@ -1,5 +1,5 @@
 ---
-id: 118
+id: 119
 slug: sglang-architecture
 title: SGLang 的架构
 chapter: 5
@@ -25,7 +25,7 @@ SGLang 和 vLLM 是今天用得最多的两个开源推理引擎。它最初来�
 
 ## 三个进程
 
-<EngineProcs engine="sglang" caption="图 118-1　SGLang 的进程结构：主进程（HTTP 和分词）、每张卡一个调度器进程（调度和执行模型在同一个进程里）、一个反分词进程。点“下一步”看一个请求的路径。" />
+<EngineProcs engine="sglang" caption="图 119-1　SGLang 的进程结构：主进程（HTTP 和分词）、每张卡一个调度器进程（调度和执行模型在同一个进程里）、一个反分词进程。点“下一步”看一个请求的路径。" />
 
 和 vLLM 一样，SGLang 也把分词、调度、反分词放在不同的进程里。最大的不同在中间：vLLM 的 EngineCore 只有一份，调度结果广播给各个 worker 进程；SGLang 是**每张卡一个调度器进程**，调度器和执行模型的 `TpModelWorker` 在同一个进程里。rank 0 从 ZMQ 收到请求后，用 `broadcast_pyobj` 发给其余的 rank（`managers/scheduler_components/request_receiver.py`），每个 rank 各自跑一遍同样的调度，得到同样的结果，然后各自执行。
 
@@ -39,7 +39,7 @@ SGLang 和 vLLM 是今天用得最多的两个开源推理引擎。它最初来�
 - 从根到某个节点的路径，拼起来就是一段完整的前缀。
 - 一个节点的孩子按第一个 token 区分，同一段公共前缀只存一次。
 
-<RadixTree caption="图 118-2　依次送入 5 个请求，看树怎么长。请求 2 和请求 1 在“北京”处分开，匹配停在节点中间，节点被劈成两段；请求 5 是请求 1 加上回答，整条路径都能复用。每次都会对比：按每块 4 个 token 的块哈希能命中多少。" />
+<RadixTree caption="图 119-2　依次送入 5 个请求，看树怎么长。请求 2 和请求 1 在“北京”处分开，匹配停在节点中间，节点被劈成两段；请求 5 是请求 1 加上回答，整条路径都能复用。每次都会对比：按每块 4 个 token 的块哈希能命中多少。" />
 
 <CodeWalk file="third_party/sglang/python/sglang/srt/mem_cache/radix_cache.py" from={251} to={280} steps={[
   { lines: [254, 261], title: '一个节点', body: '<p><code>children</code>：按孩子的第一个 token（页大小大于 1 时是第一页）索引。<code>key</code>：这个节点的 token 段。<code>value</code>：这段 token 的 KV 槽位，一个整数张量。<code>lock_ref</code>：有几个正在运行的请求在用这个节点，大于 0 就不能淘汰。<code>last_access_time</code>：LRU 淘汰用。</p>' },
@@ -104,9 +104,9 @@ SGLang 和 vLLM 是今天用得最多的两个开源推理引擎。它最初来�
 
 ## 零开销调度：发射这一步，再处理上一步
 
-上一讲看到，vLLM 用占位的办法让调度和执行重叠。SGLang 的调度循环更直接地体现了这个思路：
+第 117 讲看到，vLLM 用占位的办法让调度和执行重叠。SGLang 的调度循环更直接地体现了这个思路：
 
-<OverlapLoop caption="图 118-3　调度和计算重叠（和图 117-4 是同一个模型）。SGLang 称之为“零开销调度”：只要 CPU 一步的工作比 GPU 一步快，CPU 的时间就完全藏在 GPU 后面。" />
+<OverlapLoop caption="图 119-3　调度和计算重叠（和图 117-4 是同一个模型）。SGLang 称之为“零开销调度”：只要 CPU 一步的工作比 GPU 一步快，CPU 的时间就完全藏在 GPU 后面。" />
 
 <CodeWalk file="third_party/sglang/python/sglang/srt/managers/scheduler.py" from={2116} to={2221} steps={[
   { lines: [2116, 2148], title: '普通的循环', body: '<p>收请求 → 决定下一批 → 执行 → 处理结果，严格串行。和 nano-vllm 的 <code>step()</code> 一样。</p>' },

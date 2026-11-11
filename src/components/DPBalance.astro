@@ -1,0 +1,108 @@
+---
+// 数据并行副本之间的负载均衡（简化模型，打分规则取自 vLLM 821851e 的 v1/engine/core_client.py 第 1818–1879 行，见第 118 讲）。
+// 4 个副本，每个副本 KV 容量 48 个单位、最多同时运行 32 个请求；请求的 KV 大小有大有小（70% 占 1–3 个单位，30% 占 6–10 个），
+// 运行 0.6–2.2 s。请求以每秒 22 个的速率到达，另在第 1 s、第 3.5 s 各有一阵 30 个请求的突发。时间步长 10 ms，共 6 s，随机数固定种子。
+// 前端每隔“快照间隔”拿到一次各副本的 [等待数, 运行数, KV 占用率]，用下面的规则给副本打分，挑最低的：
+//   基础分 = 快照里的 等待数 + 运行数
+//   在途下限：基础分 = max(本前端发出且未完成的请求数, 基础分)
+//   KV 压力罚分：有排队时，加 等待数 × 6 × max(0, KV 占用率 − 0.5)
+//   本地计数：挑中之后，在本地快照里给这个副本的等待数加一（下一份快照到来前都有效）
+// 读者可以：开关这三条规则、调快照间隔，看突发时各副本的排队和请求的等待时间。数字是模型算出来的，不是 vLLM 的实测。
+interface Props { title?: string; caption?: string }
+const { title = '前端怎么在 4 个副本之间分请求', caption } = Astro.props;
+---
+<figure class="ai-gt ai-dpb" data-dpbalance>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <span class="ai-gt-pre ai-pc-sets" data-group="p"><button data-p="none">只看快照</button><button data-p="all" aria-pressed="true">现在的 vLLM（三条全开）</button></span>
+    <label class="ai-tl-k"><input type="checkbox" data-o="local" checked /> 本地计数</label>
+    <label class="ai-tl-k"><input type="checkbox" data-o="inflight" checked /> 在途下限</label>
+    <label class="ai-tl-k"><input type="checkbox" data-o="kv" checked /> KV 压力罚分</label>
+    <label class="ai-tl-k">快照间隔 <input type="range" min="10" max="500" step="10" value="100" data-s /> <b data-sv></b> ms</label>
+  </div>
+  <div data-svg></div>
+  <table class="ai-sm-arr" data-tbl></table>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const NE = 4, CAP = 48, MAXRUN = 32, DT = 10, T = 6000;
+  const HUE = [210, 25, 140, 280];
+  function rng(seed: number) { return () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+  type Req = { k: number; d: number; arr: number; eng: number; start: number };
+  function arrivals() {                                       // 固定种子生成到达序列：基础流量 + 两阵突发
+    const r = rng(42), out: Req[] = [];
+    const mk = (t: number) => ({ k: r() < 0.7 ? 1 + Math.floor(r() * 3) : 6 + Math.floor(r() * 5), d: 600 + r() * 1600, arr: t, eng: -1, start: -1 });
+    for (let t = 0; t < T; t += DT) {
+      if (r() < 22 * DT / 1000) out.push(mk(t));
+      if ((t >= 1000 && t < 1030) || (t >= 3500 && t < 3530)) for (let i = 0; i < 10; i++) out.push(mk(t));
+    }
+    return out;
+  }
+  const ARR = arrivals();
+  function simulate(o: { local: boolean; inflight: boolean; kv: boolean; snap: number }) {
+    const eng = Array.from({ length: NE }, () => ({ wait: [] as Req[], run: [] as Req[], kv: 0 }));
+    const inflight = new Array(NE).fill(0);
+    let lb = eng.map(() => [0, 0, 0]), start = 0, ai = 0;
+    const reqs = ARR.map((x) => ({ ...x }));
+    const series: number[][] = eng.map(() => []);
+    for (let t = 0; t < T; t += DT) {
+      for (let e = 0; e < NE; e++) {                          // 1) 完成的请求离开，再按先来先到放进等待的请求
+        const E = eng[e];
+        E.run = E.run.filter((q) => { if (t >= q.start + q.d) { E.kv -= q.k; inflight[e]--; return false; } return true; });
+        while (E.wait.length && E.run.length < MAXRUN && E.kv + E.wait[0].k <= CAP) { const q = E.wait.shift()!; q.start = t; E.kv += q.k; E.run.push(q); }
+      }
+      if (t % o.snap === 0) lb = eng.map((E) => [E.wait.length, E.run.length, E.kv / CAP]);   // 2) 协调器发来新快照
+      while (ai < reqs.length && reqs[ai].arr <= t) {         // 3) 这一步到达的请求逐个挑副本
+        const q = reqs[ai++]; let best = 0, min = Infinity;
+        for (let i = 0; i < NE; i++) {
+          const idx = (start + i) % NE, [w, run, kvu] = lb[idx];
+          let score = w + run;
+          if (o.inflight) score = Math.max(inflight[idx], score);
+          if (o.kv && w) score += w * 6 * Math.max(0, kvu - 0.5);
+          if (score < min) { min = score; best = idx; }
+        }
+        if (o.local) lb[best][0] += 1;
+        start = (start + 1) % NE;
+        q.eng = best; inflight[best]++; eng[best].wait.push(q);
+      }
+      eng.forEach((E, e) => series[e].push(E.wait.length));
+    }
+    const waits = reqs.filter((q) => q.start >= 0).map((q) => q.start - q.arr).sort((a, b) => a - b);
+    const per = eng.map((_, e) => ({ n: reqs.filter((q) => q.eng === e).length, maxw: Math.max(...series[e]) }));
+    return { series, per, avg: waits.reduce((a, b) => a + b, 0) / waits.length, p95: waits[Math.floor(waits.length * 0.95)], done: waits.length, total: reqs.length };
+  }
+  function init(fig: HTMLElement) {
+    const sI = fig.querySelector<HTMLInputElement>('[data-s]')!;
+    const box = (k: string) => fig.querySelector<HTMLInputElement>(`[data-o="${k}"]`)!;
+    function draw() {
+      const o = { local: box('local').checked, inflight: box('inflight').checked, kv: box('kv').checked, snap: +sI.value };
+      fig.querySelector('[data-sv]')!.textContent = sI.value;
+      const all = o.local && o.inflight && o.kv, none = !o.local && !o.inflight && !o.kv;
+      fig.querySelectorAll('[data-p]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.p === 'all' ? all : none)));
+      const r = simulate(o);
+      const W = 880, H = 150, x0 = 40, ymax = Math.max(10, ...r.per.map((p) => p.maxw));
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 900 ${H + 40}"><text class="ai-al-gl" x="${x0}" y="12">每个副本的等待队列长度（纵轴最大 ${ymax}）</text>`;
+      for (const t of [1000, 3500]) s += `<line x1="${x0 + t / T * (W - x0)}" y1="18" x2="${x0 + t / T * (W - x0)}" y2="${H + 18}" class="ai-st-grid" stroke-dasharray="3 3"/><text class="ai-al-gl" x="${x0 + t / T * (W - x0) + 4}" y="30">突发</text>`;
+      r.series.forEach((ser, e) => {
+        const pts = ser.map((v, i) => `${(x0 + i / ser.length * (W - x0)).toFixed(1)},${(H + 18 - v / ymax * H).toFixed(1)}`).join(' ');
+        s += `<polyline points="${pts}" fill="none" stroke="hsl(${HUE[e]} 60% 45%)" stroke-width="1.8"/>`;
+      });
+      s += `<line x1="${x0}" y1="${H + 18}" x2="${W}" y2="${H + 18}" class="ai-st-grid"/><text class="ai-al-gl" x="${x0}" y="${H + 34}">0 s</text><text class="ai-al-gl" x="${W}" y="${H + 34}" text-anchor="end">6 s</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s;
+      fig.querySelector<HTMLElement>('[data-tbl]')!.innerHTML = '<tr><th>副本</th><th>分到的请求</th><th>最长等待队列</th></tr>' +
+        r.per.map((p, e) => `<tr><th><span style="color:hsl(${HUE[e]} 60% 45%)">●</span> 副本 ${e}</th><td>${p.n}</td><td>${p.maxw}</td></tr>`).join('');
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `平均排队 <b>${r.avg.toFixed(0)} ms</b>，95% 分位 <b>${r.p95.toFixed(0)} ms</b>（从到达到开始运行；${r.done}/${r.total} 个请求在 6 s 内开始运行）。` +
+        (!o.local && !o.inflight ? ' 没有本地计数、也没有在途下限时，同一份快照里“最空”的副本会在下一份快照到来前吃下全部新请求：突发时请求成群地涌向一个副本。' : '') +
+        (o.snap >= 300 && !o.local && !o.inflight ? ' 快照越旧，扎堆越严重。' : '');
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as Element).closest<HTMLElement>('[data-p]'); if (!b) return;
+      const on = b.dataset.p === 'all'; ['local', 'inflight', 'kv'].forEach((k) => (box(k).checked = on)); draw();
+    });
+    fig.querySelectorAll('input').forEach((i) => i.addEventListener('input', draw));
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-dpbalance]').forEach(init);
+</script>

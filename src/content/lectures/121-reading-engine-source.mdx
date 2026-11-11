@@ -1,11 +1,11 @@
 ---
-id: 120
+id: 121
 slug: reading-engine-source
 title: 怎么读大型引擎的源码
 chapter: 5
 part: 16
 problem: 入口、定位、压测、贡献
-prereqs: [58, 62, 73, 113, 117, 118]
+prereqs: [58, 62, 73, 113, 117, 118, 119]
 level: 主线
 demos: [RunOutput]
 video: ""
@@ -14,7 +14,7 @@ import PrereqLinks from '../../components/PrereqLinks.astro';
 import RunOutput from '../../components/RunOutput.astro';
 import Note from '../../components/Note.astro';
 
-<PrereqLinks ids={[58, 62, 73, 113, 117, 118]} />
+<PrereqLinks ids={[58, 62, 73, 113, 117, 118, 119]} />
 
 第五章从一个 119 行的 v0 开始，写到 400 行的 miniinfer，再读 1200 行的 nano-vllm，最后读了 17 万行的 vLLM 和体量相当的 SGLang。这最后一讲把一路上用到的读法整理出来：面对一个大型引擎，怎么找入口、怎么定位一个功能、怎么验证自己的理解、怎么开始改它。
 
@@ -39,7 +39,7 @@ import Note from '../../components/Note.astro';
 
 ## 二、顺着一个请求走，而不是顺着目录走
 
-第 117、118 讲都是这样读的：找到入口（`LLM.generate` 或 HTTP 接口），找到主循环（`EngineCore.run_busy_loop`、`Scheduler.event_loop_overlap`），然后只追一个请求：它在哪里被分词、被放进哪个队列、在哪一行被调度、它的 KV 块在哪里分配、在哪里被送进模型、新 token 在哪里接上、在哪里结束。每一站只读到“知道这一站做了什么”为止，不往旁边展开。
+第 117–119 讲都是这样读的：找到入口（`LLM.generate` 或 HTTP 接口），找到主循环（`EngineCore.run_busy_loop`、`Scheduler.event_loop_overlap`），然后只追一个请求：它在哪里被分词、被放进哪个队列、在哪一行被调度、它的 KV 块在哪里分配、在哪里被送进模型、新 token 在哪里接上、在哪里结束。每一站只读到“知道这一站做了什么”为止，不往旁边展开。
 
 几个实用的办法：
 
@@ -52,7 +52,7 @@ import Note from '../../components/Note.astro';
 
 想知道某个功能是怎么实现的，最快的入口往往是它的**配置项**：每个用户能打开的功能都有一个参数，参数从命令行一路传到用它的地方。比如想知道第 117 讲的“长 prefill 上限”是怎么起作用的：
 
-<RunOutput cmd=".venv/bin/python bench/trace_flag.py long_prefill_token_threshold" file="outputs/trace_flag.txt" caption="图 120-1　在 vLLM 源码里搜一个配置项（只搜文本）。它出现在三个文件里：config/scheduler.py 定义它（默认 0，表示不限）和校验它，engine/arg_utils.py 把命令行参数传进来，v1/core/sched/scheduler.py 用它。读最后一个文件里的那 11 处，就知道这个功能的全部行为。" />
+<RunOutput cmd=".venv/bin/python bench/trace_flag.py long_prefill_token_threshold" file="outputs/trace_flag.txt" caption="图 121-1　在 vLLM 源码里搜一个配置项（只搜文本）。它出现在三个文件里：config/scheduler.py 定义它（默认 0，表示不限）和校验它，engine/arg_utils.py 把命令行参数传进来，v1/core/sched/scheduler.py 用它。读最后一个文件里的那 11 处，就知道这个功能的全部行为。" />
 
 这条“定义 → 传递 → 使用”的链在所有大型项目里都存在。读的顺序反过来：先读定义处的文档字符串（它说清了意图和默认值），再直接跳到使用处，中间的传递可以略过。
 
