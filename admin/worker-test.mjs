@@ -66,6 +66,10 @@ assert('track 返回 ok', r.status === 200 && r.data && r.data.ok, JSON.stringif
 await call('POST', '/api/track', { vid: 'v1', path: '/l/4', title: '线性变换' });
 await call('POST', '/api/track', { vid: 'v2', path: '/l/3', title: '矩阵乘法' });
 
+// 1.5 健康诊断（无需登录）
+r = await call('GET', '/api/health');
+assert('health 返回 admin:true', r.status === 200 && r.data.admin === true, JSON.stringify(r.data));
+
 // 2. 后台未登录 → 401
 assert('未登录 stats → 401', (await call('GET', '/api/admin/stats')).status === 401);
 

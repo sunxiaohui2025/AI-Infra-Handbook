@@ -253,9 +253,15 @@ async function setFeedbackStatus(env, id, status) {
 
 /* ---------- 接口路由 ---------- */
 async function handleApi(request, env, url) {
-  await ensureTables(env); // 首次请求确保表存在（幂等）
   const path = url.pathname;
   const method = request.method;
+
+  // 健康/诊断：无需登录，用来确认 Worker 是否读到 ADMIN_PASSWORD、DB 绑定是否就绪
+  if (path === '/api/health' && method === 'GET') {
+    return json({ ok: true, admin: !!env.ADMIN_PASSWORD, db: !!env.DB, ts: Date.now() });
+  }
+
+  await ensureTables(env); // 首次请求确保表存在（幂等）
 
   // 公开接口
   if (path === '/api/track' && method === 'POST') {
