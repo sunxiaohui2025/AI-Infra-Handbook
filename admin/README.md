@@ -38,14 +38,17 @@ ADMIN_PASSWORD=你的口令 PORT=8787 node server.js
 | 板块 | 内容 |
 |---|---|
 | 总览 | 总 PV/UV、今日、近 7 天、回访率、待处理反馈；近 14 天走势图 |
-| 每讲热度 | 按 `/l/讲号` 的浏览量排行，可看哪些讲最受欢迎 |
-| 访客明细 | 匿名 ID 列表（IP/首访/最近/回访次数/浏览量），点一行展开浏览轨迹 |
+| 每讲热度 | 按 `/l/讲号` 的浏览量排行 + 平均停留时长，可看哪些讲最受欢迎、哪几讲大家停留最久 |
+| 访客明细 | 匿名 ID 列表（IP/首访/最近/回访次数/浏览量/停留），点一行展开浏览轨迹（含每页停留） |
 | 反馈意见 | 用户通过 `/feedback` 提交的反馈，可标记 处理/忽略/重置 |
+
+> **停留时长**：前端页面加载后每 20 秒心跳上报一次 `/api/dwell`（离开/切后台时补发），只计“页面可见”的时间。后端在 `pageviews.dwell` 列累加秒数，热度/总览/访客明细都带 `dwell`（总秒）与 `avgDwell`（平均秒）。
 
 ## 接口
 
 - 公开
-  - `POST /api/track` — 上报一次浏览，body `{ vid, path, title }`；服务端另取客户端 IP（有 `X-Forwarded-For`/`X-Real-IP` 则优先，适合放 nginx/CDN 反代后）
+  - `POST /api/track` — 上报一次浏览，body `{ vid, path, title }` → `{ ok, id }`（`id` 为本次 pageview，供停留心跳用）；服务端另取客户端 IP（有 `X-Forwarded-For`/`X-Real-IP` 则优先，适合放 nginx/CDN 反代后）
+  - `POST /api/dwell` — 停留心跳，body `{ vid, id, dt }`，把 `dt` 秒累加到该访客自己那条 pageview 的 `dwell`（防止刷别人）
   - `POST /api/feedback` — 提交反馈，body `{ vid, kind, content, page, contact }`
 - 后台（需 `Authorization: Bearer <token>`，先 `POST /api/admin/login` 拿 token）
   - `POST /api/admin/login` — body `{ password }` → `{ token }`
