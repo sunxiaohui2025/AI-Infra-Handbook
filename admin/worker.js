@@ -51,6 +51,65 @@ function getClientIp(request) {
   return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
 }
 
+/* ---------- 自动建表（与 admin/schema.sql 一致，首次请求时若表不存在则创建） ---------- */
+const SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS visitors (
+    vid         TEXT PRIMARY KEY,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    visit_count INTEGER NOT NULL DEFAULT 1,
+    page_views  INTEGER NOT NULL DEFAULT 0,
+    pages       TEXT NOT NULL DEFAULT '[]',
+    ua          TEXT NOT NULL DEFAULT '',
+    last_ref    TEXT NOT NULL DEFAULT '',
+    last_path   TEXT NOT NULL DEFAULT '',
+    ip          TEXT NOT NULL DEFAULT ''
+  )`,
+  `CREATE TABLE IF NOT EXISTS pageviews (
+    id    INTEGER PRIMARY KEY,
+    vid   TEXT NOT NULL,
+    path  TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    ua    TEXT NOT NULL DEFAULT '',
+    ref   TEXT NOT NULL DEFAULT '',
+    ts    TEXT NOT NULL,
+    ip    TEXT NOT NULL DEFAULT ''
+  )`,
+  `CREATE TABLE IF NOT EXISTS feedback (
+    id      INTEGER PRIMARY KEY,
+    vid     TEXT NOT NULL DEFAULT '',
+    kind    TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    page    TEXT NOT NULL DEFAULT '',
+    contact TEXT NOT NULL DEFAULT '',
+    ua      TEXT NOT NULL DEFAULT '',
+    ts      TEXT NOT NULL,
+    status  TEXT NOT NULL DEFAULT 'new'
+  )`,
+  `CREATE TABLE IF NOT EXISTS sessions (
+    token      TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_pv_vid    ON pageviews(vid)`,
+  `CREATE INDEX IF NOT EXISTS idx_pv_path   ON pageviews(path)`,
+  `CREATE INDEX IF NOT EXISTS idx_pv_ts     ON pageviews(ts)`,
+  `CREATE INDEX IF NOT EXISTS idx_fb_status ON feedback(status)`,
+];
+
+let schemaPromise = null;
+function ensureTables(env) {
+  if (!schemaPromise) {
+    schemaPromise = (async () => {
+      await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
+    })().catch((err) => {
+      schemaPromise = null; // 失败后可重试
+      throw err;
+    });
+  }
+  return schemaPromise;
+}
+
 /* ---------- 会话（D1 存 token） ---------- */
 async function createSession(env, token) {
   const now = Date.now();
@@ -194,6 +253,7 @@ async function setFeedbackStatus(env, id, status) {
 
 /* ---------- 接口路由 ---------- */
 async function handleApi(request, env, url) {
+  await ensureTables(env); // 首次请求确保表存在（幂等）
   const path = url.pathname;
   const method = request.method;
 

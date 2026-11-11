@@ -24,6 +24,12 @@ function makeMockD1(db) {
       };
       return api;
     },
+    // D1 的 batch：接收若干已 prepare 的语句，逐个执行
+    async batch(stmts) {
+      const results = [];
+      for (const s of stmts) results.push(await s.run());
+      return { results, success: true };
+    },
   };
 }
 
