@@ -95,11 +95,25 @@ journalctl -u ai-infra-admin -f   # 看日志
 sudo bash install.sh --uninstall  # 卸载（会删数据）
 ```
 
-### Cloudflare（如果你已把站点发到 Workers）
+### Cloudflare（如果你已把站点发到 Workers / Pages）
 
-如果前端已经部署在 `*.workers.dev`，不再需要单独的 Node 服务——本后台可作为 **同域的 Cloudflare Worker** 一起部署，前端 `/api/*` 埋点/反馈直接打到 Worker，由 **D1（SQLite 兼容）** 存数据，**无需 `PUBLIC_BACKEND_BASE`**。
+不需要单独的 Node 服务——本后台可作为 **同域的 Cloudflare Worker** 一起部署：前端 `/api/*` 埋点/反馈直接打到 Worker，由 **D1（SQLite 兼容）** 存数据，**无需 `PUBLIC_BACKEND_BASE`**。
 
-配套文件：`admin/worker.js`（Worker 版）、`admin/schema.sql`（D1 表结构）、`admin/deploy/deploy-cloudflare.sh`（一键部署）。
+配套文件：`admin/worker.js`（Worker 版）、`admin/schema.sql`（D1 表结构）、`admin/deploy/deploy-cloudflare.sh`（部署脚本）、`scripts/copy-admin.mjs`（构建时把后台拷进 `dist/admin`）。
+
+#### 方式一：在 Cloudflare Pages 项目里配置（推荐，构建环境自动认证）
+
+在 Pages 项目的「构建设置」里：
+
+| 字段 | 填什么 |
+| --- | --- |
+| 构建命令 (Build command) | `npm run build` |
+| 部署命令 (Deploy command) | `bash admin/deploy/deploy-cloudflare.sh` |
+| 环境变量 | 新增一个 **Secret** 类型变量 `ADMIN_PASSWORD`，值是后台登录口令 |
+
+`npm run build` 现在会顺带把 `admin/public` 拷进 `dist/admin`；部署命令会自动：创建/复用 D1 `ai-infra-handbook-db` → 把 `database_id` 写进 `wrangler.jsonc` → 应用 `schema.sql` → 把 `ADMIN_PASSWORD` 写成 Workers 密文 → `wrangler deploy`。
+
+#### 方式二：在自己有 wrangler 登录的终端里
 
 ```bash
 # 0) 登录（只需一次）
@@ -110,8 +124,6 @@ sh admin/deploy/deploy-cloudflare.sh
 #    或指定口令：ADMIN_PASSWORD=你的口令 sh admin/deploy/deploy-cloudflare.sh
 ```
 
-脚本自动完成：`astro build` → 把 `admin/public` 拷进 `dist/admin` → 创建/复用 D1 → 把 `database_id` 写进 `wrangler.jsonc` → 应用 `schema.sql` → 写入 `ADMIN_PASSWORD` 密文 → `wrangler deploy`。
-
 部署后：
 
 ```
@@ -120,6 +132,8 @@ sh admin/deploy/deploy-cloudflare.sh
 ```
 
 `/admin`（无斜杠）会自动 302 到 `/admin/`；站点页面、`/admin/*` 走静态资源，`/api/*` 由 Worker 处理并读写 D1。
+
+> 若部署报 `binding DB of type d1 must have a valid database_id`（code 10021），说明 D1 还没建、`wrangler.jsonc` 里的 `database_id` 还是占位符 `__D1_ID__`。用上面任一方式跑一次（脚本会自动建库并写入真实 id）即可；别手动跑 `wrangler deploy`。
 
 本地验证 Worker 逻辑（用 node:sqlite 模拟 D1，跑通全部接口）：
 
