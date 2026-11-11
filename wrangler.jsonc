@@ -8,6 +8,10 @@
   "name": "ai-infra-handbook",
   "compatibility_date": "2026-11-10",
   "main": "./admin/worker.js",
+  // 后台登录口令。仓库是私有的，可放这里；也可在 Worker 控制台设 ADMIN_PASSWORD 密文（会覆盖此处）
+  "vars": {
+    "ADMIN_PASSWORD": "infra2026"
+  },
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS"

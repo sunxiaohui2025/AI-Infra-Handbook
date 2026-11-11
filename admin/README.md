@@ -133,6 +133,8 @@ sh admin/deploy/deploy-cloudflare.sh
 
 `/admin`（无斜杠）会自动 302 到 `/admin/`；站点页面、`/admin/*` 走静态资源，`/api/*` 由 Worker 处理并读写 D1。
 
+> **后台口令**：`wrangler.jsonc` 的 `vars.ADMIN_PASSWORD` 里有一个默认口令（`infra2026`），部署后即可登录 `/admin`。仓库是私有的，所以能放这里；若想改用密文且不落库，可在 Worker 控制台 **Settings → Variables and Secrets** 加一个 `ADMIN_PASSWORD` 密文，它会优先于 `vars`。
+
 > 若部署报 `binding DB of type d1 must have a valid database_id`（code 10021），说明 D1 还没建、`wrangler.jsonc` 里的 `database_id` 还是占位符 `__D1_ID__`。用上面任一方式跑一次（脚本会自动建库并写入真实 id）即可；别手动跑 `wrangler deploy`。
 
 本地验证 Worker 逻辑（用 node:sqlite 模拟 D1，跑通全部接口）：
