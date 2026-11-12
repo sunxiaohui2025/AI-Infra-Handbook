@@ -7,7 +7,9 @@
     "dev": "astro dev",
     "build": "astro build && node scripts/copy-admin.mjs",
     "preview": "astro preview",
-    "pdf": "node scripts/export-pdf.mjs"
+    "pdf": "node scripts/export-pdf.mjs",
+    "pdf:book": "node scripts/export-pdf.mjs book",
+    "pdf:all": "node scripts/export-pdf.mjs all"
   },
   "dependencies": {
     "@astrojs/mdx": "4.3.14",

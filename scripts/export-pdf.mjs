@@ -50,9 +50,9 @@ body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .ai-shell-main { min-width: 0 !important; display: block !important; }
 .ai-doc { max-width: none !important; padding: 0 !important; margin: 0 !important; }
 .ai-read { min-height: 0 !important; height: auto !important; display: block !important; }
-.ai-article { font-size: 15px !important; line-height: 26px !important; color: #1a1a1a !important; }
-.ai-article h1 { font-size: 26px !important; line-height: 34px !important; break-after: avoid; }
-.ai-article h2 { font-size: 19px !important; line-height: 28px !important; break-after: avoid; }
+.ai-article { font-size: 18px !important; line-height: 31px !important; color: #1a1a1a !important; }
+.ai-article h1 { font-size: 31px !important; line-height: 40px !important; break-after: avoid; }
+.ai-article h2 { font-size: 23px !important; line-height: 33px !important; break-after: avoid; }
 .ai-article h3 { break-after: avoid; }
 .ai-art-head { break-after: avoid; }
 .ai-article p, .ai-article li, .ai-article dd, .ai-article .ai-lead { orphans: 3; widows: 3; }
@@ -64,9 +64,10 @@ figure, .ai-fig { break-inside: avoid; }
 `;
 
 /* ---------- 全书合订：封面 / 篇扉页 / 总目录 ---------- */
-function buildBookCoverHtml(count, range) {
+function buildBookCoverHtml(count, range, chStats) {
   const today = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>AI Infra 学习网站 · 全书</title>${FONTS_LINK}<style>
+  const { chapters, totalParts } = chStats || { chapters: 5, totalParts: 17 };
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>AI Infra-HandBook · 全书</title>${FONTS_LINK}<style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { background: #f7f6f2; }
 .cover { min-height: 100vh; display: flex; flex-direction: column; justify-content: space-between;
@@ -79,12 +80,12 @@ h1.title { font-size: 58px; line-height: 1.12; font-weight: 700; color: #1d1d1b;
 .range { font-size: 15px; color: #706e66; margin-top: 10px; }
 .foot { font-family: "Noto Sans SC", sans-serif; font-size: 12px; color: #706e66; line-height: 24px; }
 </style></head><body><div class="cover">
-  <div class="brand">AI INFRA · 学习网站</div>
+  <div class="brand">AI INFRA · HANDBOOK</div>
   <div class="mid">
     <div class="rule"></div>
     <div class="kicker">全书合订本</div>
-    <h1 class="title">《AI Infra 学习网站》</h1>
-    <div class="sub">5 章 14 篇 110 讲 · 本版收录 ${count} 讲（第 1–13 篇，第 14 篇整理中）</div>
+    <h1 class="title">《AI Infra-HandBook》</h1>
+    <div class="sub">${chapters} 章 ${totalParts} 篇 · 本版收录 ${count} 讲（已写篇目）</div>
     <div class="range">第 ${range[0]}–${range[1]} 讲 · 按篇分册 · 每篇附扉页与讲目</div>
   </div>
   <div class="foot">导出于 ${today}</div>
@@ -105,7 +106,7 @@ html, body { background: #f7f6f2; }
 h1 { font-size: 46px; font-weight: 700; margin: 8px 0 4px; }
 .meta { font-family: "Noto Sans SC", sans-serif; font-size: 14px; color: #706e66; margin-top: 20px; }
 </style></head><body><div class="divider">
-  <div class="brand">AI INFRA · 学习网站</div>
+  <div class="brand">AI INFRA · HANDBOOK</div>
   <div class="rule"></div>
   <div class="kicker">第 ${cn} 篇</div>
   <h1>${name}</h1>
@@ -113,9 +114,10 @@ h1 { font-size: 46px; font-weight: 700; margin: 8px 0 4px; }
 </div></body></html>`;
 }
 
-function buildMasterTocHtml(pn, parts, pageMap) {
+function buildMasterTocHtml(pn, parts, pageMap, chStats) {
   const allLectures = parts.flatMap((p) => p.lectures);
   const count = allLectures.length;
+  const { chapters, totalParts } = chStats || { chapters: 5, totalParts: 17 };
   const sections = parts.map((p) => {
     const divPg = pageMap.div[p.part] || '';
     const rows = p.lectures.map((l) => {
@@ -126,8 +128,8 @@ function buildMasterTocHtml(pn, parts, pageMap) {
     }).join('');
     return `<section><div class="part">第 ${p.part} 篇 · ${p.name}<span class="pg">${divPg}</span></div><ol>${rows}</ol></section>`;
   }).join('');
-  const pending = `<section class="pending"><div class="part">第 14 篇 · ${pn[14] || '迷你推理引擎'}</div><div class="nolect">本篇整理中，共 6 讲（105–110）暂未收录。</div></section>`;
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>目录 · AI Infra 学习网站</title>${FONTS_LINK}<style>
+  const pending = `${parts.length < totalParts ? `<section class="pending"><div class="part">其余篇目</div><div class="nolect">全站共 ${totalParts} 篇，此处只收录已完成的 ${parts.length} 篇（${count} 讲）。</div></section>` : ''}`;
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>目录 · AI Infra-HandBook</title>${FONTS_LINK}<style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { background: #fff; color: #1d1d1b; font-family: "Noto Serif SC", "Songti SC", serif; }
 .kicker { font-family: "Noto Sans SC", sans-serif; font-size: 11px; letter-spacing: .3em; color: #1f6b5a; }
@@ -146,9 +148,9 @@ li .tag.opt { color: #b45b1e; }
 li .pg { font-family: "JetBrains Mono", "SF Mono", monospace; font-size: 12px; color: #706e66; min-width: 28px; text-align: right; }
 .pending .nolect { font-family: "Noto Sans SC", sans-serif; font-size: 13px; color: #9a978e; padding: 8px 0 2px; }
 </style></head><body><div class="toc">
-  <div class="kicker">AI INFRA · 学习网站</div>
+  <div class="kicker">AI INFRA · HANDBOOK</div>
   <h1>目 录</h1>
-  <div class="sub">全书 5 章 14 篇 110 讲 · 本整理版收录 ${count} 讲（第 1–13 篇）</div>
+  <div class="sub">全书 ${chapters} 章 ${totalParts} 篇 · 本整理版收录 ${count} 讲（已写 ${parts.length} 篇）</div>
   ${sections}
   ${pending}
 </div></body></html>`;
@@ -171,14 +173,14 @@ h1.part-name { font-size: 52px; line-height: 1.15; font-weight: 700; color: #1d1
 .lecture-range { font-size: 15px; color: #706e66; margin-top: 18px; }
 .foot { font-family: "Noto Sans SC", sans-serif; font-size: 12px; color: #706e66; line-height: 24px; }
 </style></head><body><div class="cover">
-  <div class="brand">AI INFRA · 学习网站</div>
+  <div class="brand">AI INFRA · HANDBOOK</div>
   <div class="mid">
     <div class="rule"></div>
     <div class="part-kicker">分篇书册 · 第 ${cn} 篇</div>
     <h1 class="part-name">${name}</h1>
     <div class="lecture-range">第 ${range[0]}–${range[1]} 讲 · 收录 ${count} 讲</div>
   </div>
-  <div class="foot">节选自《AI Infra 学习网站》<br>导出于 ${today}</div>
+  <div class="foot">节选自《AI Infra-HandBook》<br>导出于 ${today}</div>
 </div></body></html>`;
 }
 
@@ -237,6 +239,24 @@ function readPN() {
   return pn;
 }
 
+function readCH() {
+  // 解析 CH 数组里的 chapter 条目，取章数与总篇数（用来在封面/目录写“几章几篇”）。
+  const src = readFileSync(path.join(ROOT, 'src', 'data', 'course.ts'), 'utf-8');
+  const m = src.match(/export const CH: Chapter\[\] = \[([\s\S]*?)\];/);
+  let totalParts = 0;
+  if (m) {
+    const re = /n:\s*(\d+),/g;
+    let mm;
+    let chapters = 0;
+    while ((mm = re.exec(m[1]))) { chapters = Math.max(chapters, +mm[1]); }
+    const partsRe = /parts:\s*\[([^\]]*)\]/g;
+    let pm;
+    while ((pm = partsRe.exec(m[1]))) totalParts += pm[1].split(',').filter(Boolean).length;
+    return { chapters: chapters || 5, totalParts: totalParts || 14 };
+  }
+  return { chapters: 5, totalParts: 14 };
+}
+
 function collectLectures() {
   const lectDir = path.join(ROOT, 'src', 'content', 'lectures');
   const out = [];
@@ -270,26 +290,44 @@ async function renderHtmlToPdf(browser, html, margin) {
   return buf;
 }
 
-async function renderBook(browser, parts, pn) {
+/* 带并发上限的 map：同时最多跑 limit 个任务，避免一讲等一讲拖慢整本书。 */
+async function mapConcurrent(items, limit, fn) {
+  const results = new Array(items.length);
+  let idx = 0;
+  const workers = [];
+  const n = Math.min(limit, items.length);
+  for (let w = 0; w < n; w++) {
+    workers.push((async () => {
+      while (idx < items.length) {
+        const i = idx++;
+        results[i] = await fn(items[i], i);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+async function renderBook(browser, parts, pn, chStats) {
   const allLectures = parts.flatMap((p) => p.lectures);
   const range = [allLectures[0].id, allLectures[allLectures.length - 1].id];
-  const cover = await renderHtmlToPdf(browser, buildBookCoverHtml(allLectures.length, range), COVER_MARGIN);
+  const cover = await renderHtmlToPdf(browser, buildBookCoverHtml(allLectures.length, range, chStats), COVER_MARGIN);
 
-  // 渲染篇扉页 + 各讲
-  const partData = [];
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
-    const divider = await renderHtmlToPdf(browser, buildPartDividerHtml(p.part, p.name, p.lectures), COVER_MARGIN);
-    const lecBufs = [];
-    for (const l of p.lectures) {
-      lecBufs.push(await renderLecturePdf(browser, l.id));
-      process.stdout.write(`    渲染第 ${pad2(l.id)} 讲…\r`);
-    }
-    partData.push({ divider, lecBufs });
-  }
+  // 并发渲染篇扉页 + 各讲，避免串行等待拖慢整本书
+  const CONC = 4;
+  const dividers = await mapConcurrent(parts, CONC, async (p) =>
+    renderHtmlToPdf(browser, buildPartDividerHtml(p.part, p.name, p.lectures), COVER_MARGIN));
+  const flatIds = allLectures.map((l) => l.id);
+  const lecBufs = await mapConcurrent(flatIds, CONC, async (id) => {
+    const buf = await renderLecturePdf(browser, id);
+    process.stdout.write(`    渲染第 ${pad2(id)} 讲…\r`);
+    return buf;
+  });
+  // 按篇重新分组
+  const partData = parts.map((p, i) => ({ divider: dividers[i], lecBufs: p.lectures.map((l) => lecBufs[flatIds.indexOf(l.id)]) }));
 
   // 先渲一次目录（无页码）量页数
-  const dummyToc = buildMasterTocHtml(pn, parts, { div: {}, lec: {} });
+  const dummyToc = buildMasterTocHtml(pn, parts, { div: {}, lec: {} }, chStats);
   const dummyBuf = await renderHtmlToPdf(browser, dummyToc, TOC_MARGIN);
   const tocPages = (await PDFDocument.load(dummyBuf)).getPageCount();
 
@@ -306,7 +344,7 @@ async function renderBook(browser, parts, pn) {
   const totalPages = next;
 
   // 带页码重渲目录，再合并
-  const tocBuf = await renderHtmlToPdf(browser, buildMasterTocHtml(pn, parts, pageMap), TOC_MARGIN);
+  const tocBuf = await renderHtmlToPdf(browser, buildMasterTocHtml(pn, parts, pageMap, chStats), TOC_MARGIN);
   const realPages = (await PDFDocument.load(tocBuf)).getPageCount();
   if (realPages !== tocPages) console.warn(`提示：目录页数 ${tocPages} -> ${realPages}，页码可能偏移（建议复查）`);
   const bufs = [cover, tocBuf];
@@ -317,11 +355,14 @@ async function renderBook(browser, parts, pn) {
 
 async function renderLecturePdf(browser, id) {
   const page = await browser.newPage({ viewport: { width: 900, height: 1200 } });
-  await page.goto(`http://localhost:${PORT}/l/${id}`, { waitUntil: 'networkidle' });
+  // 用 'load' 而不是 'networkidle'：有的页面会持续请求资源（如字体/埋点），
+  // networkidle 会永远等不到 500ms 零网络静默而超时。'load' 到达即返回，
+  // 再等字体就绪 + 固定延时即可稳定输出。
+  await page.goto(`http://localhost:${PORT}/l/${id}`, { waitUntil: 'load', timeout: 60000 });
   await page.evaluate(() => { document.documentElement.dataset.route = 'full'; });
   await page.addStyleTag({ content: PRINT_CSS });
   try { await page.evaluate(() => document.fonts && document.fonts.ready); } catch (e) {}
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(500);
   const buf = await page.pdf({ format: 'A4', printBackground: true, margin: CONTENT_MARGIN });
   await page.close();
   return buf;
@@ -376,7 +417,7 @@ async function main() {
   const NO_BUILD = process.argv.includes('--no-build');
   const rawArgs = process.argv.slice(2).filter((a) => !FLAGS.has(a)).flatMap((a) => a.split(',')).filter(Boolean);
   let mode;
-  if (rawArgs.length === 0) { mode = 'sample'; }
+  if (rawArgs.length === 0) { mode = 'book'; }
   else if (rawArgs.length === 1 && ['all', '*', '全部'].includes(rawArgs[0].toLowerCase())) { mode = 'all'; }
   else if (rawArgs.length === 1 && ['book', '全书', '单册'].includes(rawArgs[0].toLowerCase())) { mode = 'book'; }
   else { mode = 'list'; }
@@ -389,6 +430,7 @@ async function main() {
   fs.mkdirSync(OUT_DIR, { recursive: true });
 
   const pn = readPN();
+  const chStats = readCH();
   const allLectures = collectLectures();
   const writtenIds = allLectures.map((l) => l.id);
   const byId = new Map(allLectures.map((l) => [l.id, l]));
@@ -401,8 +443,8 @@ async function main() {
   try {
     if (mode === 'book') {
       const parts = groupByPart(allLectures, pn);
-      const { merged, totalPages, count, range } = await renderBook(browser, parts, pn);
-      const fname = 'AI-Infra-学习网站-全书.pdf';
+      const { merged, totalPages, count, range } = await renderBook(browser, parts, pn, chStats);
+      const fname = 'AI-Infra-HandBook-全书.pdf';
       fs.writeFileSync(path.join(OUT_DIR, fname), merged);
       console.log(`\n✅ 已导出全书：${path.join(OUT_DIR, fname)}（${count} 讲 · 第 ${range[0]}–${range[1]} 讲 · 共 ${totalPages} 页）`);
     } else if (mode === 'all') {
@@ -413,8 +455,11 @@ async function main() {
         const ids = p.lectures.map((l) => l.id);
         const cover = await renderHtmlToPdf(browser, buildCoverHtml(p.part, p.name, ids.length, [ids[0], ids[ids.length - 1]]), COVER_MARGIN);
         const toc = await renderHtmlToPdf(browser, buildTocHtml(p.part, p.name, p.lectures), TOC_MARGIN);
-        const lecBufs = [];
-        for (const id of ids) { lecBufs.push(await renderLecturePdf(browser, id)); process.stdout.write(`    渲染第 ${pad2(id)} 讲…\r`); }
+        const lecBufs = await mapConcurrent(ids, 4, async (id) => {
+          const buf = await renderLecturePdf(browser, id);
+          process.stdout.write(`    渲染第 ${pad2(id)} 讲…\r`);
+          return buf;
+        });
         const merged = await mergePdfs([cover, toc, ...lecBufs], 1);
         const fname = `第${p.part}篇-${p.name}.pdf`;
         fs.writeFileSync(path.join(OUT_DIR, fname), merged);
@@ -432,8 +477,11 @@ async function main() {
         if (missing.length) console.log('（跳过未写的讲：' + missing.join(', ') + '）');
       }
       if (chosen.length === 0) { console.log('这些讲还没写。'); process.exit(1); }
-      const bufs = [];
-      for (const id of chosen) { bufs.push(await renderLecturePdf(browser, id)); process.stdout.write(`    渲染第 ${pad2(id)} 讲…\r`); }
+      const bufs = await mapConcurrent(chosen, 4, async (id) => {
+        const buf = await renderLecturePdf(browser, id);
+        process.stdout.write(`    渲染第 ${pad2(id)} 讲…\r`);
+        return buf;
+      });
       const merged = await mergePdfs(bufs, 0);
       const name = chosen.length === 1 ? `第${pad2(chosen[0])}讲.pdf`
         : `AI-Infra-课程-${pad2(chosen[0])}至${pad2(chosen[chosen.length - 1])}讲.pdf`;
