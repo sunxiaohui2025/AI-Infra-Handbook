@@ -32,7 +32,6 @@ const { ch, part, lec = 0 } = Astro.props;
               {ls.map((l) => (
                 <a class={'ai-lk' + (l.opt ? ' is-opt' : '')} href={`/l/${l.id}`} data-skip={l.fast ? undefined : '1'} aria-current={l.id === lec ? 'true' : undefined}>
                   <span class="ai-num">{pad(l.id)}</span><span>{l.title}</span>
-                  {l.key && <i class="ai-dot" title="重点"></i>}
                 </a>
               ))}
             </div>
