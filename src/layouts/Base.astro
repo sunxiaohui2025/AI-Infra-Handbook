@@ -23,25 +23,27 @@ const { title, view } = Astro.props;
   </head>
   <body class={view === 'lec' ? 'is-read' : undefined}>
     <div class="ai-app" id="app" data-side="closed">
-      <header class="ai-top" id="top">
-        <div class="ai-top-l">
-          {view !== 'home' && <button class="ai-menu" data-act="side">目录</button>}
-          <a class="ai-brand" href="/"><i></i>AI Infra-HandBook</a>
-        </div>
-        <button class="ai-searchbtn" data-act="pal"><span>搜索讲、篇或小节…</span><span class="ai-kbd">⌘K</span></button>
-        <div class="ai-top-r">
-          <a class="ai-top-contact ai-top-x" href="https://x.com/sun_hui20772" target="_blank" rel="noopener noreferrer" aria-label="X（推特）"><img src="/x.png" alt="X" /></a>
-          <span class="ai-top-contact ai-top-gzh" tabindex="0">
-            <span class="ai-top-gzh-label">公众号</span>
-            <span class="ai-top-gzh-pop"><img src="/gzh.jpg" alt="公众号二维码" /></span>
-          </span>
-          <a class="ai-top-fb" href="/feedback">反馈</a>
-          <div class="ai-seg" role="group" aria-label="学习路线">
-            <button data-route-btn="full">完整路线</button>
-            <button data-route-btn="fast">Infra 快速路线</button>
+      {view !== 'lec' && (
+        <header class="ai-top" id="top">
+          <div class="ai-top-l">
+            {view !== 'home' && <button class="ai-menu" data-act="side">目录</button>}
+            <a class="ai-brand" href="/"><i></i>AI Infra-HandBook</a>
           </div>
-        </div>
-      </header>
+          <button class="ai-searchbtn" data-act="pal"><span>搜索讲、篇或小节…</span><span class="ai-kbd">⌘K</span></button>
+          <div class="ai-top-r">
+            <a class="ai-top-contact ai-top-x" href="https://x.com/sun_hui20772" target="_blank" rel="noopener noreferrer" aria-label="X（推特）"><img src="/x.png" alt="X" /></a>
+            <span class="ai-top-contact ai-top-gzh" tabindex="0">
+              <span class="ai-top-gzh-label">公众号</span>
+              <span class="ai-top-gzh-pop"><img src="/gzh.jpg" alt="公众号二维码" /></span>
+            </span>
+            <a class="ai-top-fb" href="/feedback">反馈</a>
+            <div class="ai-seg" role="group" aria-label="学习路线">
+              <button data-route-btn="full">完整路线</button>
+              <button data-route-btn="fast">Infra 快速路线</button>
+            </div>
+          </div>
+        </header>
+      )}
       <slot />
     </div>
 
@@ -61,11 +63,13 @@ const { title, view } = Astro.props;
       );
       syncRoute();
 
-      /* ---------- 顶栏：滚动后才出现分隔线 ---------- */
-      const top = document.getElementById('top')!;
-      const onScroll = () => top.classList.toggle('is-scrolled', window.scrollY > 4);
-      window.addEventListener('scroll', onScroll, { passive: true });
-      onScroll();
+      /* ---------- 顶栏：滚动后才出现分隔线（讲阅读页没有顶栏，跳过） ---------- */
+      const top = document.getElementById('top');
+      if (top) {
+        const onScroll = () => top.classList.toggle('is-scrolled', window.scrollY > 4);
+        window.addEventListener('scroll', onScroll, { passive: true });
+        onScroll();
+      }
 
       /* ---------- 窄屏目录抽屉 ---------- */
       const app = document.getElementById('app')!;
@@ -126,7 +130,7 @@ const { title, view } = Astro.props;
       }
       function closePal() { pal?.remove(); pal = null; }
       function pick(i: number) { const x = pres[i]; closePal(); if (x) location.href = x.href; }
-      document.querySelector('[data-act="pal"]')!.addEventListener('click', openPal);
+      document.querySelector('[data-act="pal"]')?.addEventListener('click', openPal);
       document.addEventListener('keydown', (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); pal ? closePal() : openPal(); return; }
         if (!pal) {

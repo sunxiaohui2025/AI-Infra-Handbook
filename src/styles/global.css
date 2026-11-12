@@ -91,6 +91,10 @@ html.ai-full, html.ai-full body { height: 100%; overflow: hidden; }
 .ai-side::-webkit-scrollbar-track { background: transparent; }
 .ai-side-home { display: inline-block; padding: 4px 8px; margin: 0 0 var(--space-3) -8px; border-radius: var(--radius-sm); text-decoration: none; color: var(--ink-3); }
 .ai-side-home:hover { color: var(--accent); }
+.ai-side-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); margin: 0 0 var(--space-3) -8px; padding-right: 6px; }
+.ai-side-home { margin: 0; }
+.ai-imm-btn { border: 1px solid var(--line); background: var(--surface); color: var(--ink-2); font-size: 12px; line-height: 1; padding: 5px 8px; border-radius: var(--radius-pill); cursor: pointer; white-space: nowrap; }
+.ai-imm-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .ai-chsw { display: flex; gap: 2px; margin: 0 0 var(--space-3) -6px; }
 .ai-chsw button { width: 30px; height: 28px; border: 0; border-radius: var(--radius-sm); background: transparent; font-family: var(--font-mono); font-size: 12px; color: var(--ink-3); cursor: pointer; }
 .ai-chsw button:hover { color: var(--ink); background: var(--surface-sunk); }
@@ -357,6 +361,12 @@ html[data-route="fast"] .route-note-fast { display: block; }
 .ai-app { background: transparent; }
 body.is-read { background: var(--surface); }
 .ai-read { background: transparent; }
+/* 讲阅读页没有顶栏：sticky 侧栏从页面顶部开始，读区占满整屏高度 */
+body.is-read .ai-side { top: 0; max-height: 100vh; }
+body.is-read .ai-read { min-height: 100vh; }
+@media (max-width: 860px) {
+  body.is-read .ai-side { top: 0; }
+}
 .ai-top { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 460px) minmax(0, 1fr); gap: var(--space-4); align-items: center; padding: 0 var(--space-6); background: var(--paper-glass); -webkit-backdrop-filter: saturate(1.5) blur(12px); backdrop-filter: saturate(1.5) blur(12px); border-bottom: 1px solid transparent; transition: border-color .2s; }
 body.is-read .ai-top { background: var(--surface-glass); }
 .ai-top.is-scrolled { border-bottom-color: var(--line); }

@@ -4,6 +4,7 @@
 import { getCollection, render } from 'astro:content';
 import Base from '../../layouts/Base.astro';
 import SideNav from '../../components/SideNav.astro';
+import ImmersiveRail from '../../components/ImmersiveRail.astro';
 import Tags from '../../components/Tags.astro';
 import CompareMode from '../../components/CompareMode.astro';
 import { LECTURES, PN, partLs, pad, lecture } from '../../data/course';
@@ -25,6 +26,7 @@ const proj = l.part >= 14;            // 第五章（项目篇）：代码多，
   <main class={`ai-scroll ai-read${proj ? ' ai-proj' : ''}`} id="main">
     <div class="ai-shell">
       <SideNav ch={l.ch} part={l.part} lec={l.id} />
+      <ImmersiveRail ch={l.ch} part={l.part} lec={l.id} />
       <div class="ai-shell-main">
         <div class="ai-doc">
           <article class="ai-article">
@@ -58,3 +60,25 @@ const proj = l.part >= 14;            // 第五章（项目篇）：代码多，
   </main>
   {Content && <CompareMode />}
 </Base>
+
+<script>
+  const main = document.getElementById('main');
+  const btn = document.querySelector('[data-act="imm"]');
+  if (main && btn) {
+    const exitBtn = document.querySelector('[data-imm-exit]');
+    const set = (on: boolean) => {
+      main.classList.toggle('is-immersive', on);
+      try { on ? localStorage.setItem('ai-immersive', '1') : localStorage.removeItem('ai-immersive'); } catch (e) {}
+    };
+    const refresh = () => {
+      const on = main.classList.contains('is-immersive');
+      btn.textContent = on ? '退出沉浸' : '沉浸式阅读';
+    };
+    btn.addEventListener('click', () => set(!main.classList.contains('is-immersive')));
+    exitBtn?.addEventListener('click', () => set(false));
+    // 跨讲保持沉浸模式：点击琴键跳到另一讲时，新页面仍以沉浸式打开
+    let imm = false; try { imm = localStorage.getItem('ai-immersive') === '1'; } catch (e) {}
+    if (imm) set(true);
+    refresh();
+  }
+</script>

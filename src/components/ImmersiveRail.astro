@@ -1,0 +1,134 @@
+---
+// 沉浸式阅读：左侧导航收成一列竖直的「钢琴琴键」，每个键 = 当前章里的一讲。
+// 鼠标在琴键列上滑动时，靠近鼠标的键会跟随放大（波浪），hover 的键旁边浮出
+// 当前目录提示（第X篇 · 第Y讲 标题），点击跳到该讲；退出后恢复完整导航树。
+import { CH, partLs, PN, pad } from '../data/course';
+
+interface Props { ch: number; part: number; lec: number }
+const { ch, part, lec } = Astro.props;
+const chapter = CH[ch - 1];
+const keys = chapter.parts.flatMap((p) => partLs(p).map((l) => ({ p, l })));
+---
+<nav class="ai-imm" id="imm" aria-label="沉浸式阅读导航">
+  <div class="ai-imm-top">
+    <button class="ai-imm-exit" type="button" data-imm-exit title="退出沉浸式阅读，回到完整左侧导航">✕</button>
+  </div>
+  <div class="ai-imm-keys" data-imm-keys>
+    {keys.map(({ p, l }) => (
+      <a
+        class={'ai-key' + (l.id === lec ? ' is-cur' : '')}
+        href={`/l/${l.id}`}
+        data-id={l.id}
+        data-part={p}
+        data-key={l.key ? '1' : undefined}
+        data-opt={l.opt ? '1' : undefined}
+        data-tip={`第 ${p} 篇 · 第${pad(l.id)}讲 — ${l.title}${l.key ? ' ⭐' : ''}${l.opt ? '（选读）' : ''}`}
+        aria-current={l.id === lec ? 'true' : undefined}
+      >
+        <span class="ai-key-bar"></span>
+      </a>
+    ))}
+  </div>
+</nav>
+
+<style is:global>
+  /* ---------- 沉浸式琴键导航 ---------- */
+  .ai-imm {
+    position: sticky;
+    top: 0;
+    display: none;
+    width: 66px;                     /* 钢琴宽度：44px × 1.5 */
+    box-sizing: border-box;
+    margin-left: 140px;              /* 钢琴距左边框更远 */
+    padding: 0;
+    align-self: start;
+    height: 100vh;
+    overflow: hidden;
+    flex-direction: column;
+    align-items: center;             /* 键与关闭符号都对齐到钢琴中央竖轴 */
+    justify-content: center;         /* 整个钢琴在高度上居中 */
+  }
+  .ai-imm-top { flex: none; display: flex; justify-content: center; padding-bottom: 8px; }
+  .ai-imm-exit {
+    width: 22px; height: 22px; border: 1px solid var(--line); border-radius: 50%;
+    background: var(--surface); color: var(--ink-3); cursor: pointer; font-size: 11px; line-height: 1;
+  }
+  .ai-imm-exit:hover { color: var(--accent); border-color: var(--accent); }
+
+  .ai-imm-keys { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; overflow-x: visible; padding: 2px 0 14px; min-height: 0; flex: 0 1 auto; max-height: calc(100% - 40px); scrollbar-width: thin; scrollbar-color: rgba(0,0,0,.16) transparent; }
+  .ai-imm-keys::-webkit-scrollbar { width: 4px; }
+  .ai-imm-keys::-webkit-scrollbar-thumb { background: rgba(0,0,0,.16); border-radius: 999px; }
+
+  /* 一个琴键：默认是短黑线（更宽、更细），跟随鼠标放大；键体在钢琴竖轴两侧对称展开 */
+  .ai-key { position: relative; display: flex; align-items: center; justify-content: center; height: 9px; width: 100%; text-decoration: none; }
+  .ai-key-bar {
+    /* 宽度/高度随 --grow（鼠标距离产生的 0~1）跟随放大，形成波浪 */
+    width: calc(20px + var(--grow, 0) * 20px);
+    height: calc(2px + var(--grow, 0) * 3px);
+    border-radius: 2px;
+    /* 统一的浅灰色，尽量淡一些 */
+    background: #cbc9c1;
+    transition: width .12s ease, height .12s ease, background .12s ease, opacity .12s ease;
+  }
+  main.is-immersive .ai-key:hover .ai-key-bar { background: #9ec2b5; }
+  .ai-key.is-cur .ai-key-bar, .ai-key[data-key="1"] .ai-key-bar { background: #b8cdc4; }
+  .ai-key[data-opt="1"] .ai-key-bar { opacity: .35; }
+
+  /* 沉浸式开启：左侧换成琴键列，正文占满剩余宽度 */
+  main.is-immersive .ai-imm { display: flex; }
+  main.is-immersive .ai-side { display: none; }
+  main.is-immersive .ai-shell { grid-template-columns: 206px minmax(0, 1fr); gap: var(--space-4); }
+  main.is-immersive.ai-proj .ai-shell { grid-template-columns: 206px minmax(0, 1fr); }
+  @media (max-width: 860px) {
+    .ai-imm { width: 56px; margin-left: 20px; }
+    main.is-immersive .ai-shell { grid-template-columns: 76px minmax(0, 1fr); }
+  }
+
+  /* 悬浮提示：单一 floating 元素，跟随 hover 的键定位在琴键列右侧 */
+  .ai-imm-tip {
+    position: fixed; z-index: 60; pointer-events: none; white-space: nowrap;
+    padding: 6px 10px; border-radius: 6px; background: var(--ink); color: var(--surface);
+    font-size: 12px; line-height: 1.5; font-weight: 400;
+    opacity: 0; transform: translateX(-4px);
+    transition: opacity .1s ease, transform .1s ease;
+  }
+  .ai-imm-tip.is-on { opacity: 1; transform: translateX(0); }
+</style>
+
+<script>
+  const rail = document.querySelector('[data-imm-keys]');
+  const tip = document.createElement('div');
+  tip.className = 'ai-imm-tip';
+  tip.setAttribute('role', 'tooltip');
+  document.body.appendChild(tip);
+  if (rail && tip) {
+    const items = Array.from(rail.querySelectorAll<HTMLElement>('.ai-key'));
+    // 全部用视口坐标（getBoundingClientRect），滚动/缩放时自动正确
+    const setTip = (el: HTMLElement | null) => {
+      if (!el) { tip.classList.remove('is-on'); return; }
+      tip.textContent = el.dataset.tip || '';
+      const r = el.getBoundingClientRect();
+      const left = rail.getBoundingClientRect().right;
+      tip.style.left = (left + 10) + 'px';
+      tip.style.top = Math.max(8, Math.min(window.innerHeight - 64, r.top + r.height / 2 - 14)) + 'px';
+      tip.classList.add('is-on');
+    };
+    rail.addEventListener('mousemove', (e) => {
+      const y = e.clientY;
+      let best: HTMLElement | null = null, bd = Infinity;
+      items.forEach((k) => {
+        const r = k.getBoundingClientRect();
+        const cy = r.top + r.height / 2;
+        const d = Math.abs(cy - y);
+        if (d < bd) { bd = d; best = k; }
+        const grow = Math.max(0, 1 - d / 42);
+        k.style.setProperty('--grow', grow.toFixed(3));
+      });
+      if (best) setTip(best);
+    });
+    rail.addEventListener('mouseleave', () => {
+      items.forEach((k) => k.style.setProperty('--grow', '0'));
+      setTip(null);
+    });
+  }
+</script>

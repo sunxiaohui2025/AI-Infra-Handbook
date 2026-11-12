@@ -6,7 +6,10 @@ interface Props { ch: number; part: number; lec?: number }
 const { ch, part, lec = 0 } = Astro.props;
 ---
 <aside class="ai-side" id="side" aria-label="课程目录" data-here={ch}>
-  <a class="ai-side-home" href="/">← 学习路线</a>
+  <div class="ai-side-head">
+    <a class="ai-side-home" href="/">← 返回首页</a>
+    {lec > 0 && <button class="ai-imm-btn" type="button" data-act="imm">沉浸式阅读</button>}
+  </div>
   <div class="ai-chsw" role="group" aria-label="切换章">
     {CH.map((x) => (
       <button data-tch={x.n} aria-pressed={String(x.n === ch)} class={x.n === ch ? 'is-here' : undefined} title={chName(x)}>{x.n}</button>
