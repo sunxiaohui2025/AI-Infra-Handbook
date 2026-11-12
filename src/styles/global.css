@@ -404,10 +404,7 @@ body.is-read .ai-searchbtn { background: var(--paper); }
 .ai-todo-hint { margin: var(--space-4) 0 0 !important; font-size: 13px; color: var(--ink-3); }
 
 /* ---------- Progress on home ---------- */
-.ai-stat-done b { color: var(--accent); }
 .ai-wf .ai-lk.is-done > span:nth-child(2) { font-weight: 600; }
-.ai-wf .ai-lk.is-done::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-soft); margin-left: auto; align-self: center; flex: none; }
-.ai-wf .ai-lk.is-done .ai-dot { margin-left: 6px; }
 
 /* ---------- Note: 要点 / 专栏 / 注意 ---------- */
 .ai-note { margin: var(--space-4) 0 var(--space-5, 20px); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); font-family: var(--font-sans); font-size: 15px; line-height: 26px; }

@@ -3,9 +3,7 @@
 // 查找用顶栏的搜索（⌘K），首页不再单独放筛选框。
 import Base from '../layouts/Base.astro';
 import WfPart from '../components/WfPart.astro';
-import { getCollection } from 'astro:content';
 import { CH, LECTURES, chLs, chName, fastCount } from '../data/course';
-const written = (await getCollection('lectures')).length;
 ---
 <Base title="学习路线" view="home">
   <main class="ai-scroll" id="main">
@@ -15,16 +13,6 @@ const written = (await getCollection('lectures')).length;
           <h1>AI Infra 学习路线</h1>
           <p>从矩阵乘法讲到分布式推理。一讲只讲一个技术点，按依赖顺序排列：读到任何一讲时，它用到的概念都已在前面讲过。</p>
           <p class="route-note-fast"><b>Infra 快速路线：</b>第一章只读 03、05、06、10、11；第二章跳过 16–20 和第 6 篇。</p>
-        </div>
-        <div class="ai-hero-side">
-          <div class="ai-stats">
-            <div class="ai-stat"><b>{CH.length}</b><span>章</span></div>
-            <div class="ai-stat"><b>{CH.reduce((s, c) => s + c.parts.length, 0)}</b><span>篇</span></div>
-            <div class="ai-stat"><b>{LECTURES.length}</b><span>讲</span></div>
-            <div class="ai-stat"><b><span class="r-full">{LECTURES.length}</span><span class="r-fast">{fastCount(LECTURES)}</span></b><span>当前路线</span></div>
-            <div class="ai-stat ai-stat-done"><b>{written}</b><span>已写</span></div>
-          </div>
-          <span class="ai-wf-legend"><i class="ai-dot"></i>重点</span>
         </div>
       </div>
 
