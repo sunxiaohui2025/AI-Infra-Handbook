@@ -1,10 +1,10 @@
 /* AI Infra 课程 — tokens (from the design system tokens.json) */
 :root {
-  --paper: #f7f6f2;
+  --paper: #ffffff;
   --surface: #ffffff;
-  --surface-sunk: #efede7;
-  --line: #e2dfd7;
-  --line-strong: #cbc7bc;
+  --surface-sunk: #f4f4f3;
+  --line: #e7e7e5;
+  --line-strong: #d4d4d1;
   --ink: #1d1d1b;
   --ink-2: #5c5b55;
   --ink-3: #706e66;
@@ -14,7 +14,7 @@
   --key: #9a5a08;
   --key-soft: #f6ecdc;
   --backdrop: rgba(29,29,27,0.24);
-  --paper-glass: rgba(247, 246, 242, 0.88);
+  --paper-glass: rgba(255, 255, 255, 0.88);
   --surface-glass: rgba(255, 255, 255, 0.88);
   --space-1: 4px;
   --space-2: 8px;

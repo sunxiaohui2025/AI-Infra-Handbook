@@ -3,14 +3,14 @@
 // 查找用顶栏的搜索（⌘K），首页不再单独放筛选框。
 import Base from '../layouts/Base.astro';
 import WfPart from '../components/WfPart.astro';
-import { CH, LECTURES, chLs, chName, fastCount } from '../data/course';
+import { CH, chName } from '../data/course';
 ---
 <Base title="学习路线" view="home">
   <main class="ai-scroll" id="main">
     <div class="ai-home">
       <div class="ai-hero">
         <div>
-          <h1>AI Infra 学习路线</h1>
+          <h1>AI Infra-HandBook</h1>
           <p>从矩阵乘法讲到分布式推理。一讲只讲一个技术点，按依赖顺序排列：读到任何一讲时，它用到的概念都已在前面讲过。</p>
           <p class="route-note-fast"><b>Infra 快速路线：</b>第一章只读 03、05、06、10、11；第二章跳过 16–20 和第 6 篇。</p>
         </div>
@@ -18,12 +18,10 @@ import { CH, LECTURES, chLs, chName, fastCount } from '../data/course';
 
       <div class="ai-wf" id="wf">
         {CH.map((c) => {
-          const cls = chLs(c.n);
           return (
             <section class="ai-wf-chsec" data-ch={c.n}>
               <header class="ai-wf-ch">
                 <h2><span class="ai-step-n">{c.n}</span>{chName(c)}</h2>
-                <small>{c.parts.length} 篇 · {cls.length} 讲<span class="r-fast"> · 快速路线读 {fastCount(cls)}</span></small>
               </header>
               <div class="ai-wf-parts">
                 {c.parts.map((p) => <WfPart p={p} ch={c.n} />)}
