@@ -50,9 +50,9 @@ body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 .ai-shell-main { min-width: 0 !important; display: block !important; }
 .ai-doc { max-width: none !important; padding: 0 !important; margin: 0 !important; }
 .ai-read { min-height: 0 !important; height: auto !important; display: block !important; }
-.ai-article { font-size: 18px !important; line-height: 31px !important; color: #1a1a1a !important; }
-.ai-article h1 { font-size: 31px !important; line-height: 40px !important; break-after: avoid; }
-.ai-article h2 { font-size: 23px !important; line-height: 33px !important; break-after: avoid; }
+.ai-article { font-size: 16px !important; line-height: 28px !important; color: #1a1a1a !important; }
+.ai-article h1 { font-size: 28px !important; line-height: 36px !important; break-after: avoid; }
+.ai-article h2 { font-size: 21px !important; line-height: 30px !important; break-after: avoid; }
 .ai-article h3 { break-after: avoid; }
 .ai-art-head { break-after: avoid; }
 .ai-article p, .ai-article li, .ai-article dd, .ai-article .ai-lead { orphans: 3; widows: 3; }
