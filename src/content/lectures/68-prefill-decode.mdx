@@ -1,0 +1,150 @@
+---
+id: 68
+slug: prefill-decode
+title: Prefill 与 Decode
+chapter: 3
+part: 9
+problem: 为什么第一个词和后面的词瓶颈不同
+prereqs: [24, 27, 35]
+level: 主线
+minutes: 25
+demos: [PDTimeline]
+video: ""
+formula: '每一步耗时 $\approx\max(\text{计算量}/\text{算力}, \text{读写字节}/\text{带宽})$；prefill 算术强度 $\approx\text{提示长度}$，decode $\approx 1$'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import PDTimeline from '../../components/PDTimeline.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[24, 27, 35]} />
+
+从这一篇开始，我们正式进入推理优化。第一个要建立的认识是：**一次推理请求分成两个性质截然不同的阶段**。
+
+第 24 讲说过，模型先把整段提示一次性送进去做前向，得到第一个新 token 的分布，这叫 **prefill**（预填充）；之后每生成一个 token，就把它接回去再做一次前向，这叫 **decode**（解码）。两个阶段跑的是同一个模型、同样的计算，可它们的“瓶颈”完全不同：prefill 卡在 GPU 的算力上，decode 卡在 GPU 的显存带宽上。这一讲用一个简单的估算方法把这件事算清楚。后面几乎所有的推理优化，都是针对其中某一个阶段的瓶颈设计的。
+
+## 一个简单的估算方法
+
+GPU 做一次前向，要干两件事：**计算**（矩阵乘法里的乘加）和**搬数据**（把权重、KV Cache 从显存读到计算单元，把结果写回去）。两件事可以同时进行，所以一次前向的耗时，大致取决于两者中更慢的那个：
+
+<div class="ai-formula">耗时 ≈ max(计算量 / 算力, 读写字节数 / 显存带宽)</div>
+
+以这门课的主力参照 H100 为例：BF16 的稠密算力约 989 TFLOPS（每秒 989 万亿次浮点运算），显存带宽约 3.35 TB/s（每秒 3.35 万亿字节）。两者一除：
+
+<div class="ai-formula">989 × 10<sup>12</sup> / 3.35 × 10<sup>12</sup> ≈ 295 FLOPs / 字节</div>
+
+意思是：每从显存读进 1 个字节，要对它做约 295 次运算，计算单元才不会闲着等数据。一个运算“每字节做多少次运算”叫它的**算术强度**（arithmetic intensity）。算术强度大于 295，计算更慢，叫**计算受限**；小于 295，搬数据更慢，叫**带宽受限**（或访存受限）。第 62 讲会把这个模型（Roofline）讲透，这里先用它算两个阶段。
+
+## Prefill：大矩阵乘法，算力是瓶颈
+
+Llama-3-8B 用 BF16，权重约 16 GB。一次前向，每个权重都要从显存读一遍。
+
+prefill 一段 1000 个 token 的提示：1000 个 token 一起经过每一层，每层的矩阵乘法是 [1000, 4096] 乘 [4096, …]。权重只读一遍，却被 1000 个 token 用了 1000 次。计算量约 2 × 75 亿 × 1000 ≈ 15 万亿次（第 35 讲，嵌入表不参与乘法），读写约 16 GB 多一点：
+
+- 计算时间：约 15.44 ms
+- 读写时间：约 4.85 ms
+
+计算更慢，**prefill 卡在算力**，约 15.4 ms。它的算术强度约 927 FLOPs/字节，远高于 295。粗略地说，prefill 的算术强度约等于提示的长度：一次读进来的权重被多少个 token 共用，就做了多少倍的计算。
+
+## Decode：一个 token，也要读完全部权重
+
+decode 一步只处理 1 个新 token。矩阵乘法变成了 [1, 4096] 乘 [4096, …]：计算量只有约 160 亿次，可**权重还是要整个读一遍**，16 GB 一个字节都不能少，还要再读这个请求的 KV Cache。
+
+- 计算时间：约 0.016 ms
+- 读写时间：约 4.83 ms
+
+搬数据的时间是计算的约 300 倍，**decode 卡在带宽**，每步约 4.83 ms。它的算术强度只有约 0.93，计算单元 99% 以上的时间都在等数据，算力只用了 0.3%。
+
+一个请求，提示 1000 个 token、生成 200 个：prefill 15.4 ms，decode 200 步共约 967 ms，合计约 983 ms，**98% 的时间花在 decode 上**。
+
+<Note kind="point">prefill 一次处理整段提示，同一份权重被所有 token 共用，算术强度高，卡在算力；decode 每步只处理一个 token，却要把全部权重和 KV Cache 读一遍，算术强度约为 1，卡在显存带宽。</Note>
+
+下面的演示画出了一个请求的时间线（理想情况，假设硬件跑满）。绿色是 prefill，琥珀色的细格是一步步的 decode。拖动提示长度和生成长度，看两个阶段各占多少时间、各自卡在哪里。
+
+<PDTimeline caption="图 68-1　一个请求的时间线（Llama-3-8B，一张 H100，理想值）。默认提示 1000、生成 200：prefill 15.4 ms，之后 200 步 decode 每步约 4.8 ms，占了 98% 的时间。" />
+
+几个值得试的操作：
+
+- **把提示调短到 16 或 64**：prefill 的计算量变小，读权重的时间却不变，prefill 也变成了带宽受限，耗时停在约 4.8 ms，和一步 decode 差不多。
+- **把提示调长到 6.4 万**：prefill 的时间迅速增长到秒级，第一个 token 要等很久才出来；decode 每一步也变慢了，因为要读的 KV Cache 越来越多，注意力的计算也在增长。
+- **把生成调到 4000**：decode 的总时间几乎和生成长度成正比，第 49 讲的推理模型就是这种情况。
+
+## 两个阶段，两种优化
+
+瓶颈不同，优化的方向也不同：
+
+| | prefill | decode |
+| --- | --- | --- |
+| 一次处理 | 整段提示 | 1 个 token |
+| 瓶颈 | 算力 | 显存带宽 |
+| 决定的指标 | 第一个 token 要等多久（TTFT） | 之后每个 token 的间隔（TPOT） |
+| 主要优化思路 | 减少计算：FlashAttention、更低精度的计算、跳过重复的前缀 | 减少要读的字节、提高每次读取的利用率：批处理、量化、GQA/MLA、投机解码 |
+
+最重要的一条是 decode 的**批处理**：既然每一步都要把权重读一遍，那就让这一遍读进来的权重同时服务很多个请求。64 个请求一起 decode，权重只读一次，算术强度就提高到约 64，单位时间里生成的 token 也接近翻 64 倍。这是推理系统提高吞吐最核心的手段，第 70 讲和第 10 篇会详细讲。
+
+## 用代码复现
+
+下面的代码实现了上面的估算方法：给定一次前向处理多少个新 token、前面有多少上下文，算出计算时间和读写时间；然后分别算 prefill 1000 个 token、decode 1 个 token，以及一个完整请求的耗时。
+
+```python
+# Llama-3-8B（BF16）在一张 H100 上：每一步的耗时 ≈ max(计算量 / 算力, 读写字节 / 带宽)
+N, N_emb, L, d = 8.03e9, 128256 * 4096, 32, 4096
+W_BYTES = N * 2                      # 权重，BF16 每个 2 字节
+KV_PER_TOK = 2 * 32 * 8 * 128 * 2    # 每个 token 的 KV Cache：128 KiB（第 39 讲）
+FLOPS, BW = 989e12, 3.35e12          # H100 SXM：BF16 稠密算力、显存带宽
+
+def step(new_tokens, context):
+    """一次前向：处理 new_tokens 个新 token，它们前面平均有 context 个 token。返回 (计算时间, 读写时间)，单位毫秒。"""
+    flops = 2 * (N - N_emb) * new_tokens + 4 * L * d * context * new_tokens
+    bytes_ = W_BYTES + KV_PER_TOK * (context + new_tokens)          # 权重读一遍 + KV Cache 读写
+    return flops / FLOPS * 1e3, bytes_ / BW * 1e3
+
+print(f"算力 / 带宽 = {FLOPS / BW:.0f} FLOPs/字节：每读 1 个字节，要做 {FLOPS / BW:.0f} 次运算才能让计算单元不闲着")
+
+# 1. prefill：一次处理整段提示（1000 个 token）
+c, m = step(1000, 500)               # 因果注意力，平均每个 token 前面有约 500 个
+print(f"prefill 1000 个 token：计算 {c:.2f} ms，读写 {m:.2f} ms → 卡在{'算力' if c > m else '带宽'}，约 {max(c, m):.1f} ms")
+print(f"  算术强度 ≈ {2 * (N - N_emb) * 1000 / (W_BYTES + KV_PER_TOK * 1000):.0f} FLOPs/字节")
+
+# 2. decode：一次只处理 1 个新 token（前面有 1000 个）
+c, m = step(1, 1000)
+print(f"decode 1 个 token：计算 {c:.3f} ms，读写 {m:.2f} ms → 卡在{'算力' if c > m else '带宽'}，约 {max(c, m):.2f} ms")
+print(f"  算术强度 ≈ {2 * (N - N_emb) / (W_BYTES + KV_PER_TOK * 1001):.2f} FLOPs/字节，算力利用率约 {c / m:.1%}")
+
+# 3. 一个请求：提示 1000 个 token，生成 200 个
+pre = max(*step(1000, 500))
+dec = sum(max(*step(1, 1000 + i)) for i in range(200))
+print(f"一个请求：prefill {pre:.1f} ms + decode 200 步 {dec:.0f} ms = {pre + dec:.0f} ms；decode 占 {dec / (pre + dec):.0%}")
+```
+
+输出：
+
+```text
+算力 / 带宽 = 295 FLOPs/字节：每读 1 个字节，要做 295 次运算才能让计算单元不闲着
+prefill 1000 个 token：计算 15.44 ms，读写 4.85 ms → 卡在算力，约 15.4 ms
+  算术强度 ≈ 927 FLOPs/字节
+decode 1 个 token：计算 0.016 ms，读写 4.83 ms → 卡在带宽，约 4.83 ms
+  算术强度 ≈ 0.93 FLOPs/字节，算力利用率约 0.3%
+一个请求：prefill 15.4 ms + decode 200 步 967 ms = 983 ms；decode 占 98%
+```
+
+第一行是 H100 的算力和带宽之比，295。接下来是 prefill：计算 15.44 ms，读写 4.85 ms，卡在算力，算术强度约 927。然后是 decode：计算 0.016 ms，读写 4.83 ms，卡在带宽，算术强度约 0.93。最后一行：一个请求约 983 ms，decode 占 98%。
+
+## 到了大模型里
+
+**这些是理想值。**实际的 GPU 达不到峰值算力和带宽，算子之间还有各种开销。实测时，decode 一步通常比 4.8 ms 慢一些，prefill 的算力利用率也到不了 100%。第 67 讲会把实测点和理论值放在一起比较。但理想值给出了一个下限，也告诉你瓶颈在哪：decode 想再快，就得减少要读的字节，或者让一次读取服务更多的请求，而不是换一块算力更强的卡。
+
+**你手里的 DGX Spark 更明显。**它的统一内存带宽比 H100 的显存带宽低一个数量级左右（公开资料约 273 GB/s，待核实），而算力相对更充足，decode 会更加“带宽受限”。同样跑 Llama-3-8B 的 BF16 版本，单请求 decode 每步的理论下限约是 16 GB / 273 GB/s ≈ 59 ms。这也是为什么在这类设备上，量化（第 12 篇）带来的加速特别明显。
+
+**prefill 和 decode 可以分开部署。**既然两个阶段的瓶颈不同，有的系统干脆让一批 GPU 专门做 prefill、另一批专门做 decode，中间把 KV Cache 传过去，各自按自己的瓶颈优化，这叫 PD 分离（第 14 篇）。
+
+## 容易混淆的地方
+
+1. **prefill 也算“生成”了一个 token。**prefill 那次前向的最后一个位置，就给出了第一个新 token 的分布。所以第一个 token 的时间主要是 prefill 的时间，之后每个 token 的时间是 decode 一步的时间。
+2. **decode 慢不是因为算得多。**decode 每一步的计算量只有 prefill 的千分之一，慢是因为每一步都要把 16 GB 的权重搬一遍，搬数据的时间远大于计算的时间。
+3. **“受限”会随条件变化。**很短的 prefill 会变成带宽受限，批处理很大的 decode 会变成计算受限。看的永远是算术强度和硬件的那个比值（H100 是 295）。
+
+## 回顾
+
+一次推理请求分成两个阶段。prefill 一次处理整段提示，同一份权重被所有 token 共用，算术强度约等于提示长度，Llama-3-8B 在 H100 上处理 1000 个 token 约 15.4 ms，卡在算力。decode 每步只处理一个 token，却要把 16 GB 的权重和 KV Cache 读一遍，算术强度约为 1，每步约 4.8 ms，卡在显存带宽，算力只用了 0.3%。一个普通的请求，98% 的时间花在 decode 上。prefill 决定第一个 token 要等多久，decode 决定之后的速度；前者靠减少计算来优化，后者靠减少读取、批处理来优化。
+
+decode 每一步都要读这个请求的 KV Cache。可如果没有 KV Cache，每一步就得把前面所有的 token 重新算一遍。KV Cache 到底省了多少？下一讲用 TinyLM 实际实现一遍：**KV Cache**。

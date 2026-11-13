@@ -1,0 +1,114 @@
+---
+id: 55
+slug: g3-assemble-gpt
+title: g3 · 组装 GPT
+chapter: 2
+part: 7
+problem: LayerNorm、GELU、FFN、残差拼成一个能生成文字的模型
+prereqs: [29, 30, 31, 32, 35]
+level: 主线
+demos: [GPTArch, CodeWalk, CodeDiff, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import GPTArch from '../../components/GPTArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CodeDiff from '../../components/CodeDiff.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[29, 30, 31, 32, 35]} />
+
+零件已经有了三样：分词器、嵌入、注意力。这一讲把剩下的零件补齐，组装成一个完整的 GPT：输入一串编号，输出每个位置对下一个 token 的打分。然后写一个最简单的生成循环，让它说出第一句话。
+
+它说出来的会是一串乱码，因为还没有训练。但这一讲结束时，模型的结构就定型了：后面四讲的预训练、解码、装 GPT-2 权重、指令微调，用的都是这一讲的 `GPT` 类，一行都不再改。
+
+<GPTArch ver="g3" caption="图 55-1　g3 把模型补齐：L 个 Transformer Block，每个由 LayerNorm、注意力、LayerNorm、FFN 和两条残差组成，最后是 LayerNorm 和输出层。右边第一次出现了生成。" />
+
+## 还差哪几个零件
+
+第 32 讲画过一个 Transformer Block 的结构。对照它，还差四样：
+
+- **LayerNorm**（第 30 讲）：把每个 token 的 d 个数减去均值、除以标准差，再乘一组可学的缩放 γ、加一组平移 β。它让每一层的输入保持在相近的尺度上。
+- **GELU**（第 14 讲）：GPT-2 用的激活函数。和 ReLU 的区别是负半轴不是一刀切成 0，而是平滑地趋近于 0。
+- **前馈网络 FFN**（第 31 讲）：两个线性层夹一个 GELU，先从 d 维升到 4d 维，再降回 d。注意力负责“在位置之间搬运信息”，FFN 负责“在每个位置上加工信息”。
+- **残差连接**（第 29 讲）：子层的输出加回到它的输入上，x + f(x)。网络深了，梯度可以沿着这条“直通”的路一路传回去。
+
+组装的方式是 GPT-2 用的 **Pre-Norm**（第 36 讲）：先归一化，再进子层，再加残差。一个 Block 两个子层：
+
+$$
+x \leftarrow x + \text{Attn}(\text{LN}_1(x)),\qquad x \leftarrow x + \text{FFN}(\text{LN}_2(x))
+$$
+
+## model.py：四个小零件
+
+<CodeWalk file="minigpt/g3/model.py" from={13} to={64} steps={[
+  { lines: [13, 21], title: '所有尺寸放在一个配置里', body: '<p>七个数决定了模型的全部形状：词表 V、最长上下文 T_max、隐藏维度 d、头数 H、层数 L、dropout 比例、q/k/v 要不要偏置。我们自己训练用默认值，约 530 万个参数；第 58 讲换成 GPT-2 的尺寸，代码不用改。</p>' },
+  { lines: [24, 34], title: 'LayerNorm', body: '<p>在最后一维（d 维）上算均值和方差，减均值、除以 √(方差 + ε)，再乘 γ（<code>scale</code>）加 β（<code>shift</code>）。γ 初始为 1、β 初始为 0，所以刚开始它就是纯粹的标准化，训练中模型可以自己决定要不要把尺度调回去。</p><p>两个细节。方差除以 d（<code>unbiased=False</code>），不是统计学里常用的 d − 1：这里不是在估计总体方差，而且 GPT-2 就是这样算的，第 58 讲要和它逐位对齐。ε = 10⁻⁵ 防止方差为 0 时除以 0。</p>' },
+  { lines: [37, 40], title: 'GELU 的 tanh 近似', body: '<p>GELU 的定义是 x · Φ(x)，Φ 是标准正态分布的累积分布函数，要用误差函数 erf 来算。GPT-2 用的是一个 tanh 的近似式，和精确值的差在 10⁻³ 以内。PyTorch 的 <code>nn.GELU(approximate="tanh")</code> 就是这个式子；这里手写出来，是为了看清它是什么。</p>' },
+  { lines: [43, 49], title: 'FFN：升到 4d，再降回来', body: '<p>两个线性层，d → 4d → d，中间是 GELU。4 倍是 GPT-2 的约定，Llama 这类用 SwiGLU 的模型换成了约 8/3 倍（第 38 讲）。</p><p>它的参数是 d × 4d + 4d × d = 8d²（加上偏置 5d），是注意力（4d²）的两倍：一个 Block 里三分之二的参数在 FFN。</p>' },
+  { lines: [52, 64], title: 'Transformer Block', body: '<p>两行就是上面的公式：归一化 → 注意力 → dropout → 加回 x；归一化 → FFN → dropout → 加回 x。</p><p>残差那一下 <code>x + …</code> 是整个结构的关键：无论子层学成什么样，x 都原样传到下一层，子层只需要学“在 x 的基础上改多少”。如果子层的输出全是 0，这个 Block 就什么也不做，而不是把信号毁掉。这让 4 层、12 层乃至上百层都能训练起来。</p><p>这里的 dropout 加在子层的输出上、加残差之前，和注意力权重上的那个 dropout 是两回事。</p>' },
+]} />
+
+## model.py：GPT
+
+<CodeWalk file="minigpt/g3/model.py" from={67} to={85} steps={[
+  { lines: [67, 76], title: '六个部件', body: '<p>token 嵌入、位置嵌入、嵌入后的 dropout、L 个 Block（<code>nn.Sequential</code> 按顺序串起来）、最后的 LayerNorm、输出层。</p><p>输出层是一个 d × V 的线性层，不带偏置。GPT-2 让它和 token 嵌入<b>共用同一份权重</b>（weight tying）：嵌入表的第 i 行，同时也是输出层给 token i 打分用的向量。我们这里没有共用，两张表各一份；为什么、差多少，下面看参数量时再说。</p>' },
+  { lines: [78, 85], title: '前向：编号进，打分出', body: '<p>查表、相加，过 dropout，过 L 个 Block，过最后的 LayerNorm，乘输出层。输入是 [B, T] 的编号，输出是 [B, T, V] 的打分，叫 <b>logits</b>：第 b 个样本第 t 个位置的那一行，是模型认为“下一个 token 是词表里每一个”的分数，还没过 softmax。</p><p>为什么最后还要一个 LayerNorm？Pre-Norm 结构里，每个子层的输入都归一化了，但最后一个 Block 的输出是一路残差加上来的，没有归一化，尺度可能很大。输出层之前补一个，打分的尺度就稳定了。</p>' },
+]} />
+
+## generate.py：贪心生成
+
+第 24 讲讲过自回归生成：把序列送进模型，取最后一个位置的打分，选一个 token 接在后面，再送进去，重复。
+
+<CodeWalk file="minigpt/g3/generate.py" steps={[
+  { lines: [5, 7], title: '不需要梯度', body: '<p><code>@torch.no_grad()</code>：生成时不训练，不需要为反向传播记录中间结果，省内存也更快。</p>' },
+  { lines: [8, 13], title: '每步都把整段送进去', body: '<p>序列超过 T_max 时只保留最后 T_max 个：位置嵌入只有 T_max 行，再长就没有位置可查了。</p><p>模型输出 [B, T, V]，我们只要最后一个位置 <code>[:, -1, :]</code>。取打分最高的那个（贪心），接在序列后面。</p><p>注意每一步都把<b>整段序列</b>重新算一遍，前面位置的结果算完就扔了。这正是第五章 miniinfer v0 的毛病，KV Cache 就是为了消灭这些重复计算（第 69、119 讲）。我们的模型很小、序列很短，先不管它。</p>' },
+]} />
+
+## 跑一遍
+
+<RunOutput cmd=".venv/bin/python scripts/model_summary.py" file="minigpt/outputs/model_summary.txt" caption="图 55-2　组装好的 GPT：530 万个参数，FP32 约 20 MiB。没训练时生成的是词表里的 token 随机拼起来的乱码。同样的代码换成 GPT-2 small 的尺寸是 1.63 亿个参数，共用输出层后是 1.24 亿。" />
+
+**LayerNorm**：[2, 4, 6, 8] 的均值是 5，方差是 5，归一化后是 [−1.342, −0.447, 0.447, 1.342]，均值 0、方差 1。
+
+**GELU**：正半轴接近 x 本身（3 → 2.996），负半轴不是 0，而是一个小的负数：−1 → −0.159，−0.5 → −0.154，到 −3 已经几乎是 0。
+
+**参数量**逐项对一下（第 35 讲的方法）：
+
+- token 嵌入 4096 × 256 = 1,048,576，位置嵌入 256 × 256 = 65,536。
+- 每层注意力 4d² + d = 262,400，FFN 8d² + 5d = 525,568，两个 LayerNorm 各 2d，共 1024。一层 788,992，4 层 3,155,968。
+- 最后的 LayerNorm 512，输出层 256 × 4096 = 1,048,576。
+- 合计 5,319,168，FP32 每个 4 字节，约 20 MiB。
+
+一个反直觉的地方：**4 层 Transformer 只占 59%，两张和词表有关的表占了 39%。**模型越小，词表的份额越大。这也是上一讲把词表定为 4096 的原因：如果用 GPT-2 的 50,257，两张表就是 2570 万个参数，是 Transformer 部分的 8 倍。反过来，GPT-2 small 的 Transformer 部分有 8500 万个参数，词表那张表 3860 万，共用输出层能省下其中一份，这就是 1.63 亿变成“124M”的原因。我们的模型共用的话能省 105 万，约 20%；书里也没有共用，理由是分开训练效果略好。这里按书的做法，第 58 讲装 GPT-2 权重时，把同一份权重复制进输出层即可。
+
+**形状**：“注意力机制”是 2 个 token（“注意力”“机制”各一个），输出 logits 是 [1, 2, 4096]。
+
+**生成**：贪心生成 20 个 token，得到的是“底元就是这样最低]推理系统得很原本领亏……”。每个 token 本身都是语料里的词（分词器是训练过的），但模型的权重是随机的，它给 4096 个 token 的打分几乎没有规律，选出来的就是随机拼凑。
+
+<Note kind="point">GPT = 嵌入 + L 个 Block + LayerNorm + 输出层。Block 是 Pre-Norm 的两个子层：x + Attn(LN(x))，x + FFN(LN(x))。整个模型只有一个接口：model(idx) 把 [B, T] 的编号变成 [B, T, V] 的打分。</Note>
+
+## 检查
+
+<RunOutput cmd=".venv/bin/python tests/check.py g3" file="minigpt/outputs/check_g3.txt" caption="图 55-3　g3 的检查：整个模型也是因果的，改第 10 个 token，前 10 个位置的输出一点不变。" />
+
+上一讲检查了单个注意力层的因果性，这里检查整个模型：LayerNorm、FFN 都是逐位置的，残差也是逐位置的，所以只要注意力是因果的，整个模型就是因果的。这个检查能抓住一类隐蔽的错误：比如 LayerNorm 写成了在 T 维上求均值（`dim=1`），各个位置就混在一起了，形状照样对，只有这类检查能发现。
+
+## 和上一版的差别
+
+g3 在 g2 的基础上新增了 `model.py`、`generate.py` 两个文件，其余文件没动：
+
+<CodeDiff a={null} b="minigpt/g3/generate.py" caption="图 55-4　g3 新增的 generate.py。model.py 也是新文件，上面已经逐段讲过。" />
+
+## 容易写错的地方
+
+- **Post-Norm 和 Pre-Norm 混了。**原始 Transformer 是 LN(x + f(x))，GPT-2 是 x + f(LN(x))。两种都能跑，但装 GPT-2 权重时结构必须一致，否则输出完全不同。
+- **位置嵌入用了 `torch.arange(T)` 却忘了 `device`。**模型在 GPU 上、位置编号在 CPU 上，查表时报错。
+- **生成时没有截断到 T_max。**序列一长，位置嵌入查表越界，报 index out of range。
+
+## 回顾
+
+g3 补齐了 LayerNorm（γ、β，方差除以 d）、GELU（tanh 近似）、FFN（d → 4d → d）和 Pre-Norm 的 Transformer Block，组装成 `GPT`：嵌入 → 4 个 Block → LayerNorm → 输出层，5,319,168 个参数，其中 39% 在两张词表大小的表里。`generate_greedy` 每步把整段序列送进模型，取最后一个位置打分最高的 token。没训练过的模型，生成的是随机拼凑的词。
+
+现在模型能给出打分了，但打分是随机的。怎么让它的打分变得有意义：给正确的下一个 token 打高分？要定义一个衡量“猜得多准”的数，再沿着让这个数变好的方向，一点点调整 530 万个参数。下一讲：**g4 · 预训练**。

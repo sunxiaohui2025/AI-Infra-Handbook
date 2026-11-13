@@ -1,5 +1,5 @@
 ---
-// 张量并行度与延迟、每卡吞吐（公式与第 98 讲的代码相同）：一步 ≈ max(计算 / 989 TFLOPS, (权重 + KV) / 3.35 TB/s) ÷ t + 每层 2 次 All-Reduce。
+// 张量并行度与延迟、每卡吞吐（公式与第 110 讲的代码相同）：一步 ≈ max(计算 / 989 TFLOPS, (权重 + KV) / 3.35 TB/s) ÷ t + 每层 2 次 All-Reduce。
 // All-Reduce 走 NVLink（α 3 μs，β 450 GB/s），取一步到位和 Ring 中较快的。每卡显存超过 72 GB 标为放不下。
 // 读者可以：选模型，调批大小和上下文长度，看 TP = 1、2、4、8 时的 TPOT（柱子）和每张卡的吞吐（折线）。
 interface Props { title?: string; caption?: string }

@@ -1,0 +1,13 @@
+HuggingFace GPT-2 small（随机初始化）：149 个张量，124,439,808 个参数
+  transformer.wte.weight                 (50257, 768)
+  transformer.h.0.attn.c_attn.weight     (768, 2304)
+  transformer.h.0.attn.c_proj.weight     (768, 768)
+  transformer.h.0.mlp.c_fc.weight        (768, 3072)
+  lm_head.weight                         (50257, 768)
+  lm_head 和 wte 是同一个张量： True
+装进我们的 GPT：163,037,184 个参数（输出层单独存了一份）
+
+2 条 × 64 个随机 token：logits (2, 64, 50257)
+  最大绝对误差 5.01e-06，每个位置的 argmax 都一样：True
+
+故意不转置 out_proj：形状照样对得上、不报错，但 logits 最大误差 3.29e+00，argmax 一样的比例 0%

@@ -1,0 +1,220 @@
+---
+id: 81
+slug: request-lifecycle
+title: 一个请求的完整生命周期
+chapter: 3
+part: 10
+problem: vLLM、SGLang 内部各模块怎么协作
+prereqs: [70, 74, 75, 76, 77, 78]
+level: 主线
+minutes: 30
+demos: [RequestFlow]
+video: ""
+formula: 'API 服务器 → 模板与分词 → 调度器（+ KV 块管理）→ 输入准备 → GPU 前向 → 采样 → 反分词 → 流式返回；中间四步每秒循环几十到上百次'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import RequestFlow from '../../components/RequestFlow.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[70, 74, 75, 76, 77, 78]} />
+
+前面六讲分别讲了推理引擎里的一个个机制：连续批处理、分页、前缀缓存、分块 prefill、调度与抢占、约束解码。它们是零件。这一讲把零件装回去：跟着一个请求，从用户按下发送键，到收到最后一个字，看它依次经过哪些模块、每个模块手里拿着什么数据、做了什么决定。
+
+读完这一讲，再去看 vLLM 或 SGLang 的源码、日志和监控指标，就知道每一块对应的是哪个环节。
+
+## 全景：三个进程、九个模块
+
+以 vLLM 为原型（SGLang 的结构大同小异），一个推理服务可以分成三个部分，各自运行在不同的进程里：
+
+- **前端进程**：API 服务器，以及套模板、分词。它面对的是 HTTP 请求和文字。
+- **引擎核心**：调度器和 KV 块管理器。它面对的是一个个请求的状态：排在哪个队列、用了哪些块、prefill 做到了哪里。
+- **GPU 工作进程**：准备输入、跑模型、采样。它面对的是张量。多卡并行时（第 13 篇），每张卡一个工作进程。
+
+最后还有反分词，把 token 变回文字，从前端送回给用户。
+
+为什么要分成几个进程？因为它们干的活性质完全不同。HTTP 请求的收发、分词、反分词都是 CPU 上琐碎的字符串处理，量大而且时快时慢；调度器的循环则要求稳定、快速地一步接一步，不能被这些琐事打断，否则 GPU 就会空等。Python 同一个进程里同一时刻只能有一个线程在执行 Python 代码，所以把它们拆到不同的进程里，彼此用消息队列通信（vLLM 和 SGLang 都用 ZeroMQ）。
+
+下面的示意图画出了这九个模块。一步步点“下一步”，跟着一个请求走一遍。
+
+<RequestFlow caption="图 81-1　一个请求流经推理引擎的各个模块。虚线框是进程的划分。第 4 到 9 阶段里，调度、输入准备、前向、采样这个循环每生成一个 token 转一圈。" />
+
+## 进门：API 服务器和分词
+
+请求从一个 HTTP 调用开始。大多数推理引擎都提供和 OpenAI 兼容的接口，比如 `/v1/chat/completions`：请求里有对话消息、要不要流式返回（`stream`）、最多生成多少个 token（`max_tokens`）、温度和 Top-p（第 73 讲）、可能还有一个 JSON Schema（第 80 讲）。
+
+API 服务器检查这些参数，给请求分配一个编号，建一个输出通道，留着之后把生成的文字推回去。
+
+接着是**套模板和分词**。对话消息要按模型训练时用的聊天模板（第 47 讲）拼成一段文字，加上 `<|start_header_id|>user<|end_header_id|>` 之类的特殊标记，再用分词器（第 21 讲）切成 token id 序列。从这里开始，引擎里流动的就只有数字了。
+
+分词本身很快（毫秒以内），但请求很多、提示很长时，它占的 CPU 也不少，这正是它被放在前端进程里的原因。
+
+## 排队和放行：调度器与 KV 块管理
+
+token 序列送到引擎核心，请求进入**等待队列**。
+
+引擎核心在一个循环里运转，每转一圈就是一步。每一步开始时，调度器按第 74、77、78 讲的规则做决定：
+
+1. 运行中的请求，已经在 decode 的，每个排 1 个 token；需要新块的，向 KV 块管理器要；块不够，就抢占。
+2. 用剩下的 token 预算，排正在 prefill 的请求（长提示切块）。
+3. 还有预算和空闲块，就从等待队列里放新请求进来。
+
+放新请求时，KV 块管理器先查**前缀缓存**（第 76 讲）：系统提示或者多轮对话的历史，如果有现成的块，直接放进这个请求的块表，引用计数加一；没命中的部分，按需分配新块（第 75 讲）。
+
+调度器的输出是一张“这一步的清单”：哪些请求参加，每个处理几个 token，它们的块表是什么。
+
+## 一步前向：输入准备、GPU、采样
+
+清单送到 GPU 工作进程。**输入准备**（vLLM 里叫 model runner）把清单变成张量：
+
+- 所有请求这一步的 token 首尾相接，拼成一个长序列（第 74 讲）；
+- 每个 token 的位置编号（用于 RoPE，第 37 讲）；
+- 每个请求的块表，和每个新 token 的 k、v 要写到哪个块的哪个位置；
+- 每个请求在长序列里从哪里开始、到哪里结束，供注意力区分请求。
+
+然后是 **GPU 前向**：32 层 Transformer 依次计算。线性层（QKV 投影、输出投影、FFN）对长序列里所有 token 一起做矩阵乘法；注意力按块表从 KV Cache 里读每个请求自己的历史，把新 token 的 k、v 写进去（第 85 讲讲这个算子）。最后，只取每个请求**最后一个位置**的输出，算出词表上的 logits。
+
+**采样**拿到 logits，按每个请求自己的参数处理：有格式约束的先加掩码，再除以温度、做 Top-p 截断，最后抽出一个 token id。对刚做完 prefill 的请求，这是它的第一个 token，**TTFT 到这里就结束了**（第 70 讲）。
+
+## 出门：反分词和流式返回
+
+新的 token id 送回前端，**反分词**把它接到已经生成的部分，转回文字。这一步不像看上去那么简单：一个汉字可能被切成好几个 token（第 21 讲的字节级 BPE），单独一个 token 可能解码不出完整的字，要等后面的 token 到了再一起输出。所以反分词是“增量”的：每次只输出新确定下来的那部分文字。
+
+同时还要检查结束条件：生成了结束标记、遇到了用户指定的停止词、达到了 `max_tokens`。
+
+文字片段通过 SSE（服务器推送事件）推给客户端，用户看到第一个字。
+
+## 循环，直到结束
+
+接下来，这个请求每一步都在调度器的清单上：排 1 个 decode token，必要时多要一块；GPU 前向；采样；反分词；推送。这个循环每秒转几十到上百次，每两次推送之间的间隔，就是 TPOT。
+
+生成结束时，请求离开运行队列，块的引用计数减一。提示部分的块仍然留在前缀缓存里，后来的请求可能还会命中它；没人用、池子又紧张时，再按 LRU 腾出来。最后，API 服务器发出结束标志和用量统计（输入、输出各多少个 token，计费就按它算）。
+
+<Note kind="point">一个请求依次经过：API 服务器、套模板与分词、调度器（和 KV 块管理）、输入准备、GPU 前向、采样、反分词、流式返回。中间“调度 → 输入准备 → 前向 → 采样”是一个每步都转的循环，所有请求共用它；每个请求每转一圈多一个 token。</Note>
+
+## 时间都花在哪里
+
+把这条路径和第 70 讲的指标对应起来：
+
+- **TTFT** = 排队时间 + prefill 时间（长提示可能分好几步）+ 第一个 token 的采样和返回。负载高时，排队时间往往是 TTFT 的大头。
+- **TPOT** ≈ 每一步的时间。它取决于这一步一起算的有多少请求、多少 prefill token（第 70、77 讲），也包括调度器和输入准备在 CPU 上花的时间。
+- **总延迟** = TTFT + （输出 token 数 − 1）× TPOT。
+
+CPU 上的时间值得单独说一句。decode 一步在 GPU 上只要几毫秒，调度、输入准备、采样、反分词如果在 CPU 上加起来也花上一两毫秒，而且是和 GPU 串行进行的，GPU 就有相当一部分时间在空等。所以推理引擎在这里花了很多功夫：把调度和 GPU 计算重叠起来（GPU 在算第 n 步时，CPU 准备第 n + 1 步），用 CUDA Graph 减少启动开销（第 89 讲），把反分词挪出主循环。
+
+## 用代码复现
+
+下面是一个极简的推理引擎，把这一讲的几个模块串起来：分词（一个字当一个 token）、等待队列、带前缀缓存的块分配、先 decode 后 prefill 的 token 预算、采样（为了简单，“模型”直接按预先写好的回答逐字输出）、流式返回、结束时归还块。两个请求共用系统提示“你是助手。”，R1 在第 0 步到达，R2 在第 3 步到达。代码打出 R1 前几步和 R2 全程的事件。
+
+```python
+# 一个极简的推理引擎：一个字当一个 token，“模型”按预先写好的回答逐字输出，只为看清各个模块怎么配合
+B, POOL, BUDGET = 4, 12, 10                             # 每块 4 个 token，池子 12 块，每步最多处理 10 个 token
+SYS = "你是助手。"
+REPLY = {"什么是注意力？": "按相关程度收集信息。", "什么是残差？": "把输入加回输出。"}
+
+class Req:
+    def __init__(s, rid, text):
+        s.rid, s.q = rid, text
+        s.prompt = list(SYS + text)                      # ① 套对话模板、分词
+        s.out, s.done_pre, s.blocks = [], 0, []
+
+cache, free = {}, list(range(POOL))                      # 前缀缓存：前缀 → 块号；空闲块
+waiting, running, log = [], [], []
+
+def admit(r, step):
+    """② 调度器放进一个请求：查前缀缓存，命中的整块直接复用，其余按需分配。"""
+    hit = 0
+    while (hit + 1) * B <= len(r.prompt) and "".join(r.prompt[:(hit + 1) * B]) in cache:
+        r.blocks.append(cache["".join(r.prompt[:(hit + 1) * B])]); hit += 1
+    r.done_pre = hit * B
+    log.append((step, r.rid, f"调度器：放进运行队列，前缀缓存命中 {hit} 块（{hit * B} 个 token 不用算）"))
+
+def ensure_blocks(r, n_tokens):
+    while len(r.blocks) * B < n_tokens: r.blocks.append(free.pop(0))
+
+def step(t):
+    budget, batch = BUDGET, []
+    for r in running:                                    # ③ 先排 decode：每个已经 prefill 完的请求 1 个 token
+        if r.done_pre == len(r.prompt): batch.append((r, 1)); budget -= 1
+    while waiting and len(free) >= 2: r = waiting.pop(0); admit(r, t); running.append(r)
+    for r in running:                                    # ④ 再用剩下的预算排 prefill（切块）
+        left = len(r.prompt) - r.done_pre
+        if left and budget > 0:
+            c = min(left, budget); batch.append((r, c)); budget -= c
+    for r, n in batch:                                   # ⑤ 模型执行：分配块、写 KV、算出下一个 token
+        is_pre = r.done_pre < len(r.prompt)
+        ensure_blocks(r, (r.done_pre + n) if is_pre else len(r.prompt) + len(r.out) + 1)
+        if is_pre:
+            r.done_pre += n
+            for k in range(r.done_pre // B):             # 装满的提示块登记进前缀缓存
+                cache.setdefault("".join(r.prompt[:(k + 1) * B]), r.blocks[k])
+            log.append((t, r.rid, f"模型：prefill {n} 个 token（{r.done_pre}/{len(r.prompt)}），块表 {r.blocks}"))
+            if r.done_pre < len(r.prompt): continue
+        tok = REPLY[r.q][len(r.out)]                     # ⑥ 采样（这里直接取预先写好的回答）
+        r.out.append(tok)
+        log.append((t, r.rid, f"采样 → “{tok}”，反分词后流式发给用户：{''.join(r.out)}"))
+        if len(r.out) == len(REPLY[r.q]):                # ⑦ 结束：块还回去（提示块仍留在前缀缓存里，供后来者命中）
+            running.remove(r); free.extend(b for b in r.blocks if b not in cache.values())
+            log.append((t, r.rid, f"结束，共 {len(r.out)} 个 token"))
+
+waiting.append(Req("R1", "什么是注意力？")); log.append((0, "R1", f"API 收到请求，分词得到 {len(SYS + '什么是注意力？')} 个 token，进入等待队列"))
+for t in range(14):
+    if t == 3: waiting.append(Req("R2", "什么是残差？")); log.append((3, "R2", f"API 收到请求，分词得到 {len(SYS + '什么是残差？')} 个 token，进入等待队列"))
+    step(t)
+for t, rid, msg in log:
+    if rid == "R2" or t <= 2: print(f"第 {t:2d} 步 {rid}：{msg}")
+```
+
+输出：
+
+```text
+第  0 步 R1：API 收到请求，分词得到 12 个 token，进入等待队列
+第  0 步 R1：调度器：放进运行队列，前缀缓存命中 0 块（0 个 token 不用算）
+第  0 步 R1：模型：prefill 10 个 token（10/12），块表 [0, 1, 2]
+第  1 步 R1：模型：prefill 2 个 token（12/12），块表 [0, 1, 2]
+第  1 步 R1：采样 → “按”，反分词后流式发给用户：按
+第  2 步 R1：采样 → “相”，反分词后流式发给用户：按相
+第  3 步 R2：API 收到请求，分词得到 11 个 token，进入等待队列
+第  3 步 R2：调度器：放进运行队列，前缀缓存命中 2 块（8 个 token 不用算）
+第  3 步 R2：模型：prefill 3 个 token（11/11），块表 [0, 1, 4]
+第  3 步 R2：采样 → “把”，反分词后流式发给用户：把
+第  4 步 R2：采样 → “输”，反分词后流式发给用户：把输
+第  5 步 R2：采样 → “入”，反分词后流式发给用户：把输入
+第  6 步 R2：采样 → “加”，反分词后流式发给用户：把输入加
+第  7 步 R2：采样 → “回”，反分词后流式发给用户：把输入加回
+第  8 步 R2：采样 → “输”，反分词后流式发给用户：把输入加回输
+第  9 步 R2：采样 → “出”，反分词后流式发给用户：把输入加回输出
+第 10 步 R2：采样 → “。”，反分词后流式发给用户：把输入加回输出。
+第 10 步 R2：结束，共 8 个 token
+```
+
+看 R1：它的提示有 12 个 token，每步预算 10 个，所以 prefill 被切成两块，第 0 步 10 个、第 1 步 2 个，第 1 步结束时出了第一个字“按”。
+
+看 R2：它在第 3 步到达，和 R1 共用“你是助手。什么是”这 8 个字，前两块（块 0、1）直接命中前缀缓存，只需要 prefill 剩下的 3 个 token，当步就出了第一个字。之后每步一个字，第 10 步出完“把输入加回输出。”，结束。它的块表 [0, 1, 4] 里，块 0、1 是和 R1 共享的。
+
+## 到了源码里
+
+如果想读源码，下面是这些模块在 vLLM（V1 引擎）和 SGLang 里的大致位置（文件会随版本调整，以当前版本为准）：
+
+| 模块 | vLLM | SGLang |
+| --- | --- | --- |
+| API 服务器 | `vllm/entrypoints/openai/` | `sglang/srt/entrypoints/http_server.py` |
+| 模板、分词 | 前端的输入处理 | `TokenizerManager` |
+| 调度器 | `vllm/v1/core/sched/scheduler.py` | `sglang/srt/managers/scheduler.py` |
+| KV 块管理、前缀缓存 | `vllm/v1/core/kv_cache_manager.py` | `sglang/srt/mem_cache/radix_cache.py` |
+| 输入准备、前向 | `vllm/v1/worker/gpu_model_runner.py` | `ModelRunner` |
+| 采样 | `vllm/v1/sample/sampler.py` | `Sampler` |
+| 反分词 | 前端的输出处理 | `DetokenizerManager` |
+
+读的时候抓住一条主线：引擎核心的循环每一步调用一次调度器，得到清单，交给 GPU 工作进程执行，拿回新 token 更新每个请求的状态。其他的代码，大多是这条主线上的细节。
+
+## 容易混淆的地方
+
+1. **“推理引擎”不等于“模型”。**模型只是 GPU 前向那一个模块；其余的模块决定了模型以什么方式被调用。同一个模型，换一个引擎、换一组参数，吞吐和延迟可以差好几倍。
+2. **停止词在反分词时检查。**停止词是文字，不是 token，只有转回文字后才能判断。所以停止词出现后，引擎可能已经多算了一两个 token，只是没有返回给用户。
+3. **流式返回不改变计算。**`stream` 只是让文字边生成边送出；不流式时，引擎同样一个 token 一个 token 地生成，只是攒齐了再一次返回。TTFT 对用户的意义只在流式时才明显。
+
+## 回顾
+
+一个请求从 HTTP 调用开始，在前端进程里套上聊天模板、分词成 token id；进入引擎核心的等待队列，调度器在有预算、有块时放它进来，KV 块管理器查前缀缓存、分配块；GPU 工作进程把这一步所有请求的 token 拼成长序列，跑一遍前向，按块表读写 KV Cache，取最后位置的 logits 采样；新 token 回到前端，增量反分词、检查停止条件，通过 SSE 推给用户。“调度 → 前向 → 采样”的循环每步转一圈，所有请求共用；结束时块的引用计数减一，提示块留在前缀缓存里。三个进程分开，是为了让 CPU 上的琐事不打断 GPU 的循环。
+
+推理引擎搭好了，它到底有多快？“吞吐 1 万 token/s”这样的数字是怎么测出来的，怎么测才可信？下一讲：**推理压测实践**。

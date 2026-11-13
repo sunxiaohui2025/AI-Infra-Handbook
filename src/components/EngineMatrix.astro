@@ -1,5 +1,5 @@
 ---
-// 主流推理引擎的定位对照（第 120 讲）。内容是定性的，来自各项目的公开文档和本篇读过的源码，不是测出来的性能排名；项目更新很快，以官方文档为准。
+// 主流推理引擎的定位对照（第 132 讲）。内容是定性的，来自各项目的公开文档和本篇读过的源码，不是测出来的性能排名；项目更新很快，以官方文档为准。
 // 读者可以：选一个部署场景，看哪些引擎适合（强调色）、为什么。
 interface Props { title?: string; caption?: string }
 const { title = '按场景看引擎', caption } = Astro.props;
@@ -23,9 +23,9 @@ const { title = '按场景看引擎', caption } = Astro.props;
   ];
   const SC = [
     { k: '在线服务（数据中心 GPU）', on: ['vLLM', 'SGLang', 'TensorRT-LLM', 'LMDeploy'], why: '要 continuous batching、分页 KV、前缀缓存、OpenAI 兼容接口、多卡并行。四个都具备；vLLM 和 SGLang 社区最大、模型最新；只用 NVIDIA 新卡、追求极致时看 TensorRT-LLM。' },
-    { k: '共享前缀多（多轮、Agent）', on: ['SGLang', 'vLLM'], why: '前缀缓存的命中率决定 TTFT 和成本。SGLang 的基数树逐 token 命中，缓存感知的调度可选；vLLM 的块哈希前缀缓存默认打开，配合缓存感知的路由（第 102 讲）。' },
+    { k: '共享前缀多（多轮、Agent）', on: ['SGLang', 'vLLM'], why: '前缀缓存的命中率决定 TTFT 和成本。SGLang 的基数树逐 token 命中，缓存感知的调度可选；vLLM 的块哈希前缀缓存默认打开，配合缓存感知的路由（第 114 讲）。' },
     { k: '大规模 MoE（DeepSeek 类）', on: ['SGLang', 'vLLM', 'TensorRT-LLM'], why: '要专家并行、DP 注意力、DeepEP 这类 All-to-All 通信库、EPLB 负载均衡、双微批重叠和 PD 分离。这三个都有公开的大规模部署方案。' },
-    { k: '显存紧、要 4 位量化', on: ['LMDeploy', 'vLLM', 'llama.cpp'], why: '4 位权重量化要有专门的 kernel 才能变快（第 111 讲的教训）。LMDeploy 的 TurboMind、vLLM 的 Marlin 等 kernel、llama.cpp 的 k-quant 都是为此写的。' },
+    { k: '显存紧、要 4 位量化', on: ['LMDeploy', 'vLLM', 'llama.cpp'], why: '4 位权重量化要有专门的 kernel 才能变快（第 123 讲的教训）。LMDeploy 的 TurboMind、vLLM 的 Marlin 等 kernel、llama.cpp 的 k-quant 都是为此写的。' },
     { k: '本地 / 端侧 / Mac', on: ['llama.cpp', 'MLC-LLM'], why: '没有数据中心 GPU，并发很低，关心的是能跑起来、占内存少、单请求延迟低。llama.cpp 覆盖的硬件最广；要进手机或浏览器看 MLC-LLM。' },
     { k: '国产加速卡', on: ['vLLM', 'SGLang', 'LMDeploy'], why: '各家硬件厂商通常为 vLLM、SGLang 提供插件或分支（如 vllm-ascend），LMDeploy 的 PyTorch 引擎也支持昇腾。具体看厂商的支持列表。' },
   ];

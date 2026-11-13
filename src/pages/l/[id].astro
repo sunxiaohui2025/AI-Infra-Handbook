@@ -20,7 +20,7 @@ const ls = partLs(l.part);
 const idx = ls.findIndex((x) => x.id === l.id) + 1;
 const prev = LECTURES[l.id - 2];
 const next = LECTURES[l.id];
-const proj = l.part >= 14;            // 第五章（项目篇）：代码多，用宽版式
+const proj = l.part >= 15 || l.part === 7;           // 第五章（项目篇）：代码多，用宽版式
 ---
 <Base title={`${pad(l.id)} ${l.title}`} view="lec">
   <main class={`ai-scroll ai-read${proj ? ' ai-proj' : ''}`} id="main">
@@ -43,7 +43,7 @@ const proj = l.part >= 14;            // 第五章（项目篇）：代码多，
                 <p class="ai-todo-title">这一讲还没有写</p>
                 <dl>
                   <dt>要回答的问题</dt><dd>{l.q}</dd>
-                  <dt>{l.part >= 14 ? '对应' : '计划中的演示'}</dt><dd>{l.demo}</dd>
+                  <dt>{l.part >= 15 || l.part === 7 ? '对应' : '计划中的演示'}</dt><dd>{l.demo}</dd>
                 </dl>
                 <p class="ai-todo-hint">想读这一讲时，对写作助手说「写第 {l.id} 讲」即可。</p>
               </div>

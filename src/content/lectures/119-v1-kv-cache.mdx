@@ -1,0 +1,94 @@
+---
+id: 119
+slug: v1-kv-cache
+title: v1 · KV Cache
+chapter: 5
+part: 15
+problem: 生成第 N 个 token 时，不再重算前面的 N − 1 个
+prereqs: [68, 69, 118]
+level: 主线
+demos: [EngineArch, CodeWalk, CodeDiff, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineArch from '../../components/EngineArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CodeDiff from '../../components/CodeDiff.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[68, 69, 118]} />
+
+v0 每生成一个 token，都把整段序列从头算一遍。199 个 token 的提示生成 64 个 token，第 1 步 419 ms，第 64 步 724 ms，一共 34 秒；其中绝大部分计算是在重复上一步已经做过的事。
+
+第 69 讲给出了解决办法：每层把算过的 K、V 存起来，新 token 只需要算自己的 q、k、v，再和存好的 K、V 做注意力。这一讲把它写进 miniinfer。改动不大：新增一个 18 行的 `kv_cache.py`，模型的注意力多两行，生成循环分出 prefill 和 decode 两种调用。
+
+<EngineArch ver="v1" caption="图 119-1　v1 新增了 KV Cache（下方），改动了模型的注意力和引擎的生成循环。" />
+
+## 为什么只存 K 和 V 就够了
+
+先确认一件事：新 token 的计算到底依赖前面 token 的哪些东西？
+
+沿着一层 Transformer 看。RMSNorm、q/k/v 投影、RoPE、SwiGLU 都是**逐位置**的：位置 p 的输出只依赖位置 p 的输入。只有注意力会跨位置：位置 p 的查询 q_p 要和所有 ≤ p 位置的键 k_j 做点积，再对值 v_j 加权求和。而这些 k_j、v_j 一旦算出来就不会再变（因果掩码保证了后面的 token 不影响前面的计算）。
+
+所以，位置 p 的新 token 需要的“历史”，恰好就是每一层前面所有位置的 K 和 V。把它们存下来，新 token 走完 28 层，每层只多读一次缓存。这就是 KV Cache，第 69 讲的推导这里不再重复。
+
+## 数据结构：一块按最大长度分好的连续内存
+
+最简单的存法：每个请求一开始就按“提示长度 + 最多生成多少个”分配好一整块，形状是 [层数, 最大长度, KV 头数, 头维度]，K、V 各一份。生成时往里写，用到哪里读到哪里。
+
+Qwen3-0.6B 每个 token 的 KV 有多大？2（K 和 V）× 28 层 × 8 个 KV 头 × 128 维 × 4 字节（FP32）：
+
+<RunOutput cmd=".venv/bin/python bench/kv_size.py" file="outputs/kv_size.txt" caption="图 119-2　Qwen3-0.6B 的 KV Cache：FP32 下每个 token 224 KiB，一个 2048 token 的请求 448 MiB。GQA 让 KV 头只有查询头的一半，KV 也随之减半。" />
+
+<CodeWalk file="v1/kv_cache.py" steps={[
+  { lines: [5, 9], title: '一次分配好', body: '<p>形状 [28, 最大长度, 8, 128]。第一维是层号，这样第 i 层读写时用 <code>self.k[i]</code> 取出这一层的那一片。</p><p>一开始就按最大长度分配，是因为生成过程中不知道每一步会不会结束；预先分好，写的时候就不用扩容和复制。代价是：请求提前结束时，后面没用到的空间也被占着。这个毛病在第 121 讲解决。</p>' },
+  { lines: [11, 14], title: '写：新 token 的 K、V 放到它们的位置', body: '<p><code>pos</code> 是这一次送进来的 token 的位置，比如 prefill 时是 0–198，decode 第一步是 199。用张量做下标，一次写入一批位置。</p>' },
+  { lines: [16, 18], title: '读：前 end 个位置的全部 K、V', body: '<p>注意力要的是从位置 0 到当前位置的全部 K、V。<code>self.k[layer, :end]</code> 是一个视图，不复制数据。</p>' },
+]} />
+
+## 模型：注意力多两行
+
+注意力的改动只有两处：算出新 token 的 k、v 之后，**先写进缓存，再从缓存读出全部**，后面的计算照旧；掩码不再是 T × T 的下三角，而是“查询位置 p 只看键位置 ≤ p”。下面是和 v0 的差别：
+
+<CodeDiff a="v0/model.py" b="v1/model.py" caption="图 119-3　model.py 和 v0 的差别。绿底是新增，红底是删掉。注意力多了写缓存、读缓存，掩码改成按位置比较；forward 多了起始位置和缓存两个参数，最后只取一个位置的打分。" />
+
+<CodeWalk file="v1/model.py" from={26} to={62} steps={[
+  { lines: [34, 37], title: '先写，再读', body: '<p>RoPE 之后的 k 和原始的 v 写进缓存。注意存的是<b>旋转之后</b>的 k：旋转只和它自己的位置有关，存旋转后的结果，以后就不用再转一次。</p><p><code>end</code> 是这一批里最后一个 token 的位置加一。读出来的 k、v 是 [end, 8, 128]，包含了历史和这一次的新 token。</p>' },
+  { lines: [40, 43], title: '掩码按位置比较', body: '<p>现在查询有 T 个（prefill 时是整个提示，decode 时只有 1 个），键有 end 个。<code>arange(end)[None, :] &lt;= pos[:, None]</code> 得到 [T, end] 的掩码：第 t 个查询（位置 pos[t]）只能看位置 ≤ pos[t] 的键。</p><p>prefill 时 pos = 0…198、end = 199，这正是 v0 的下三角；decode 时只有一个查询，位置 199，可以看全部 200 个键，掩码全是 True。同一行代码同时处理了两种情况。</p>' },
+  { lines: [52, 55], title: '位置从 start 开始', body: '<p>forward 多了两个参数：这一批 token 从哪个位置开始（<code>start</code>），以及这个请求的缓存。位置不再总是从 0 开始：decode 第一步送进来的 token，位置是 199。</p><p>位置错一位，RoPE 转的角度就错了，模型会悄悄地输出不一样的结果。这是加 KV Cache 时最常见的 bug。</p>' },
+  { lines: [61, 62], title: '只算最后一个位置的输出层', body: '<p>只有最后一个位置的打分有用。输出层是 [151936, 1024] 的大矩阵，prefill 199 个 token 时，只算一行比算 199 行省了 99% 的输出层计算。</p>' },
+]} />
+
+## 引擎：prefill 一次，之后每步一个
+
+<CodeWalk file="v1/engine.py" from={10} to={28} steps={[
+  { lines: [17, 20], title: '为这个请求分配缓存', body: '<p>最大长度 = 提示长度 + 最多生成的数量。第一步要送进模型的是整个提示，这一步就是 <b>prefill</b>。</p>' },
+  { lines: [21, 23], title: '一次 forward，一个新 token', body: '<p>起始位置 = 已有 token 数 − 这次要送进去的数：prefill 时是 0，之后每一步都是“上一个 token 的位置”。</p>' },
+  { lines: [24, 27], title: '之后每步只送一个', body: '<p>新生成的 token 接到后面，下一步只把它送进去，这一步就是 <b>decode</b>。它的 K、V 在这一步里写进缓存，下一步就成了“历史”。</p><p>注意：生成出来的那个 token，在被送进模型之前，它的 K、V 还不在缓存里。所以任何时刻，缓存里都比 token 序列少最后一个位置。第 120 讲的 <code>num_computed</code> 记录的就是这个数。</p>' },
+]} />
+
+## 先验证，再测速度
+
+<RunOutput cmd=".venv/bin/python tests/check.py v1" file="outputs/check_v1.txt" caption="图 119-4　v1 和 HuggingFace 逐 token 一致：缓存的读写、位置、掩码都对了。" />
+
+再用和 v0 一样的设置比一比：199 个 token 的提示，生成 64 个，记录每一步 forward 的耗时。
+
+<RunOutput cmd=".venv/bin/python bench/v0_vs_v1.py" file="outputs/bench_v0_v1.txt" caption="图 119-5　v0 每步都在重算，第 64 步比第 1 步慢了七成；v1 只有第 1 步（prefill）慢，之后每步约 65 ms，64 步共 4.55 s，是 v0 的 7.5 分之一。" />
+
+逐项看这组数：
+
+- **第 1 步两者差不多**（419 ms 与 357 ms）：都是把 199 个 token 完整算一遍。v1 稍快，因为输出层只算了最后一行。
+- **第 2 步起分道扬镳**：v0 还要算 200 个 token，417 ms；v1 只算 1 个 token，63 ms。
+- **v1 的 decode 每步几乎不变**（63 → 66 ms）：每步的计算量只和 1 个 token 有关，注意力多读的 K、V 从 200 个涨到 263 个，在 CPU 上只占很小一部分。
+- **v0 越来越慢**：第 64 步要算 263 个 token，724 ms。
+
+一个 token 的 decode 要 63 ms，而 199 个 token 的 prefill 只要 357 ms，也就是每个 token 不到 2 ms。为什么 decode 一个 token 这么“贵”？因为无论算 1 个还是 199 个 token，每一步都要把全部权重（FP32 约 3 GB）从内存读一遍；token 越少，读一遍权重摊到每个 token 上的代价越大。这就是第 70 讲说的：decode 是读内存受限的。
+
+<Note kind="point">KV Cache 把“每步重算整段”变成“每步只算一个新 token”：v1 生成 64 个 token 从 34 s 降到 4.55 s。改动集中在注意力的两行（先写缓存，再读全部）和位置（从 start 开始）。剩下的问题是，decode 每一步都要把全部权重读一遍，却只为一个 token 服务。</Note>
+
+## 回顾
+
+v1 给每个请求按“提示 + 最大输出”分配一块连续的 KV Cache（FP32 下每个 token 224 KiB），注意力里先把新 token 的 K、V 写进去，再读出全部历史；生成循环分成一次 prefill 和之后每步一个 token 的 decode。和 HuggingFace 仍然逐 token 一致，64 个 token 从 34 s 降到 4.55 s，decode 每步稳定在 65 ms 左右。
+
+可这 65 ms 里，绝大部分时间花在把 3 GB 权重读一遍，只为一个请求算出一个 token。如果同时有 8 个请求，能不能让它们共用这一遍读取？下一讲：**v2 · Continuous Batching**。

@@ -1,0 +1,173 @@
+---
+id: 130
+slug: vllm-distributed-serving
+title: vLLM 的分布式服务
+chapter: 5
+part: 17
+problem: 一条请求在多节点、多副本的 vLLM 里怎么走一圈
+prereqs: [108, 111, 112, 113, 114, 127, 129]
+level: 主线
+demos: [EngineProcs, DPBalance, CodeWalk]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineProcs from '../../components/EngineProcs.astro';
+import DPBalance from '../../components/DPBalance.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[108, 111, 112, 113, 114, 127, 129]} />
+
+第 129 讲读的是“一个 EngineCore”：一个调度器、一个执行器、几张卡。真实的线上服务往往大得多：模型要跨好几张卡做张量并行；为了吞吐，同一个模型要部署好几个副本，分布在多台机器上；做 PD 分离时，prefill 和 decode 还是两组不同的实例，KV 要在它们之间搬运。
+
+这一讲把视野放大到整个服务，跟着一条 curl 请求走一遍：它先到哪台机器、怎么在几个副本里挑一个、在副本里怎么分给几张卡、MoE 模型的副本之间为什么要“锁步”、PD 分离时 KV 怎么从一个实例到另一个实例。每一层都对应第 14 篇讲过的一个原理（数据并行、专家并行、PD 分离、KV 传输、缓存感知路由），这一讲看它们在 vLLM 里是怎么写出来的。
+
+<Note kind="column" title="参考">这一讲的讲法参考了 Aleksa Gordić 的博客 *Inside vLLM: Anatomy of a High-Throughput LLM Inference System*（2025 年 8 月，基于 vLLM 提交 `42172ad`）。我们读的是 2026 年 11 月的提交 `821851e`，一年多里不少细节变了：只有 MoE 模型的副本才锁步运行，负载均衡的打分加入了在途请求数和 KV 压力，博客示例里的 `SharedStorageConnector` 也不在了。下文遇到时会指出来，这本身就是读源码时要注意的事：博客和文档会过时，代码才是准的。和前几讲一样，本讲只读源码，没有运行。</Note>
+
+## 第一层：一个副本里的几张卡
+
+先回到单个副本。第 129 讲提到，EngineCore 通过执行器（Executor）让 worker 跑模型。一个副本用 4 张卡做张量并行时，执行器是 `MultiprocExecutor`：每张卡一个 worker 进程，EngineCore 每一步把调度结果广播给它们。
+
+这件事 nano-vllm 也做过（第 127 讲）：rank 0 把“方法名 + 参数”pickle 后写进 1 MiB 的共享内存，再用事件通知其他进程。vLLM 的做法是同一个思路的工程化版本：
+
+<CodeWalk file="third_party/vllm/vllm/v1/executor/multiproc_executor.py" from={471} to={540} steps={[
+  { lines: [471, 491], title: '一次“集体调用”', body: '<p><code>collective_rpc</code> 让所有 worker 执行同一个方法（<code>execute_model</code>、<code>sample_tokens</code> 等都是通过它调用的）。<code>unique_reply_rank</code> 指定只要哪个 worker 的返回值。</p>' },
+  { lines: [493, 510], title: 'KV connector 的输出要汇总', body: '<p>通常只需要一个 worker 的结果（张量并行时各卡算出的 token 一样）。但如果配置了 KV connector，每个 worker 各自负责自己那部分 KV 的传输，传输状态要从所有 worker 收齐再合并，这时就要等所有 worker 回复。</p>' },
+  { lines: [512, 516], title: '写进广播队列', body: '<p>方法名、参数和“由谁回复”打包成一个元组，写进 <code>rpc_broadcast_mq</code>。这是一个基于共享内存的环形消息队列（<code>vllm/distributed/device_communicators/shm_broadcast.py</code>）：一次写入，所有 worker 都能读到，不用逐个发送。</p>' },
+  { lines: [518, 533], title: '只从需要的 worker 读回复', body: '<p>每个 worker 有自己的回复队列。只需要一个结果时，只读那一个队列，其余 worker 算完了也不回复，省掉了把同样的结果序列化好几遍。</p>' },
+]} />
+
+谁来回复？第 683–697 行的 `_get_output_rank` 给出了答案：**最后一个流水线阶段里张量并行编号为 0 的那个 worker**。只有最后一个流水线阶段算出了打分，而同一阶段里各张卡的结果相同，取第一张就够了。worker 那边是一个死循环（第 1188–1218 行）：从广播队列取出调用，执行，如果自己就是指定回复的那一个，就把结果写进自己的回复队列。
+
+和 nano-vllm 相比，差别在细节上：环形队列让 EngineCore 可以连续发出几步（流水线并行、异步调度时需要），不用等上一步的读者读完；回复只走一条队列；所有 worker 共享同一个广播写入，而不是 pickle 一次、通知 N 次。
+
+## 第二层：多个副本
+
+模型放进 4 张卡以后，想要更高的吞吐，就部署更多副本：数据并行（DP）。博客里的例子是两台 8 卡的机器、4 个副本、每个副本张量并行 4 卡。在 vLLM 里这样启动（两台机器各运行一次）：
+
+```bash
+# 节点 A：带 API 服务器，副本 0、1
+vllm serve <model> --tensor-parallel-size 4 --data-parallel-size 4 --data-parallel-size-local 2 \
+  --data-parallel-start-rank 0 --data-parallel-address <节点 A 的 IP> --data-parallel-rpc-port 13345
+# 节点 B：只跑引擎，副本 2、3
+vllm serve <model> --tensor-parallel-size 4 --data-parallel-size 4 --data-parallel-size-local 2 \
+  --data-parallel-start-rank 2 --data-parallel-address <节点 A 的 IP> --data-parallel-rpc-port 13345 --headless
+```
+
+<EngineProcs engine="vllm-dp" caption="图 130-1　两个节点、4 个数据并行副本。节点 A 上有 API 服务器、负载均衡的客户端和 DP 协调器；节点 B 不带 API 服务器（headless），只跑两个副本。点“下一步”看一个请求的路径。" />
+
+### 非 MoE 和 MoE 是两回事
+
+博客写作时，vLLM 的数据并行副本一律“锁步”运行（下一节讲锁步是什么）。现在的代码把两种情况分开了：
+
+<CodeWalk file="third_party/vllm/vllm/v1/engine/core.py" from={1718} to={1728} steps={[
+  { lines: [1719, 1722], title: 'MoE 模型：DPEngineCoreProc', body: '<p>MoE 模型的专家层要跨副本做专家并行（第 108、111 讲）：每一步前向里都有 All-to-All，所有副本必须一起参加。所以 MoE 模型的每个副本是一个 <code>DPEngineCoreProc</code>，它们之间有一个通信组，步调一致。</p>' },
+  { lines: [1723, 1728], title: '非 MoE 模型：彼此独立', body: '<p>普通的稠密模型，各副本之间没有任何通信，所以直接当成数据并行度为 1 的独立引擎（<code>reconfigure_for_independent_dp_rank</code>），只保留一个编号用于负载均衡。这和“启动几个互不相干的 vLLM 实例，前面放一个负载均衡器”在效果上是一样的，只是由 vLLM 自己来管。</p>' },
+]} />
+
+### 前端用哪种客户端
+
+API 服务器里的 `AsyncLLM` 通过一个“引擎核心客户端”和 EngineCore 通信（第 129 讲）。数据并行时，选哪种客户端决定了谁来做负载均衡：
+
+<CodeWalk file="third_party/vllm/vllm/v1/engine/core_client.py" from={153} to={186} steps={[
+  { lines: [171, 177], title: '外部负载均衡', body: '<p><code>--data-parallel-external-lb</code>：每个副本配一个自己的 API 服务器，由 vLLM 之外的负载均衡器（比如 Kubernetes 的 Service）在副本之间分请求。适合“一个 Pod 一个副本”的大规模 MoE 部署。</p>' },
+  { lines: [178, 182], title: '内部负载均衡（默认）', body: '<p><code>DPLBAsyncMPClient</code>：一个前端连着所有副本，自己决定每个请求发给谁。上面的两节点例子就是这种。</p><p>两者之间还有一种“混合”模式（<code>--data-parallel-hybrid-lb</code>）：每个节点一个前端，只在本节点的副本之间分；节点之间再由外部负载均衡器分。</p>' },
+  { lines: [183, 186], title: '单副本', body: '<p>没有数据并行时就是普通的 <code>AsyncMPClient</code>。</p>' },
+]} />
+
+## 第三层：挑哪个副本
+
+内部负载均衡要回答一个问题：新请求来了，发给哪个副本？前端自己不知道各副本有多忙，需要有人告诉它。这个人就是 **DP 协调器**，一个单独的进程：
+
+<CodeWalk file="third_party/vllm/vllm/v1/engine/coordinator.py" from={23} to={54} steps={[
+  { lines: [29, 31], title: '收集负载，发布给前端', body: '<p>每个副本把自己的等待数、运行数（以及 KV 占用率）发给协调器，协调器合并后发布给所有前端。发布的间隔最小 100 ms（<code>min_stats_update_interval_ms</code>）。</p>' },
+  { lines: [33, 49], title: '请求“波次”（MoE 才用）', body: '<p>MoE 的副本们要么一起运行、要么一起暂停。从“运行”到“全部空闲、暂停”算一个波次。新请求到达一个暂停中的副本时，由这个副本通知协调器，协调器再广播 START_DP_WAVE，把其余副本叫醒。下一节细讲。</p>' },
+]} />
+
+前端订阅协调器的发布（`core_client.py` 第 1599–1674 行的 `run_engine_stats_update_task`）：它总是把积压的消息读空，只保留最新的一份快照，存在 `self.lb_engines` 里。每来一个请求，`add_request_async`（第 1676–1687 行）先挑副本，再把请求发过去。挑副本的代码：
+
+<CodeWalk file="third_party/vllm/vllm/v1/engine/core_client.py" from={1818} to={1879} steps={[
+  { lines: [1825, 1827], title: '同一个会话发回同一个副本', body: '<p>流式输入的会话（请求分几次送进来）要一直发给同一个副本，它的 KV 在那里。</p>' },
+  { lines: [1829, 1843], title: '逐个副本打分', body: '<p><code>current_counts</code> 是协调器最近一次发来的快照：每个副本的 [等待数, 运行数, KV 占用率]。从一个轮转的起点开始，逐个打分。</p>' },
+  { lines: [1844, 1853], title: '基础分：快照和在途数取大', body: '<p>基础分是两个数里较大的那个：快照里的“等待 + 运行”，以及这个前端自己发给这个副本、还没完成的请求数（乘以前端的个数，粗略地代表所有前端）。</p><p>为什么要后者：快照最快 100 ms 才更新一次，而且在某些时刻会被整体重置（注释里说的 snapshot rebind）。自己记的在途数是精确的、不会被重置，保证一阵突发至少能按轮询的方式摊开。</p>' },
+  { lines: [1854, 1861], title: 'KV 压力罚分', body: '<p>副本有排队时，按 KV 占用率加罚分：占用率 50% 以下不罚，到 100% 时罚到等待数的 3 倍。道理写在注释里：KV 快满的副本，队列消化得慢（新请求要等别人的块释放），新请求应该尽量去别处；KV 还很空时排队只是暂时的，不罚，保持轮询。</p><p>博客里的公式是 <code>等待数 × 4 + 运行数</code>，现在的规则是在实践中一步步改出来的。</p>' },
+  { lines: [1864, 1873], title: '挑中之后，先在本地记一笔', body: '<p>选中的副本，在本地快照里把等待数加上前端的个数。下一份快照到来之前，后面的请求就会看到这个副本“又多了一个”，不会都扎堆过去。</p><p>最后轮转起点：分数相同时（比如所有副本都空闲），不会总是偏向同一个副本。</p>' },
+  { lines: [1875, 1879], title: '记下请求去了哪里', body: '<p>取消请求时要发给对的副本；在途计数也在这里加一。</p>' },
+]} />
+
+这几条规则各自防的是什么，用一个小模型看得最清楚：
+
+<DPBalance caption="图 130-2　4 个副本、两阵突发的简化模型（不是 vLLM 的实测，规则见组件说明）。点“只看快照”：同一份快照里最空的副本会在 100 ms 内吃下整阵突发，平均排队 497 ms；打开“本地计数”就降到 123 ms。再把快照间隔拉长，看两种设置各自怎么变化。" />
+
+在这个模型里，作用最大的是**本地计数**：它消除了“一份旧快照被用很多次”带来的扎堆。在途下限和 KV 罚分的作用在这里不明显，因为模型只有一个前端、快照从不被重置，各副本的请求组成也差不多；它们针对的是多个前端同时分请求、快照和路由决策互相赛跑、个别副本 KV 吃紧这些真实部署里的情况。这也是读这类代码的一个经验：每一条看起来多余的规则，背后往往对应一个线上出过的问题，去翻它的提交记录（第 133 讲）就能找到。
+
+<Note kind="column" title="和第 114 讲的缓存感知路由是什么关系">这里的负载均衡只看“忙不忙”，不看“谁有我的前缀缓存”。第 114 讲讲的缓存感知路由，在 vLLM 里通常放在更外面的一层（多个 vLLM 实例前面的路由器，例如 llm-d 或 SGLang 的路由器），因为它需要知道各实例缓存了哪些块（vLLM 可以通过 KV 事件把这些信息发布出去）。两层可以叠加：外层按缓存挑实例，实例内部再按负载挑副本。</Note>
+
+## 第四层：MoE 副本的锁步
+
+对稠密模型，副本选好就结束了。MoE 模型多了一个约束：**所有副本必须一起前向**。专家层的 All-to-All 是一个集合通信，每个副本都必须参加；只要有一个副本在算，其余副本就算没有请求，也要跑一个“空批次”陪着，否则正在算的副本会卡在 All-to-All 上等。
+
+<CodeWalk file="third_party/vllm/vllm/v1/engine/core.py" from={2745} to={2830} steps={[
+  { lines: [2749, 2753], title: '收请求，发布负载', body: '<p>和普通的 EngineCore 一样（第 129 讲），先处理输入队列，再执行一步。发布负载的数字给协调器用。</p>' },
+  { lines: [2774, 2792], title: '没活也要陪跑', body: '<p>这一步没有执行任何请求时：如果自己没有未完成的请求、整个组也处于暂停状态，就什么都不做；否则（别的副本还在跑）执行一个空批次 <code>execute_dummy_batch</code>，参与这一步的集合通信。</p>' },
+  { lines: [2794, 2797], title: '大家都空了吗', body: '<p>用一次 All-Reduce 问所有副本：还有谁有未完成的请求？见下面的 <code>sync_dp_state</code>。</p>' },
+  { lines: [2799, 2817], title: '一个波次结束', body: '<p>全部副本都空闲了：暂停循环，由 0 号副本通知协调器“第 N 波结束”，波次编号加一。之后各副本停在等待输入的地方，不再陪跑空批次，GPU 就真正空闲下来。</p>' },
+  { lines: [2818, 2830], title: '一个波次开始', body: '<p>从暂停变成运行时（某个副本收到了新请求），0 号副本告诉协调器新波次开始了。协调器再广播 START_DP_WAVE，叫醒还在暂停的副本。</p>' },
+]} />
+
+“大家都空了吗”这个问题本身也有代价：每次都要做一次跨副本的 All-Reduce。现在的代码不再每一步都问：
+
+<CodeWalk file="third_party/vllm/vllm/config/parallel.py" from={966} to={991} steps={[
+  { lines: [969, 983], title: '一次 All-Reduce 问两件事', body: '<p>一个两元素的张量做求和：第 0 个元素是“我有没有未完成的请求”，求和大于 0 就说明有人在忙；第 1 个元素是“我是否想暂停”（比如要重新加载权重），求和等于副本数才算全体同意。两件事合成一次通信。</p>' },
+  { lines: [984, 991], title: '在 CPU 上做', body: '<p>这个 All-Reduce 走 CPU 的通信组（<code>cpu_all_reduce_</code>），不占 GPU 的通信资源。</p>' },
+]} />
+
+调用它的 `_has_global_unfinished_reqs`（`core.py` 第 2834 行起）只在一个波次的第 1 步和之后每 `dp_sync_interval` 步（默认 16）真正同步一次，其余步直接当作“还有人在忙”。代价是：所有副本都空闲后，最多还要多陪跑十几个空批次才停下来；换来的是正常运行时每 16 步才同步一次，而不是每一步都多一次跨机器的通信。
+
+## 第五层：PD 分离时，KV 从哪里来
+
+第 112 讲讲了 PD 分离的原理，第 113 讲讲了 KV 的传输和分层存储。在 vLLM 里，这些都通过一个接口接进来：**KV connector**。它的接口文件开头就把全部方法列了出来：
+
+<CodeWalk file="third_party/vllm/vllm/distributed/kv_transfer/kv_connector/v1/base.py" from={3} to={40} steps={[
+  { lines: [7, 23], title: '调度器一侧', body: '<p>在 EngineCore 进程里，和调度器一起工作：</p><ul><li><code>get_num_new_matched_tokens</code>：这个请求在外部（另一个实例、CPU 内存、远端存储）还有多少个 token 的 KV。可能被调用多次，必须没有副作用。</li><li><code>update_state_after_alloc</code>：调度器为这些外部 token 分好块之后，告诉 connector 往哪些块里写。</li><li><code>request_finished</code>：请求结束时决定块是马上释放，还是由 connector 负责稍后释放（等对方把 KV 取走），并可返回 KV 的位置信息。</li></ul><p>此外还有 <code>build_connector_meta</code>（第 602 行）：每一步调度结束时，把这一步要加载、要保存的信息打包进 SchedulerOutput，随调度结果一起发给 worker。</p>' },
+  { lines: [25, 39], title: 'worker 一侧', body: '<p>在每个 worker 进程里，真正搬运数据：</p><ul><li><code>start_load_kv</code> / <code>wait_for_layer_load</code>：把外部的 KV 读进本地的块，可以整体读，也可以逐层等待（第 i 层的注意力算之前，只要第 i 层的 KV 到了就行）。</li><li><code>save_kv_layer</code> / <code>wait_for_save</code>：把本地算出的 KV 发出去，同样可以逐层流水。</li><li><code>get_transfer_results</code>：哪些请求的发送、接收已经完成，哪些失败了，汇报给调度器一侧。</li></ul>' },
+]} />
+
+<EngineProcs engine="vllm-pd" caption="图 130-3　PD 分离时一个请求的路径。prefill 实例和 decode 实例都是普通的 vLLM，只是配置了不同角色的 KV connector。" />
+
+调度器一侧的调用点在 `scheduler.py` 里，等待队列放一个新请求进来时：
+
+<CodeWalk file="third_party/vllm/vllm/v1/core/sched/scheduler.py" from={1170} to={1190} steps={[
+  { lines: [1170, 1181], title: '问 connector：外面还有多少个 token 的 KV', body: '<p>先在本地前缀缓存里查到命中的部分（按块对齐），再问 connector：除了本地命中的，<b>外部</b>还能提供多少个 token 的 KV，以及要不要异步加载。PD 分离时，decode 实例在这里得知“整个提示的 KV 都在 prefill 实例那边”。</p>' },
+  { lines: [1185, 1190], title: '还不知道就先跳过', body: '<p>connector 一时给不出答案（比如远端还没回复），这个请求这一步先不调度，留在队列里。</p>' },
+]} />
+
+接下来，`allocate_slots` 的 `num_external_computed_tokens` 参数（第 129 讲那张块布局图里的 `ext_comp` 段）为这些外部 token 分好块，`connector.update_state_after_alloc`（第 1544 行）记下要写进哪些块；异步加载的请求进入“等远端 KV”的状态，加载完成后才进入运行队列。worker 一侧，在 GPU worker 里由一个小类包着：
+
+<CodeWalk file="third_party/vllm/vllm/v1/worker/gpu/kv_connector.py" from={62} to={166} steps={[
+  { lines: [66, 70], title: '把块池交给 connector', body: '<p>初始化时，把每一层 KV Cache 的张量注册给 connector。传输后端（例如 NIXL）要知道这些显存的地址，才能直接用 RDMA 读写。</p>' },
+  { lines: [75, 96], title: '前向之前', body: '<p>先处理被抢占的请求（它们的块马上要被别人覆盖，正在进行的传输要处理掉），再绑定这一步的 connector 元数据。</p><p><b>同步加载</b>（这一步就要用的 KV）在前向之前开始；<b>异步加载</b>（请求在等待 KV 期间不参与这一步）放到前向之后再发起，“让提交不挡在关键路径上”。博客描述的是进入前向时统一开始加载、退出时等待保存，现在按同步、异步分开处理了。</p>' },
+  { lines: [136, 160], title: '前向之后', body: '<p>发起推迟的异步加载；<code>wait_for_save</code> 确认这一步该发出去的 KV 都已提交；再收集传输结果：哪些请求发完了、收完了、哪些失败了、哪些块加载出错。这些放进 KVConnectorOutput，随模型输出一起回到调度器，调度器据此把等 KV 的请求放进运行队列，或者释放 prefill 一侧的块。</p>' },
+]} />
+
+具体的传输方式是不同的 connector 实现，都在 `vllm/distributed/kv_transfer/kv_connector/v1/` 下：`nixl/`（NVIDIA 的 NIXL，GPU 之间点对点 RDMA）、`mooncake/`（Mooncake 的传输引擎）、`lmcache_mp_connector.py`（LMCache 的 KV 缓存层）、`offloading_connector.py`（卸载到 CPU 内存，即第 113 讲的分层存储）、`multi_connector.py`（同时用几种），以及一个用来理解接口的最简实现 `example_connector.py`（把 KV 存成本地文件）。博客里用的 `SharedStorageConnector` 在这个提交里已经不存在了，作用相同的是 `example_connector.py`。
+
+## 合起来：一条 curl 的全程
+
+把五层串起来，一条请求在“两个节点、4 个 MoE 副本、每副本 4 卡”的部署里：
+
+1. **API 服务器**（`entrypoints/openai/completion/serving.py` 的 `create_completion`）收到请求，`AsyncLLM.generate` 分词、建输出流。
+2. **挑副本**：`DPLBAsyncMPClient.get_core_engine_for_request` 用协调器的快照、本地计数、在途数和 KV 压力打分，选中比如副本 2；本地快照里副本 2 的等待数加一。
+3. **发过去**：经 ZMQ 发到节点 B 上副本 2 的输入线程，放进输入队列。如果副本组正处于暂停，副本 2 醒来并通知协调器，协调器广播 START_DP_WAVE 叫醒其余副本。
+4. **调度**：副本 2 的调度器为它分配 token 和块（第 129 讲）；PD 分离时先问 connector 外部有多少 KV。
+5. **执行**：`MultiprocExecutor` 把调度结果写进共享内存广播队列，4 个 worker 一起前向；MoE 的专家层和其他 3 个副本做 All-to-All（没有请求的副本跑空批次陪着）；输出 rank 把采样结果写回。
+6. **更新**：调度器接上新 token、判断结束；副本把新的负载数字发给协调器，协调器发布给前端。
+7. **返回**：副本 2 的输出线程把结果发回节点 A，`AsyncLLM` 的输出任务反分词、分发到这个请求的输出流，FastAPI 流式推给客户端。
+
+<Note kind="point">vLLM 的分布式服务是一层套一层：副本内部，MultiprocExecutor 用共享内存广播队列驱动几张卡，只让一个 worker 回结果；副本之间，稠密模型彼此独立，MoE 模型锁步运行（空闲副本跑空批次陪着做 All-to-All，每 16 步 All-Reduce 一次判断是否全体空闲，用“波次”管理启停）；前端在副本之间分请求，用协调器每 100 ms 发布的负载快照，加上本地计数、在途下限和 KV 压力罚分；PD 分离通过 KV connector 接入，调度器一侧回答“外部有多少 KV、写进哪些块、何时释放”，worker 一侧负责加载和保存。</Note>
+
+## 回顾
+
+这一讲从一个副本的几张卡，一路放大到多节点、多副本和 PD 分离。几个要记住的取舍：回复只走一个 worker，省掉重复的序列化；稠密模型的副本互不通信，MoE 的副本必须锁步；负载均衡依赖 100 ms 一次的旧快照，靠本地计数和在途数补偿；全局同步每 16 步一次，用少量空跑换掉大量通信；异步的 KV 加载挪到前向之后，不挡关键路径。这些细节和一年前的博客已经不同，读源码时要以手上的那个提交为准。
+
+下一讲换一个引擎：SGLang 怎么用一棵基数树做前缀缓存，怎么让调度和执行重叠。下一讲：**SGLang 的架构**。

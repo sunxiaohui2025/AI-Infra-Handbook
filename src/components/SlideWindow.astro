@@ -1,0 +1,50 @@
+---
+// 数据加载器的滑动窗口（第 53 讲）：在训练集开头的 40 个真实 token 上开窗口，x 是窗口的前 T 个，y 是往后错一位的 T 个。
+// 读者可以：调上下文长度 T、步长 stride，切换第几个样本，看窗口怎么挪、相邻样本重叠多少、整个训练集能切出多少个样本。
+// 数据来自 minigpt/outputs/window_tokens.json（scripts/dataloader_demo.py 生成）。
+import { readMini } from './_mini';
+interface Props { title?: string; caption?: string }
+const { title = '在 token 序列上开窗口', caption } = Astro.props;
+const data = readMini('minigpt/outputs/window_tokens.json');
+---
+<figure class="ai-gt ai-sw" data-slidewindow data-d={data}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-k">上下文长度 T <input type="range" min="2" max="12" value="8" data-t /> <b data-tv></b></label>
+    <label class="ai-tl-k">步长 stride <input type="range" min="1" max="12" value="8" data-st /> <b data-stv></b></label>
+    <label class="ai-tl-k">第 <input type="range" min="0" max="10" value="0" data-k /> <b data-kv></b> 个样本</label>
+  </div>
+  <div class="ai-sw-seq" data-seq></div>
+  <div class="ai-sw-xy" data-xy></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const { tokens, n } = JSON.parse(fig.dataset.d!) as { tokens: string[]; n: number };
+    const q = (s: string) => fig.querySelector<HTMLInputElement>(s)!;
+    const tI = q('[data-t]'), sI = q('[data-st]'), kI = q('[data-k]');
+    const show = (t: string) => (t === ' ' ? '␣' : t);
+    function draw() {
+      const T = +tI.value, st = +sI.value;
+      const kmax = Math.floor((tokens.length - T - 1) / st);
+      kI.max = String(kmax); if (+kI.value > kmax) kI.value = String(kmax);
+      const k = +kI.value, a = k * st;
+      fig.querySelector('[data-tv]')!.textContent = String(T); fig.querySelector('[data-stv]')!.textContent = String(st); fig.querySelector('[data-kv]')!.textContent = String(k);
+      const prev = k > 0 ? a - st : -1;
+      fig.querySelector<HTMLElement>('[data-seq]')!.innerHTML = tokens.map((t, i) => {
+        const inX = i >= a && i < a + T, inY = i > a && i <= a + T, inPrev = prev >= 0 && i >= prev && i < prev + T;
+        return `<span class="ai-sw-t${inX ? ' is-x' : ''}${inY ? ' is-y' : ''}${inPrev && !inX ? ' is-prev' : ''}"><i>${i}</i>${show(t)}</span>`;
+      }).join('');
+      const xs = tokens.slice(a, a + T), ys = tokens.slice(a + 1, a + T + 1);
+      fig.querySelector<HTMLElement>('[data-xy]')!.innerHTML = `<div><b>x</b>${xs.map((t) => `<span class="ai-sw-t is-x">${show(t)}</span>`).join('')}</div><div><b>y</b>${ys.map((t) => `<span class="ai-sw-t is-y">${show(t)}</span>`).join('')}</div>`;
+      const total = Math.ceil((n - T) / st), overlap = Math.max(0, T - st);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `第 ${k} 个样本从第 ${a} 个 token 开始，取 T + 1 = ${T + 1} 个：前 ${T} 个是 x，后 ${T} 个是 y。一个样本里有 ${T} 道“预测下一个”的题：看到 x 的前 t 个，答 y 的第 t 个。`
+        + `<br>相邻两个样本重叠 ${overlap} 个 token${st > T ? `，中间还跳过了 ${st - T} 个没用上` : st === T ? '，正好首尾相接' : ''}。整个训练集 ${n.toLocaleString()} 个 token，能切出 ${total.toLocaleString()} 个样本。`;
+    }
+    [tI, sI, kI].forEach((x) => x.addEventListener('input', draw));
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-slidewindow]').forEach(init);
+</script>

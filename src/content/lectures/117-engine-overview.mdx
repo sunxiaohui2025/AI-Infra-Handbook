@@ -1,0 +1,128 @@
+---
+id: 117
+slug: engine-overview
+title: 总览 · 一个推理引擎由哪些部分组成
+chapter: 5
+part: 15
+problem: 从输入文字到输出文字，经过哪些模块
+prereqs: [68, 74, 75, 81]
+level: 主线
+demos: [EngineArch, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineArch from '../../components/EngineArch.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[68, 74, 75, 81]} />
+
+前四章把推理引擎拆成了一个个零件来讲：KV Cache（第 69 讲）、continuous batching（第 74 讲）、PagedAttention（第 75 讲）、量化（第 90 讲）、投机解码（第 96 讲）。每个零件都讲清楚了原理和收益，可它们拼在一起是什么样子，第 81 讲只画了一张模块图。
+
+这一篇换一种方式：我们从一个空目录开始，**亲手写出一个推理引擎**。它叫 miniinfer，用真实的 Qwen3-0.6B 模型，最后一版约 400 行 Python。每一讲加一个零件，每一讲结束时它都能跑，而且生成的每个 token 都和 HuggingFace transformers 完全一样。
+
+这一讲不写代码，先把全局看清楚：一个推理引擎由哪些部分组成，我们按什么顺序把它们写出来，以及怎么判断写对了。
+
+## 一个请求要经过哪些地方
+
+先跟着一个请求走一遍。用户发来一句 “The capital of France is”，想让模型接着写。
+
+1. **分词**：分词器把文字切成 token 编号，这句话是 5 个 token（第 21 讲）。
+2. **进队列**：引擎为这个请求建一个记录，记下它的 token、最多生成多少个、现在处于什么状态，放进等待队列。
+3. **调度**：每一步，调度器决定这一步 batch 里有谁：已经在生成的请求各算一个 token，有空位就放新请求进来。
+4. **准备 KV 的位置**：新请求要为它的提示分配 KV Cache 的空间；正在生成的请求，下一个位置如果超出了已分配的空间，要再分一块。
+5. **前向**：把这一步所有请求要算的 token 拼成一批，送进模型。新请求是整段提示（prefill），老请求是一个 token（decode）。模型一层一层地算，注意力从 KV Cache 里读每个请求自己的上下文，同时把新 token 的 K、V 写进去。
+6. **采样**：每个请求取最后一个位置的打分，选出下一个 token。
+7. **更新状态**：新 token 追加到请求里；遇到结束符或达到长度上限的请求离开 batch，释放它的 KV 空间。
+8. 回到第 3 步，直到所有请求都结束；最后把 token 还原成文字。
+
+这八步就是推理引擎的全部骨架。前四章讲过的优化，都是在其中某一步上做文章：continuous batching 改的是第 3、7 步，分页改的是第 4 步，量化改的是第 5 步用的权重，投机解码改的是第 5、6 步。
+
+## 架构：五个部分
+
+把上面的八步按“谁负责”归类，推理引擎可以分成五个部分。下图是 miniinfer 最后一版的样子，切换版本按钮可以看它是怎么一步步长出来的，点模块看它在哪个文件、做什么。
+
+<EngineArch ver="v5" caption="图 117-1　miniinfer 的架构。左边虚线框是引擎（engine.py），右边虚线框是模型（model.py），下面是 KV Cache 和权重。切换到 v0，只剩分词器、一个最简单的生成循环和模型；之后每一版加一个零件，强调色是这一版新增或改动的模块。" />
+
+**模型执行**（model.py、weights.py、config.py）：把权重文件读进来，按 Qwen3 的结构一层一层地算。这是唯一碰矩阵运算的地方，其余部分都是“组织工作”。
+
+**状态**（kv_cache.py，之后换成 block_manager.py）：每个请求已经算过的 K、V 存在哪里、怎么读写。
+
+**调度**（scheduler.py、sequence.py）：每一步谁进 batch，谁等待，谁被抢占。
+
+**内存管理**（block_manager.py）：KV 的空间怎么分配、回收、共享。
+
+**加速手段**（quant.py、spec.py）：在不改变上面结构的前提下，让每一步更省或者一步干更多的活。
+
+## 路线：六个版本
+
+我们按依赖顺序写，每一版只解决上一版最明显的一个毛病：
+
+| 版本 | 讲 | 解决什么问题 | 主要改动 |
+| --- | --- | --- | --- |
+| v0 | 第 118 讲 | 先让模型跑起来：从权重文件算出第一个 token | 新写 config.py、weights.py、model.py、engine.py |
+| v1 | 第 119 讲 | v0 每生成一个 token 都把整段重算一遍 | 新增 kv_cache.py；模型分出 prefill 和 decode |
+| v2 | 第 120 讲 | 一次只服务一个请求，硬件大部分时间闲着 | 新增 sequence.py、scheduler.py；引擎改成 step() 循环 |
+| v3 | 第 121、122 讲 | 每个请求按最大长度预留 KV，放不下几个请求；相同的前缀重复计算 | 新增 block_manager.py，取代 kv_cache.py |
+| v4 | 第 123 讲 | 权重太占内存 | 新增 quant.py |
+| v5 | 第 124 讲 | decode 每步只出一个 token | 新增 spec.py |
+
+最后在第 125 讲复盘：时间花在哪里，和工业级引擎差在哪里，作为下一篇解读 nano-vllm 的引子。
+
+每一版都是仓库里一个完整的目录（`v0` 到 `v5`），后一版从前一版复制过来再改。想看一讲到底改了什么，`diff -r v1 v2` 就行；文章里每讲也会用差异视图把改动标出来。
+
+## 为什么这样选
+
+**模型：Qwen3-0.6B。**它是一个结构完整的现代大模型：RMSNorm、RoPE、GQA（16 个查询头、8 个 KV 头）、SwiGLU，和第 35–39 讲讲的一样；28 层，每层 1024 维，权重约 1.5 GB，一台笔记本就放得下。用真实模型，生成的是有意义的文字，量化和投机解码的效果也看得出来。
+
+**设备：CPU，FP32。**这一篇的数字都是在一台 Apple M2（16 GB 内存）上用 CPU 跑出来的。选 FP32 不是为了快，而是为了**能和 HuggingFace 逐 token 比对**：同样的精度、同样的算法，两边算出的每个 token 都应该一模一样，任何一处写错都会立刻暴露。代价是速度：后面每一讲的绝对数字都比 GPU 慢一两个数量级，我们关心的是版本之间的相对变化，以及这些变化能不能用前面讲的原理解释。
+
+**只用最基本的工具。**模型前向只用 torch 的矩阵乘法、逐元素运算和 softmax，不用 `torch.nn` 的模块，也不用 FlashAttention；分词直接用模型自带的 tokenizer.json。这样每一行代码都能讲清楚在算什么。CUDA kernel、CUDA Graph、张量并行这些“工业级”的部分，留到第 16、17 篇读 nano-vllm、vLLM 时再看。
+
+<Note kind="point">推理引擎的骨架是一个循环：调度器决定这一步 batch 里有谁，为它们准备好 KV 的空间，把这一步要算的 token 拼成一批送进模型，采样出下一个 token，更新每个请求的状态。前四章讲的各种优化，都是在这个循环的某一步上做文章。</Note>
+
+## 搭好环境
+
+仓库在课程目录下的 `miniinfer/`。从零开始搭，只要三条命令：建一个虚拟环境装依赖，下载模型，生成 HuggingFace 的参考答案。
+
+```bash
+cd miniinfer && python3 -m venv .venv && .venv/bin/pip install torch transformers safetensors huggingface_hub
+```
+
+```bash
+.venv/bin/python -c "from huggingface_hub import snapshot_download as d; d('Qwen/Qwen3-0.6B', local_dir='models/Qwen3-0.6B')"
+```
+
+```bash
+.venv/bin/python tests/hf_ref.py
+```
+
+transformers 只在测试里用来生成参考答案，引擎本身不依赖它。目录结构如下：
+
+```text
+miniinfer/
+  models/Qwen3-0.6B/   config.json、model.safetensors、tokenizer.json
+  v0/ … v5/            每个版本一个完整的引擎
+  tests/hf_ref.py      用 HuggingFace 生成参考答案（4 条提示，各 32 个 token，贪心）
+  tests/check.py       用某个版本生成，和参考答案逐 token 比对
+  bench/               每一讲的压测脚本
+  outputs/             脚本实际运行的输出（文章里的数字都来自这里）
+```
+
+## 怎么判断写对了
+
+写引擎最怕“看起来能跑，其实算错了”：注意力的掩码差一位、RoPE 的位置从 1 开始数、KV 写错了位置，生成的文字往往还挺通顺，只是和正确的模型不一样。所以我们从第一版开始就定一个硬标准：
+
+**同样 4 条提示，各贪心生成 32 个 token，每个 token 都必须和 HuggingFace 一样。**
+
+4 条提示有英文、代码、中文、数字序列，覆盖不同的分词和不同的上下文长度。`tests/hf_ref.py` 用 transformers 生成参考答案存成 JSON；`tests/check.py v2` 用 v2 的引擎跑同样的提示，逐 token 比对。每一讲写完都要先过这一关，再测速度。下面是最后一版的检查结果：
+
+<RunOutput cmd=".venv/bin/python tests/check.py v5" file="outputs/check_v5.txt" caption="图 117-2　v5（带投机解码）的检查结果：4 条提示都和 HuggingFace 逐 token 一致。" />
+
+只有 v4（量化）例外：它有意改变了权重的数值，生成结果允许不同，我们会量化“差了多少”。
+
+## 回顾
+
+推理引擎的骨架是一个循环：分词 → 进队列 → 调度 → 准备 KV 空间 → 前向 → 采样 → 更新状态，直到所有请求结束。按职责分成五个部分：模型执行、状态、调度、内存管理和加速手段。我们用 Qwen3-0.6B，在 CPU 上以 FP32 运行，从 v0 写到 v5，每一版解决一个问题，每一版都必须和 HuggingFace 逐 token 一致。
+
+第一件事是让模型跑起来：一个 1.5 GB 的权重文件，怎么变成 “Paris” 这个词？下一讲：**v0 · 从权重文件到第一个 token**。

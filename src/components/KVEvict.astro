@@ -1,0 +1,56 @@
+---
+// KV Cache 驱逐（第 95 讲）：Qwen3-0.6B 在一段 448 token 的上下文上的真实注意力，读自 miniinfer/outputs/kv_evict.json（bench/kv_evict.py 生成）。
+// 上面每根竖条是一个上下文位置，高度是后 64 个 token 平均分给它的注意力（对数刻度）；强调色是这种策略在这个预算下保留的位置。
+// 读者可以：切换策略和缓存预算 B，看留下了哪些位置、尾巴的注意力被留住了多少、损失多了多少（损失是实测的）。
+import { readMini } from './_mini';
+interface Props { title?: string; caption?: string }
+const { title = '留下哪些 KV：Qwen3-0.6B 的真实注意力', caption } = Astro.props;
+const data = readMini('outputs/kv_evict.json');
+---
+<figure class="ai-gt ai-kve" data-kvevict data-d={data}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <span class="ai-gt-pre ai-pc-sets" data-group="p"><button data-p="0">只留最近 B 个</button><button data-p="1" aria-pressed="true">汇聚点 + 最近</button><button data-p="2">H2O</button><button data-p="3">SnapKV</button></span>
+    <span class="ai-gt-pre ai-pc-sets" data-group="b"><span class="ai-tl-k">预算 B：</span><button data-b="32">32</button><button data-b="64" aria-pressed="true">64</button><button data-b="128">128</button><button data-b="256">256</button></span>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const NAMES = ['只留最近 B 个', '汇聚点 + 最近', 'H2O', 'SnapKV'];
+  function init(fig: HTMLElement) {
+    const d = JSON.parse(fig.dataset.d!) as { tokens: string[]; tail: number[]; kept: Record<string, number[][]>; table: Record<string, number[]>; full: number };
+    let p = 1, B = 64;
+    const n = d.tail.length, total = d.tail.reduce((a, b) => a + b, 0);
+    const lo = Math.log10(Math.min(...d.tail.filter((v) => v > 0))), hi = Math.log10(Math.max(...d.tail));
+    function draw() {
+      const keep = new Set(d.kept[String(B)][p]);
+      const W = 880, H = 150, x0 = 20, bw = (W - x0) / n;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 900 ${H + 46}">`;
+      d.tail.forEach((v, j) => {
+        const h = v > 0 ? 4 + (Math.log10(v) - lo) / (hi - lo) * (H - 4) : 2;
+        s += `<rect x="${(x0 + j * bw).toFixed(2)}" y="${(H + 10 - h).toFixed(1)}" width="${Math.max(0.6, bw - 0.4).toFixed(2)}" height="${h.toFixed(1)}" class="${keep.has(j) ? 'ai-kve-on' : 'ai-kve-off'}"><title>位置 ${j} “${d.tokens[j].replace(/[<>&"]/g, '')}”：${(v / total * 100).toFixed(2)}%</title></rect>`;
+      });
+      s += `<text class="ai-al-gl" x="${x0}" y="${H + 28}">位置 0（开头）</text><text class="ai-al-gl" x="${W}" y="${H + 28}" text-anchor="end">位置 ${n - 1}（最近）</text>`;
+      s += `<text class="ai-al-gl" x="${x0}" y="${H + 42}">竖条高度：后 64 个 token 平均分给这个位置的注意力（对数刻度）。悬停看具体的字和比例。</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s;
+      const kept = [...keep].reduce((a, j) => a + d.tail[j], 0) / total;
+      const loss = d.table[String(B)][p];
+      const first = d.tail.slice(0, 4).reduce((a, b) => a + b, 0) / total;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${NAMES[p]}</b>，留下 ${B} / ${n} 个位置：留住了尾巴 <b>${(kept * 100).toFixed(1)}%</b> 的注意力，损失比全留多 <b>${loss >= 0 ? '+' : ''}${loss.toFixed(3)}</b>（全留时 ${d.full.toFixed(3)}）。`
+        + (keep.has(0) ? '' : ` 开头 4 个 token 被丢了，而它们独自收着 ${(first * 100).toFixed(1)}% 的注意力。`)
+        + `<br><span class="ai-faint">四种策略在四种预算下的损失增量：${['32', '64', '128', '256'].map((b) => `B = ${b}：${d.table[b].slice(0, 4).map((v) => (v >= 0 ? '+' : '') + v.toFixed(2)).join(' / ')}`).join('；')}</span>`;
+      fig.querySelectorAll('[data-p]').forEach((x) => x.setAttribute('aria-pressed', String(+(x as HTMLElement).dataset.p! === p)));
+      fig.querySelectorAll('[data-b]').forEach((x) => x.setAttribute('aria-pressed', String(+(x as HTMLElement).dataset.b! === B)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const a = t.closest<HTMLElement>('[data-p]'); if (a) { p = +a.dataset.p!; draw(); return; }
+      const b = t.closest<HTMLElement>('[data-b]'); if (b) { B = +b.dataset.b!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-kvevict]').forEach(init);
+</script>

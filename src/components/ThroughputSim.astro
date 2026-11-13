@@ -1,6 +1,6 @@
 ---
 // 并发数 b 对 decode 的影响（Llama-3-8B BF16，一张 80 GB 的 H100）。每个请求长度 T，提示和生成各一半，decode 时平均上下文 0.75T。
-// 一步 decode：计算 = (2 × 非嵌入参数 + 4·L·d·上下文) × b；读写 = 权重 16 GB + 每请求 KV Cache；耗时取两者较大的（与第 62 讲的代码一致）。
+// 一步 decode：计算 = (2 × 非嵌入参数 + 4·L·d·上下文) × b；读写 = 权重 16 GB + 每请求 KV Cache；耗时取两者较大的（与第 70 讲的代码一致）。
 // 读者可以：调并发数和请求长度，看 TPOT（每个 token 的间隔）、每个请求的速度、总吞吐，以及显存是否放得下。
 interface Props { title?: string; caption?: string }
 const { title = '并发越多，单个请求越慢，总吞吐越高', caption } = Astro.props;

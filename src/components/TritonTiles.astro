@@ -1,5 +1,5 @@
 ---
-// Triton 的“程序”与数据块并排（与第 78 讲的代码对应）。
+// Triton 的“程序”与数据块并排（与第 88 讲的代码对应）。
 // 向量模式：n 个元素、每块 BLOCK 个，网格 = ⌈n / BLOCK⌉ 个程序；选一个程序，看它的 offs、mask，以及对应的代码行。
 // 矩阵乘法模式：C 是 64 × 64，每个程序负责 BM × BN 的一块，沿 K 方向每次取 A 的 BM × BK、B 的 BK × BN；拖动 k 看它取了哪两块。
 interface Props { title?: string; caption?: string }
@@ -67,7 +67,7 @@ const { title = 'Triton：一个程序处理一整块', caption } = Astro.props;
         cd.innerHTML = code(MM, k === 3 ? [7, 8, 9, 10] : [7, 8, 9]);
         eq.innerHTML = `网格 = (64 / ${BM}, 64 / ${BN}) = (2, 4)，8 个程序。选中的程序 (${pm}, ${pn}) 负责 C 的第 ${pm * BM}–${pm * BM + BM - 1} 行、第 ${pn * BN}–${pn * BN + BN - 1} 列。`
           + `<br>第 ${k + 1} 次循环：取 A 的这些行、第 ${k * BK}–${k * BK + BK - 1} 列，B 的第 ${k * BK}–${k * BK + BK - 1} 行、这些列，tl.dot 相乘，加到 acc 上${k === 3 ? '；循环结束，把 acc 写回 C' : ''}。`
-          + '<br><span class="ai-faint">这就是第 77 讲的分块矩阵乘法：A、B 的小块搬进片上、被复用；共享内存怎么分配、tl.dot 怎么交给 Tensor Core，编译器来做。</span>';
+          + '<br><span class="ai-faint">这就是第 86 讲的分块矩阵乘法：A、B 的小块搬进片上、被复用；共享内存怎么分配、tl.dot 怎么交给 Tensor Core，编译器来做。</span>';
       }
     }
     fig.addEventListener('input', draw);

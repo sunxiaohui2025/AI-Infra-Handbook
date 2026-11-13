@@ -1,0 +1,80 @@
+---
+// 矩阵乘法 kernel 的分块与波次（第 87 讲）：C[M, N] = A[M, K] · B[K, N]，BF16，H100 SXM（132 个 SM，BF16 稠密峰值 989 TFLOPS，HBM 3.35 TB/s）。
+// 简化模型：输出切成 Mt × Nt 的块（可再沿 K 切成 split 份），每个 SM 同一时刻算一块，所有块按“波”轮流上 SM；
+//   计算时间 = 波数 × 一块的时间（一块按单个 SM 的峰值算）；访存时间 = 读 A、B、写 C（split-K 另加部分和的读写）÷ 可用带宽，
+//   可用带宽假设至少要一半的 SM 同时在读才能跑满（活跃块少于 66 个时按比例打折）。两者取大。真实 kernel 还有流水、缓存等因素，数字只用来看趋势。
+// 读者可以：选预设形状或拖 M、N、K，换块大小和 split-K，看块数、波数、最后一波的空闲、补零的浪费，以及卡在算力还是带宽。
+interface Props { title?: string; caption?: string }
+const { title = '矩阵乘法怎么分给 132 个 SM', caption } = Astro.props;
+---
+<figure class="ai-gt ai-gemm" data-gemmtiles>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="pre"><span class="ai-tl-k">预设：</span>
+    <button data-pre="0">prefill：2048 token × q_proj</button><button data-pre="1">decode：16 个请求 × k_proj</button><button data-pre="2">波次悬崖：1408²</button><button data-pre="3">波次悬崖：1536²</button>
+  </div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-k">M <input type="range" min="1" max="8192" value="2048" data-m /> <b data-mv></b></label>
+    <label class="ai-tl-k">N <input type="range" min="64" max="16384" step="64" value="4096" data-n /> <b data-nv></b></label>
+    <label class="ai-tl-k">K <input type="range" min="256" max="16384" step="256" value="4096" data-k /> <b data-kv></b></label>
+  </div>
+  <div class="ai-tl-ctl">
+    <span class="ai-gt-pre ai-pc-sets" data-group="t"><span class="ai-tl-k">块：</span><button data-t="64x64">64 × 64</button><button data-t="128x128" aria-pressed="true">128 × 128</button><button data-t="128x256">128 × 256</button></span>
+    <span class="ai-gt-pre ai-pc-sets" data-group="s"><span class="ai-tl-k">split-K：</span><button data-s="1" aria-pressed="true">1</button><button data-s="2">2</button><button data-s="4">4</button><button data-s="8">8</button><button data-s="16">16</button></span>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const SM = 132, PEAK = 989e12, BW = 3.35e12;
+  const PRE = [[2048, 4096, 4096, '128x128', 1], [16, 1024, 4096, '64x64', 1], [1408, 1408, 4096, '128x128', 1], [1536, 1536, 4096, '128x128', 1]] as const;
+  function gemmModel(M: number, N: number, K: number, Mt: number, Nt: number, split: number) {
+    const tm = Math.ceil(M / Mt), tn = Math.ceil(N / Nt), tiles = tm * tn * split;
+    const waves = Math.ceil(tiles / SM), waveEff = tiles / (waves * SM), padEff = (M * N) / (tm * Mt * tn * Nt);
+    const tTile = 2 * Mt * Nt * (K / split) / (PEAK / SM);
+    const tComp = waves * tTile;
+    const bytes = 2 * (M * K + K * N + M * N) + (split > 1 ? 2 * 4 * M * N * split : 0);
+    const active = Math.min(tiles, SM), bw = BW * Math.min(1, active / (SM / 2));
+    const tMem = bytes / bw, t = Math.max(tComp, tMem), flops = 2 * M * N * K;
+    return { tm, tn, tiles, waves, waveEff, padEff, tComp, tMem, t, ai: flops / bytes, tflops: flops / t / 1e12, bound: tComp >= tMem ? '算力' : '带宽' };
+  }
+  function init(fig: HTMLElement) {
+    const q = (s: string) => fig.querySelector<HTMLInputElement>(s)!;
+    const mI = q('[data-m]'), nI = q('[data-n]'), kI = q('[data-k]');
+    let tile = '128x128', split = 1;
+    const press = (g: string, attr: string, v: string) => fig.querySelectorAll(`[data-group="${g}"] [${attr}]`).forEach((b) => b.setAttribute('aria-pressed', String(b.getAttribute(attr) === v)));
+    function draw() {
+      const M = +mI.value, N = +nI.value, K = +kI.value, [Mt, Nt] = tile.split('x').map(Number);
+      fig.querySelector('[data-mv]')!.textContent = String(M); fig.querySelector('[data-nv]')!.textContent = String(N); fig.querySelector('[data-kv]')!.textContent = String(K);
+      const r = gemmModel(M, N, K, Mt, Nt, split);
+      // 画波：每一波是一行 132 个格子，有块的格子着色
+      const W = 880, cell = (W - 60) / SM, rows = Math.min(r.waves, 12);
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 900 ${rows * 16 + 40}">`;
+      for (let w = 0; w < rows; w++) {
+        const used = Math.min(SM, r.tiles - w * SM);
+        s += `<text class="ai-al-gl" x="0" y="${w * 16 + 26}">第 ${w + 1} 波</text>`;
+        for (let i = 0; i < SM; i++) s += `<rect x="${60 + i * cell}" y="${w * 16 + 14}" width="${cell - 1}" height="13" class="${i < used ? 'ai-gemm-on' : 'ai-gemm-off'}"/>`;
+      }
+      if (r.waves > rows) s += `<text class="ai-al-gl" x="60" y="${rows * 16 + 34}">…… 一共 ${r.waves} 波，只画了前 ${rows} 波</text>`;
+      s += `<text class="ai-al-gl" x="${W}" y="10" text-anchor="end">每一行是一波：132 个 SM，着色的在算一个块</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s;
+      const us = (x: number) => (x * 1e6).toFixed(x < 1e-4 ? 1 : 0);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `输出切成 ${r.tm} × ${r.tn} 个 ${Mt} × ${Nt} 的块${split > 1 ? `，每块再沿 K 切 ${split} 份` : ''}，一共 <b>${r.tiles}</b> 个，分 <b>${r.waves}</b> 波上 132 个 SM。`
+        + ` 波次利用率 <b>${(r.waveEff * 100).toFixed(1)}%</b>（最后一波 ${r.tiles - (r.waves - 1) * SM} / 132 个 SM 有活），补零利用率 <b>${(r.padEff * 100).toFixed(1)}%</b>（边上的块要补到整块）。`
+        + `<br>算术强度 ${r.ai.toFixed(1)} FLOP/字节（H100 的拐点约 295）。估算：计算 ${us(r.tComp)} μs，访存 ${us(r.tMem)} μs，卡在<b>${r.bound}</b>，约 ${us(r.t)} μs，实际 ${r.tflops.toFixed(0)} TFLOPS（峰值的 ${(r.tflops / 989 * 100).toFixed(0)}%）。`
+        + (r.tiles < SM / 2 ? ' 块太少，大部分 SM 闲着，连带宽都跑不满：这时该把 K 切开（split-K）或换小块。' : '');
+      press('t', 'data-t', tile); press('s', 'data-s', String(split));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const p = t.closest<HTMLElement>('[data-pre]');
+      if (p) { const [M, N, K, tl, sp] = PRE[+p.dataset.pre!]; mI.value = String(M); nI.value = String(N); kI.value = String(K); tile = tl; split = sp; draw(); return; }
+      const b = t.closest<HTMLElement>('[data-t]'); if (b) { tile = b.dataset.t!; draw(); return; }
+      const c = t.closest<HTMLElement>('[data-s]'); if (c) { split = +c.dataset.s!; draw(); }
+    });
+    [mI, nI, kI].forEach((x) => x.addEventListener('input', draw));
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-gemmtiles]').forEach(init);
+</script>

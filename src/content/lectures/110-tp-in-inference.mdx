@@ -1,0 +1,149 @@
+---
+id: 110
+slug: tp-in-inference
+title: 推理中的张量并行
+chapter: 4
+part: 14
+problem: 多卡推理时延迟和吞吐怎么变
+prereqs: [70, 102, 105, 109]
+level: 主线
+minutes: 30
+demos: [TPCurve]
+video: ""
+formula: '$\mathrm{TPOT}(t) \approx$ 单卡耗时 $\div t$ + 每层 2 次 All-Reduce；延迟随 $t$ 下降，但通信不随 $t$ 减少，每张卡的吞吐随 $t$ 下降'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import TPCurve from '../../components/TPCurve.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[70, 102, 105, 109]} />
+
+第 13 篇讲了把模型切到多张卡上的各种方法。从这一讲开始的第 14 篇，我们站在推理服务的角度，看这些方法用起来到底怎样，以及一个推理集群还需要哪些专门的设计。
+
+先从最常用的张量并行说起。第 105 讲说明了它怎么切；这一讲回答部署时最常被问的问题：**模型放得下以后，还要不要加卡做张量并行？加了以后，延迟能降多少，吞吐又会怎样？**答案取决于你更在乎哪一个。
+
+## 一步要多久
+
+第 70 讲有一个单卡 decode 的模型：一步 ≈ max(计算 ÷ 算力, (权重 + KV) ÷ 带宽)。张量并行 t 张卡时，每张卡只读 1/t 的权重、1/t 的 KV（KV 按头切开了），也只算 1/t；但每层要多做 2 次 All-Reduce（第 105 讲），用第 102 讲的 NVLink 数字估算：
+
+<div class="ai-formula">TPOT(t) ≈ 单卡耗时 ÷ t + 2 × 层数 × All-Reduce(批大小 × d × 2 字节)</div>
+
+代码按这个模型算了 Llama-3-8B 和 Llama-3.1-70B（上下文 2048）：
+
+**Llama-3.1-70B，批 64**：
+
+- TP = 1、2：放不下（每卡要存的权重加 KV 超过 72 GB）。
+- TP = 4：TPOT 15.3 ms，每张卡每秒 1043 个 token。
+- TP = 8：TPOT 10.0 ms，每张卡每秒 803 个 token。
+
+卡数翻倍，延迟只降到原来的三分之二左右，每张卡的吞吐却降了约 23%。
+
+**Llama-3-8B，批 64**：一张卡就放得下，TPOT 9.9 ms、每卡 6450 tok/s；TP = 8 时 TPOT 降到 2.0 ms，每卡却只有 4094 tok/s，少了三分之一以上。
+
+## 为什么每张卡变慢了
+
+读权重和计算是按 t 分摊的，这部分完美地随卡数缩小；通信却不是。每层 2 次 All-Reduce 的**次数**不随 t 变化，每次的**数据量**（批大小 × d）也不随 t 减少，延迟项（α）更是一分不少。t 越大，计算越短，通信所占的比例越高：70B、批 64 时，TP = 8 的 10.0 ms 里约三成是通信。
+
+而且批越小，这个问题越明显。批 1 时，70B 从 TP = 4 到 TP = 8，TPOT 从 11.1 ms 降到 5.8 ms，还算可观；8B 批 1 时，TPOT 从 4.9 ms 降到 0.8 ms，但每张卡的吞吐从 205 降到 154。
+
+下面的演示可以调模型、批大小和上下文，看 TP = 1、2、4、8 时的 TPOT（柱子）和每张卡的吞吐（折线）。
+
+<TPCurve caption="图 110-1　张量并行度与延迟、每卡吞吐。柱子是 TPOT（浅色部分是通信），折线是每张卡每秒的 token 数。TP 越大，延迟越低，但通信占比越高，每张卡的效率越低。" />
+
+<Note kind="point">张量并行用更多的卡换更低的延迟。权重、KV 和计算按卡数分摊，但每层 2 次 All-Reduce 不随卡数减少，所以延迟的下降比卡数的增加慢，每张卡的吞吐随卡数下降。模型放得下以后，加 TP 是为了满足延迟要求，不是为了提高吞吐。</Note>
+
+## 那该怎么选
+
+同样 8 张卡，跑 8B 模型可以有两种方式：一份 TP = 8，或者 8 份 TP = 1（数据并行，每张卡独立服务）。按上面的数字（批 64），后者的总吞吐是 8 × 6450 ≈ 51,600 tok/s，前者是 8 × 4094 ≈ 32,750 tok/s。可前者每个用户的 TPOT 是 2.0 ms，后者是 9.9 ms。
+
+所以选择的顺序通常是：
+
+1. **先保证放得下**：权重加上足够的 KV Cache 空间，决定了 TP 的下限。70B 的 BF16 至少要 TP = 4。
+2. **再看延迟目标**：如果在下限的 TP 上，TPOT 已经满足 SLO（第 116 讲），就不要再加；不满足，才加大 TP。
+3. **剩下的卡用来复制**：多出来的卡做多份副本（数据并行），提高总吞吐。
+
+还有一个常被忽略的好处：**TP 越大，每份副本的 KV Cache 空间越大**。70B 用 TP = 8 时每张卡只放 17.6 GB 权重，剩下的空间都给 KV，一份副本能同时服务的请求更多、上下文更长。
+
+## prefill 的情况不同
+
+prefill 是计算受限的，TP 把计算分摊到 t 张卡上，TTFT 的改善很明显。但 prefill 时每次 All-Reduce 的数据是整段提示的隐藏状态，很大。Llama-3.1-70B 一个 8192 token 的提示：
+
+- TP = 2：计算 621 ms + 通信 48 ms = 669 ms；
+- TP = 4：310 + 74 = 385 ms；
+- TP = 8：155 + 90 = 245 ms。
+
+通信从 48 ms 增加到 90 ms，因为消息大，用的是 Ring，每张卡要传的数据随 t 接近 2 倍的消息量，而计算在减半。实际实现会把 All-Reduce 和下一层的计算重叠起来，部分藏住它。
+
+## 到了大模型里
+
+**张量并行要留在 NVLink 域内。**第 109 讲说过，TP 跨机会让通信时间暴涨。8 卡服务器上，TP 最多 8；GB200 NVL72 这样的超节点上，TP 可以更大（第 115 讲）。
+
+**MLA 模型的特殊情况。**DeepSeek 的 MLA（第 40 讲）把所有头的 KV 压缩成一个共享的潜向量，没法按头切开。用张量并行时，每张卡都要存一份完整的 KV Cache，TP 越大浪费越多。所以 SGLang 等推理引擎为它设计了“DP 注意力”：注意力部分每张卡各自处理不同的请求（数据并行），只有 MoE 部分用专家并行（下一讲）。
+
+**小模型往往不用 TP。**8B 以下的模型一张卡就放得下，延迟也通常够用，多卡时更常见的是多副本加负载均衡（第 114 讲）。
+
+## 用代码复现
+
+下面的代码按上面的模型，计算 8B 和 70B 在批 1 和批 64 时，TP = 1、2、4、8 的 TPOT 和每卡吞吐，并标出放不下的情况；最后算 70B 一个 8192 token 提示的 TTFT。
+
+```python
+# 多卡张量并行时一步的耗时：每卡读 1/t 的权重和 KV、算 1/t 的计算量，再加每层 2 次 All-Reduce（NVLink，第 102 讲）
+F, BW, a, beta = 989e12, 3.35e12, 3e-6, 450e9
+MODELS = {"Llama-3-8B": (8.03e9, 0.53e9, 32, 4096, 131072), "Llama-3.1-70B": (70.6e9, 1.05e9, 80, 8192, 327680)}
+CTX = 2048                                               # 每个请求的上下文按 2048 个 token 算
+
+def allreduce(m, tp):                                    # 小消息用一步到位，大消息用 Ring，取快的那个
+    return min(a + (tp - 1) * m / beta, 2 * (tp - 1) * (a + m / tp / beta))
+
+def tpot(model, tp, b):
+    N, Nemb, L, d, kv = MODELS[model]
+    flops = (2 * (N - Nemb) + 4 * L * d * CTX) * b / tp
+    bytes_ = (N * 2 + kv * CTX * b) / tp
+    comm = 0 if tp == 1 else 2 * L * allreduce(b * d * 2, tp)
+    return max(flops / F, bytes_ / BW) + comm, comm
+
+for model in MODELS:
+    print(f"{model}（上下文 {CTX}）：")
+    for b in [1, 64]:
+        row = []
+        for tp in [1, 2, 4, 8]:
+            t, c = tpot(model, tp, b)
+            fits = MODELS[model][0] * 2 / tp + MODELS[model][4] * CTX * b / tp < 72e9
+            row.append(f"TP={tp}: {t * 1e3:5.1f} ms{'' if fits else '（放不下）'}，每卡 {b / t / tp:6,.0f} tok/s")
+        print(f"  批 {b:2d}：" + " | ".join(row))
+
+# prefill：Llama-3.1-70B 一个 8192 token 的提示，计算受限，TP 把计算分摊，但每次 All-Reduce 的消息很大
+N, Nemb, L, d, kv = MODELS["Llama-3.1-70B"]
+for tp in [2, 4, 8]:
+    comp = (2 * (N - Nemb) * 8192 + 4 * L * d * 4096 * 8192) / F / tp
+    comm = 2 * L * allreduce(8192 * d * 2, tp)
+    print(f"70B prefill 8192 token，TP={tp}：计算 {comp * 1e3:4.0f} ms + 通信 {comm * 1e3:3.0f} ms = TTFT {(comp + comm) * 1e3:4.0f} ms")
+```
+
+输出：
+
+```text
+Llama-3-8B（上下文 2048）：
+  批  1：TP=1:   4.9 ms，每卡    205 tok/s | TP=2:   2.6 ms，每卡    190 tok/s | TP=4:   1.4 ms，每卡    177 tok/s | TP=8:   0.8 ms，每卡    154 tok/s
+  批 64：TP=1:   9.9 ms，每卡  6,450 tok/s | TP=2:   5.2 ms，每卡  6,121 tok/s | TP=4:   2.9 ms，每卡  5,524 tok/s | TP=8:   2.0 ms，每卡  4,094 tok/s
+Llama-3.1-70B（上下文 2048）：
+  批  1：TP=1:  42.3 ms（放不下），每卡     24 tok/s | TP=2:  21.7 ms，每卡     23 tok/s | TP=4:  11.1 ms，每卡     23 tok/s | TP=8:   5.8 ms，每卡     21 tok/s
+  批 64：TP=1:  55.0 ms（放不下），每卡  1,164 tok/s | TP=2:  28.3 ms（放不下），每卡  1,129 tok/s | TP=4:  15.3 ms，每卡  1,043 tok/s | TP=8:  10.0 ms，每卡    803 tok/s
+70B prefill 8192 token，TP=2：计算  621 ms + 通信  48 ms = TTFT  669 ms
+70B prefill 8192 token，TP=4：计算  310 ms + 通信  74 ms = TTFT  385 ms
+70B prefill 8192 token，TP=8：计算  155 ms + 通信  90 ms = TTFT  245 ms
+```
+
+前六行是 decode：TP 越大，TPOT 越短，每卡吞吐越低。最后三行是 prefill：TTFT 从 669 ms 降到 245 ms，但通信从 48 ms 涨到 90 ms。
+
+## 容易混淆的地方
+
+1. **“扩展效率”是相对卡数说的。**TP = 8 比 TP = 4 快了 1.5 倍，卡数却翻了倍，扩展效率约 77%。说“TP 让推理变快”时，要说清楚是延迟变快，而每张卡的效率在下降。
+2. **批大小会改变结论。**批很大时，KV 的读取和计算占主导，通信相对变小，TP 的效率会好一些；批很小时，延迟项占主导，效率更差。
+3. **放不下时，TP 不是唯一的选择。**也可以量化（第 90 讲）让模型变小，或者用流水并行跨机（第 106 讲）。
+
+## 回顾
+
+张量并行让每张卡分摊权重、KV 和计算，延迟随卡数下降；但每层 2 次 All-Reduce 不随卡数减少，延迟下降得比卡数增加慢，每张卡的吞吐随之降低。Llama-3.1-70B、批 64：TP = 4 时 TPOT 15.3 ms、每卡 1043 tok/s，TP = 8 时 10.0 ms、803 tok/s。选择的顺序是：先让模型放得下，再加 TP 满足延迟目标，剩下的卡做多副本提高吞吐。prefill 时 TP 对 TTFT 帮助很大（70B 8192 token 从 669 ms 到 245 ms），但每次 All-Reduce 的消息也大。MLA 模型的 KV 不能按头切，通常用 DP 注意力。
+
+稠密模型的多卡推理，瓶颈常在 NVLink 上的 All-Reduce。MoE 模型不一样：它的专家要分到几十上百张卡上，跨机的 All-to-All 成了主角。为什么说 MoE 推理的瓶颈常在网络？下一讲：**MoE 推理与大规模专家并行**。

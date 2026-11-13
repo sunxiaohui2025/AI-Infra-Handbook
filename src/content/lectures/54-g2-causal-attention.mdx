@@ -1,0 +1,95 @@
+---
+id: 54
+slug: g2-causal-attention
+title: g2 · 因果多头注意力
+chapter: 2
+part: 7
+problem: 从打分、掩码到多头，一次矩阵乘算完所有头
+prereqs: [26, 27, 28]
+level: 主线
+demos: [GPTArch, CodeWalk, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import GPTArch from '../../components/GPTArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[26, 27, 28]} />
+
+经过上一讲的两次查表，每个位置有了一个 256 维的向量。可这些向量互不相干：位置 34 的“的”不知道它前面是“KV Cache 的大小”还是“模型的参数”。要猜下一个 token，每个位置都得能看到它前面的所有位置，从中挑出有用的信息。这就是注意力做的事。
+
+第 26–28 讲把注意力拆成了三步来讲：自注意力怎么打分、加权（第 26 讲），因果掩码怎么挡住未来（第 27 讲），为什么要多个头（第 28 讲）。这一讲把它们写成一个 PyTorch 模块，`attention.py`，39 行。重点不在公式，公式前面都推过了；重点在**形状**：怎么用几次矩阵乘法，一次算完 batch 里所有样本、所有头、所有位置的注意力。
+
+<GPTArch ver="g2" caption="图 54-1　g2 新增因果多头注意力。它还没被装进 Block，下一讲才和 LayerNorm、FFN、残差组装在一起。" />
+
+## 先把公式和形状对上
+
+回忆一下单个头的计算（第 26、27 讲）。输入 X 是 T × d，三个投影矩阵把它变成查询、键、值：
+
+$$
+Q = XW_q,\quad K = XW_k,\quad V = XW_v
+$$
+
+打分是 QKᵀ / √h_d，T × T，第 t 行第 j 列是位置 t 对位置 j 的打分。j > t 的位置是未来，打成 −∞；每行做 softmax 得到权重，再乘 V，得到每个位置的输出。
+
+多头（第 28 讲）就是 H 组独立的 W_q、W_k、W_v，每组的输出维度是 h_d = d / H。我们的模型 d = 256、H = 4，每个头 64 维。H 个头的输出拼起来，又是 d 维，再乘一个 d × d 的矩阵 W_o（代码里叫 `out_proj`）把各头的信息混合起来。
+
+直接照这个描述写，会是一个 `for` 循环：对每个头，算一遍 Q、K、V、打分、softmax、加权。能跑，但 GPU 最怕的就是一堆小矩阵乘法（第 62 讲的 Roofline：矩阵越小，算术强度越低）。实际的写法是把循环“压平”到张量的维度里。
+
+**第一步：所有头的投影合成一个矩阵。**H 个头的 W_q 各是 d × h_d，并排放在一起正好是 d × d。所以 `W_q` 就是一个 d × d 的线性层，输出的 d 维里，前 64 维是头 0 的 q，接着 64 维是头 1 的 q，依此类推。一次矩阵乘法算出所有头的 q。
+
+**第二步：把 d 维拆开，头这一维提到前面。**输出是 [B, T, d]，`view` 成 [B, T, H, h_d]，再交换第 1、2 维变成 [B, H, T, h_d]。现在前两维 B、H 可以看成“一共 B·H 个独立的小问题”，每个小问题是一个 T × h_d 的矩阵。
+
+**第三步：批量矩阵乘法。**PyTorch 的 `@` 遇到超过两维的张量，会把最后两维当成矩阵、前面的维度当成批：[B, H, T, h_d] @ [B, H, h_d, T] = [B, H, T, T]。一条语句，算完 B·H 个打分矩阵。
+
+**第四步：拼回去。**加权求和得到 [B, H, T, h_d]，交换回 [B, T, H, h_d]，再 `view` 成 [B, T, d]，就是 H 个头的输出拼在一起。
+
+## attention.py
+
+<CodeWalk file="minigpt/g2/attention.py" from={12} to={39} steps={[
+  { lines: [13, 16], title: '头数要整除 d', body: '<p>每个头 h_d = d / H 维。d = 256、H = 4 时 h_d = 64。如果 d 不能被 H 整除，拆头的 <code>view</code> 就会失败，所以先用 <code>assert</code> 挡住。</p>' },
+  { lines: [17, 20], title: '四个 d × d 的线性层', body: '<p><code>W_q</code>、<code>W_k</code>、<code>W_v</code> 各是一个 d × d 的线性层，里面并排放着 H 个头的投影。GPT-2 给它们加了偏置（<code>qkv_bias=True</code>），书里和我们自己训练时不加，第 58 讲装 GPT-2 权重时再打开。</p><p><code>out_proj</code> 带偏置，它把 H 个头拼起来的 d 维混合成新的 d 维。没有它，头 0 的输出永远只在前 64 维，头与头之间没有交流。</p>' },
+  { lines: [21, 23], title: '掩码是 buffer，不是参数', body: '<p><code>torch.triu(…, diagonal=1)</code> 取上三角、不含对角线：第 t 行里 j &gt; t 的位置是 True，表示“未来，要屏蔽”。</p><p>用 <code>register_buffer</code> 登记：它会跟着 <code>model.to("mps")</code> 一起搬到 GPU，会存进 <code>state_dict</code>，但不是参数，优化器不会去更新它。如果写成普通属性 <code>self.mask = …</code>，模型搬到 GPU 后掩码还留在 CPU，第 33 行会报设备不一致的错。</p><p>掩码按最长上下文 T_max 建一次，前向时按实际长度 T 切左上角。</p>' },
+  { lines: [25, 30], title: '投影、拆头、转置', body: '<p>三次矩阵乘法得到 [B, T, d] 的 q、k、v，<code>view</code> 成 [B, T, H, h_d]，<code>transpose(1, 2)</code> 成 [B, H, T, h_d]。</p><p><code>view</code> 只改“怎么看”这块内存，不搬数据：d 维里本来就是头 0 的 64 维在前，所以直接切成 H 段就对了。<code>transpose</code> 也不搬数据，只是改了步长（stride），这一点在第 38 行会用到。</p>' },
+  { lines: [32, 35], title: '打分、掩码、softmax、dropout', body: '<p><code>k.transpose(2, 3)</code> 把 k 变成 [B, H, h_d, T]，和 q 相乘得到 [B, H, T, T]，再除以 √h_d = 8（第 26 讲：不除的话 h_d 越大打分越大，softmax 会变得极尖）。</p><p><code>masked_fill</code> 把未来的位置填成 −∞，softmax 后正好是 0，每行剩下的权重仍然和为 1。</p><p>Dropout 加在注意力权重上：训练时随机把 10% 的权重置零（其余放大 1/0.9 倍），让模型不要只依赖某一两个位置。<code>model.eval()</code> 之后 dropout 自动关掉。</p>' },
+  { lines: [37, 39], title: '加权求和，拼回 d 维', body: '<p>[B, H, T, T] @ [B, H, T, h_d] = [B, H, T, h_d]。转置回 [B, T, H, h_d] 之后要先 <code>contiguous()</code> 再 <code>view</code>：转置只改了步长，内存里的顺序还是 [B, H, T, h_d]，<code>view</code> 要求内存连续，不连续就报错。<code>contiguous()</code> 会把数据按新的顺序复制一份。</p><p>最后过 <code>out_proj</code>，输出和输入一样是 [B, T, d]。注意力层不改变形状，这让它可以一层一层地叠起来。</p>' },
+]} />
+
+## 一步一步看
+
+`scripts/attention_steps.py` 用 4 个 token、d = 4、2 个头的小例子把中间结果全印出来，再和 PyTorch 自带的实现比一比：
+
+<RunOutput cmd=".venv/bin/python scripts/attention_steps.py" file="minigpt/outputs/attention_steps.txt" caption="图 54-2　因果多头注意力的中间结果：打分、盖掩码、softmax。和 F.scaled_dot_product_attention 的差在 10⁻⁸ 量级；改第 3 个 token，只有位置 3 的输出变。" />
+
+**拆头之后的形状**是 (1, 2, 4, 2)：1 个样本、2 个头、4 个位置、每头 2 维。
+
+**头 0 的打分**是一个 4 × 4 矩阵。盖上掩码后，右上角全是 −∞；softmax 之后右上角全是 0，每行的和都是 1。第 0 行只有一个非零元素，是 1：位置 0 只能看自己。第 1 行是 0.53、0.47：位置 1 把一半多的注意力给了位置 0。这些权重是随机初始化的模型算出来的，没有意义；训练之后，它们才会变成“这个位置该看哪里”。
+
+**和 PyTorch 对比**：`F.scaled_dot_product_attention(q, k, v, is_causal=True)` 是 PyTorch 自带的注意力，在 GPU 上会自动选 FlashAttention 这类融合实现（第 84 讲）。用同一组 q、k、v，两者的最大差是 3 × 10⁻⁸，只是浮点数加法顺序不同带来的舍入误差。我们的实现是对的。
+
+**因果性**：把第 3 个 token 的向量改掉，位置 0、1、2 的输出一点没变（差为 0），只有位置 3 变了。这说明掩码起作用了：一个位置的输出只依赖它自己和它前面的位置。这条性质后面还会用到两次：训练时它保证“不偷看答案”，推理时它让 KV Cache 成为可能（第 69 讲：前面位置的 K、V 不会因为后面来了新 token 而改变）。
+
+**真实尺寸**：d = 256、H = 4 的注意力层有 262,400 个参数，就是 4 × 256² = 262,144，加上 `out_proj` 的 256 个偏置。注意参数量和头数无关：H = 1 还是 H = 8，都是四个 d × d 矩阵，变的只是怎么切。掩码是 buffer，不算参数。
+
+最后一行值得多看一眼：B = 16、T = 256 时，注意力权重是 [16, 4, 256, 256]，419 万个数，FP32 下 16 MiB。这还只是一层；每层的打分、softmax 的结果、dropout 的结果都要为反向传播留着，4 层就是上百 MiB。它和 T² 成正比，T 翻倍就是 4 倍。这就是为什么 FlashAttention 要想办法不把这个 T × T 矩阵写进显存（第 84 讲）。
+
+<Note kind="point">多头注意力不需要循环：所有头的投影合成一个 d × d 矩阵，结果 view 成 [B, H, T, h_d]，批量矩阵乘法一次算完所有样本、所有头的打分。参数量 4d² 与头数无关；注意力权重的大小与 T² 成正比。</Note>
+
+## 检查
+
+<RunOutput cmd=".venv/bin/python tests/check.py g2" file="minigpt/outputs/check_g2.txt" caption="图 54-3　g2 的检查：d = 32、4 个头、16 个位置的随机输入，和 PyTorch 的实现一致。" />
+
+## 容易写错的地方
+
+- **拆头时直接 view 成 [B, H, T, h_d]。**形状对得上，不报错，但结果是错的：内存里是 [B, T, d] 的顺序，必须先 view 成 [B, T, H, h_d] 再转置。直接 view 会把不同位置的数混进同一个头。
+- **转置后忘了 contiguous。**会报错，比较好查。用 `reshape` 代替 `view` 也可以，它在需要时会自动复制。
+- **掩码方向反了。**`triu(diagonal=1)` 屏蔽的是 j &gt; t。写成 `tril`，模型就只能看未来、看不到过去；训练 loss 会降得出奇地快（它在偷看答案），生成时却一塌糊涂。上面“改第 3 个 token”的检查能抓住这种错。
+- **除以 √d 而不是 √h_d。**多头时每个头的点积是 h_d 维的，缩放要用 √h_d。
+
+## 回顾
+
+g2 用 39 行写出因果多头注意力：四个 d × d 线性层；q、k、v 拆成 [B, H, T, h_d]，批量矩阵乘法打分，除以 √h_d，用上三角掩码填 −∞，softmax，dropout，乘 v，拼回 [B, T, d]，过 `out_proj`。它和 PyTorch 自带的实现差 3 × 10⁻⁸，改后面的 token 不影响前面的输出。
+
+注意力让每个位置看到了上下文，但它只是在已有的向量之间做加权平均，自己几乎没有“加工”能力；层数一多，数值还会越来越不稳定。下一讲把它和 LayerNorm、FFN、残差连接组装成 Transformer Block，再叠成一个完整的 GPT：**g3 · 组装 GPT**。

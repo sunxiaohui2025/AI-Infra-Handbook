@@ -1,0 +1,154 @@
+---
+id: 64
+slug: interconnect
+title: 互联：PCIe、NVLink、InfiniBand、RoCE
+chapter: 3
+part: 8
+problem: 卡与卡、机与机之间怎么通信
+prereqs: [60, 61]
+level: 主线
+minutes: 30
+demos: [InterconnectView]
+video: ""
+formula: '一次传输 $\approx\alpha + \text{消息大小}\div\text{路径上最慢一段的带宽}$；H100 服务器：机内 NVLink 每卡单向约 450 GB/s，跨机网卡每卡约 50 GB/s，差 9 倍'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import InterconnectView from '../../components/InterconnectView.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[60, 61]} />
+
+前几讲只看一张卡：算力、显存、带宽。可大模型的推理和训练常常要用到好几张卡，甚至成千上万张（第 99 讲）。卡与卡之间要交换数据：张量并行每层要把部分和加起来，专家并行要把 token 送到别的卡上，PD 分离要把 KV Cache 从一台机器传到另一台。
+
+这些数据走什么路？有多快？这一讲把常见的几种互联讲清楚：**PCIe、NVLink、InfiniBand 和 RoCE**。它们是第四章所有通信估算的基础，也是第 65 讲超节点的铺垫。
+
+## PCIe：通用的总线
+
+**PCIe**（PCI Express）是电脑里最通用的高速总线：GPU、网卡、SSD 都插在 PCIe 插槽上，通过它和 CPU 通信。它由若干条“通道”（lane）组成，GPU 一般用 16 条（x16）。
+
+- PCIe 4.0 x16：每个方向约 **32 GB/s**；
+- PCIe 5.0 x16：每个方向约 **64 GB/s**（H100 用的就是它）。
+
+和 GPU 显存的 3.35 TB/s 比，PCIe 慢了 50 倍。数据从 CPU 内存来（加载模型、读回卸载的 KV），或者经网卡去别的机器，都要走 PCIe。
+
+没有 NVLink 的机器（比如消费级显卡、一些推理卡），卡与卡之间也只能通过 PCIe 交换数据。
+
+## NVLink 与 NVSwitch：机内的高速路
+
+**NVLink** 是 NVIDIA 专门为 GPU 之间通信设计的连接。每张卡有多条 NVLink 链路，合计的带宽远高于 PCIe：
+
+- A100（NVLink 3）：每张卡双向合计 600 GB/s，单向约 **300 GB/s**；
+- H100（NVLink 4）：双向 900 GB/s，单向约 **450 GB/s**；
+- B200（NVLink 5）：双向 1.8 TB/s，单向约 **900 GB/s**。
+
+一台 8 卡的服务器里，8 张卡并不是两两直连，而是都接到几颗 **NVSwitch** 交换芯片上，任意两张卡之间都能以满带宽通信。这 8 张卡组成一个 **NVLink 域**。第 105 讲的张量并行、第 101 讲的 All-Reduce，在机内都走这里。
+
+NVLink 还有一个特点：它支持 GPU 直接读写另一张卡的显存（内存语义），就像访问自己的显存一样，只是远一点。这让卡与卡之间的协作可以非常细粒度。
+
+## InfiniBand 与 RoCE：机器之间的网络
+
+机器之间要通过**网络**连接。大模型集群常用两种：
+
+**InfiniBand**（IB）是为高性能计算设计的网络，延迟低、丢包少。常见的速率：HDR 200 Gb/s（约 25 GB/s）、NDR 400 Gb/s（约 **50 GB/s**）、XDR 800 Gb/s。一台 8 卡的 H100 服务器通常配 8 张 400 Gb/s 的网卡，每张 GPU 一张。
+
+**RoCE**（RDMA over Converged Ethernet）在以太网上实现同样的 RDMA 功能，速率相当（400 GbE 约 50 GB/s）。以太网的生态更广、更便宜，云厂商用得很多；但以太网本来是允许丢包的，RoCE 要配置无损网络（流量控制、拥塞控制），调好了性能接近 InfiniBand。
+
+两者的核心都是 **RDMA**（远程直接内存访问）：网卡直接读写对方机器的内存，不经过对方的 CPU 和操作系统，延迟低、不占 CPU。再加上 **GPUDirect RDMA**，网卡可以直接读写 GPU 的显存，数据不用先拷到 CPU 内存。
+
+注意单位：网络的速率常用比特（Gb/s），除以 8 才是字节（GB/s）。400 Gb/s 的网卡是 50 GB/s。
+
+## 一条路径的带宽，取决于最慢的那一段
+
+数据从一张卡到另一张卡，往往要经过好几段。代码算了一台 8 卡 H100 服务器里的几条路径：
+
+- **同机两卡，走 NVLink**：瓶颈 450 GB/s，传 1 GB 约 2 ms。
+- **同机两卡，只有 PCIe**：瓶颈 64 GB/s，约 16 ms。
+- **跨机两卡**：GPU → PCIe → 网卡 → 交换机 → 网卡 → PCIe → GPU，瓶颈是网卡的 50 GB/s，约 20 ms。
+- **GPU 和 CPU 内存**：PCIe，约 16 ms。
+
+把整台机器加起来看：NVLink 每卡 450 GB/s × 8 = 3600 GB/s，网卡 8 × 50 = 400 GB/s，**机内比机间快 9 倍**。这个差距决定了第 109 讲的原则：通信频繁的并行要放在机内。
+
+下面的演示画出了两台 8 卡服务器的连接。选一条路径、调消息大小，看瓶颈和时间。
+
+<InterconnectView caption="图 64-1　两台 8 卡服务器的互联（示意）。机内 8 张卡经 NVSwitch 全连，每卡 450 GB/s；每张卡经 PCIe 接一张 400 Gb/s 网卡，机间经交换机相连，每卡 50 GB/s。一条路径的速度由最慢的一段决定。" />
+
+<Note kind="point">机内：GPU 之间用 NVLink（经 NVSwitch 全连），H100 每卡单向约 450 GB/s；GPU 和 CPU、网卡之间用 PCIe 5.0，约 64 GB/s。机间：用 InfiniBand 或 RoCE 网络，都基于 RDMA，H100 服务器每卡配一张 400 Gb/s（约 50 GB/s）的网卡。一条路径的带宽由最慢的一段决定，机内比机间快约 9 倍。</Note>
+
+## 延迟：小消息的主要代价
+
+除了带宽，每次传输还有固定的开销 α（第 102 讲）：硬件建立传输、数据经过交换机、通信库的软件开销……代码按示意的量级取：NVLink 约 3 μs，PCIe 约 5 μs，InfiniBand 约 6 μs，RoCE 约 8 μs。
+
+传 64 KB 的小消息时，各种链路的时间都在 3 到 9 μs，几乎全是 α，带宽的差别看不出来；传 1 GB 时，时间完全由带宽决定：NVLink 4 约 2.2 ms，InfiniBand NDR 约 20 ms。第 102 讲会把这个“α-β 模型”用到各种集合通信上。
+
+## 网络的拓扑
+
+几百、几千台机器要连在一起，网络本身也有结构。大模型集群常用**胖树**（fat-tree）拓扑：机器接到接入交换机，接入交换机再接到上一层的交换机，每一层的总带宽保持不变，任意两台机器之间都有足够的带宽。
+
+常见的优化是**按轨道连接**（rail-optimized）：每台机器的第 0 张网卡都接到同一组交换机，第 1 张接到另一组……这样，不同机器上“同一号”的 GPU 之间只经过一跳交换机，正好匹配“每台机器的第 i 张卡互相通信”的常见模式（比如第 101 讲的分层 All-Reduce）。
+
+## 到了大模型里
+
+**推理的通信大多走 NVLink。**张量并行几乎总在一台机器内部；跨机的通信主要是流水并行、PD 分离的 KV 传输、MoE 的专家并行（第 106、112、111 讲）。
+
+**网卡带宽在翻倍。**新一代的服务器开始配 800 Gb/s 的网卡（约 100 GB/s），以太网阵营也在推出专门面向 AI 的规范（比如 Ultra Ethernet）。但和 NVLink 比，机间网络的带宽仍然低一个数量级。
+
+**把更多的卡放进 NVLink 域。**既然机内机间差了 9 倍，一个自然的想法是让“机内”变得更大。这就是下一讲的超节点。
+
+## 用代码复现
+
+下面的代码列出常见互联的单向带宽，按 α + m/β 算出传 64 KB、16 MB、1 GB 的时间；再分析一台 8 卡 H100 服务器里几条路径的瓶颈，以及整机的机内、机间带宽之比。
+
+```python
+# 常见互联的单向带宽（公开规格换算，GB/s）和一次传输的固定开销 α（示意的量级，含通信库的软件开销）
+LINKS = [
+    ("PCIe 4.0 x16", 32e9, 5e-6), ("PCIe 5.0 x16", 64e9, 5e-6),
+    ("NVLink 3（A100，每卡合计）", 300e9, 3e-6), ("NVLink 4（H100，每卡合计）", 450e9, 3e-6), ("NVLink 5（B200，每卡合计）", 900e9, 3e-6),
+    ("InfiniBand HDR 200 Gb/s", 25e9, 6e-6), ("InfiniBand NDR 400 Gb/s", 50e9, 6e-6), ("RoCE 400 GbE", 50e9, 8e-6),
+]
+print("链路 | 单向带宽 | 传 64 KB | 传 16 MB | 传 1 GB")
+for name, bw, a in LINKS:
+    t = lambda m: a + m / bw
+    print(f"{name} | {bw / 1e9:4.0f} GB/s | {t(64e3) * 1e6:6.1f} μs | {t(16e6) * 1e3:6.2f} ms | {t(1e9) * 1e3:6.1f} ms")
+
+# 一台 8 卡 H100 服务器里的几条路径：一条路径的带宽取决于其中最慢的一段
+paths = {"同机两张卡（NVLink + NVSwitch）": [450e9],
+         "同机两张卡（只有 PCIe，没有 NVLink）": [64e9, 64e9],
+         "跨机两张卡（PCIe → 网卡 → 交换机 → 网卡 → PCIe）": [64e9, 50e9, 50e9, 64e9],
+         "GPU 和 CPU 内存（PCIe）": [64e9]}
+for name, segs in paths.items():
+    print(f"{name}：瓶颈 {min(segs) / 1e9:.0f} GB/s，传 1 GB 约 {1e9 / min(segs) * 1e3:.0f} ms")
+print(f"整台机器：NVLink 每卡 450 GB/s × 8 = {450 * 8} GB/s；网卡 8 张 × 50 GB/s = {50 * 8} GB/s，差 {450 / 50:.0f} 倍")
+```
+
+输出：
+
+```text
+链路 | 单向带宽 | 传 64 KB | 传 16 MB | 传 1 GB
+PCIe 4.0 x16 |   32 GB/s |    7.0 μs |   0.51 ms |   31.3 ms
+PCIe 5.0 x16 |   64 GB/s |    6.0 μs |   0.26 ms |   15.6 ms
+NVLink 3（A100，每卡合计） |  300 GB/s |    3.2 μs |   0.06 ms |    3.3 ms
+NVLink 4（H100，每卡合计） |  450 GB/s |    3.1 μs |   0.04 ms |    2.2 ms
+NVLink 5（B200，每卡合计） |  900 GB/s |    3.1 μs |   0.02 ms |    1.1 ms
+InfiniBand HDR 200 Gb/s |   25 GB/s |    8.6 μs |   0.65 ms |   40.0 ms
+InfiniBand NDR 400 Gb/s |   50 GB/s |    7.3 μs |   0.33 ms |   20.0 ms
+RoCE 400 GbE |   50 GB/s |    9.3 μs |   0.33 ms |   20.0 ms
+同机两张卡（NVLink + NVSwitch）：瓶颈 450 GB/s，传 1 GB 约 2 ms
+同机两张卡（只有 PCIe，没有 NVLink）：瓶颈 64 GB/s，传 1 GB 约 16 ms
+跨机两张卡（PCIe → 网卡 → 交换机 → 网卡 → PCIe）：瓶颈 50 GB/s，传 1 GB 约 20 ms
+GPU 和 CPU 内存（PCIe）：瓶颈 64 GB/s，传 1 GB 约 16 ms
+整台机器：NVLink 每卡 450 GB/s × 8 = 3600 GB/s；网卡 8 张 × 50 GB/s = 400 GB/s，差 9 倍
+```
+
+前八行是各种链路：小消息时差别不大，大消息时 NVLink 比网络快一个数量级。接着四行是几条路径的瓶颈。最后一行：整机 NVLink 3600 GB/s，网卡 400 GB/s，差 9 倍。
+
+## 容易混淆的地方
+
+1. **NVLink 的标称带宽是双向合计。**“H100 NVLink 900 GB/s”是一张卡所有 NVLink 链路两个方向加起来的；估算一次传输的时间，要用单向的约 450 GB/s。
+2. **比特和字节。**网卡速率 400 Gb/s 是比特，约 50 GB/s；PCIe 和 NVLink 的规格一般直接给字节。
+3. **InfiniBand 和 RoCE 是同一类技术。**两者都提供 RDMA，主要区别在底层网络（专用的 IB 还是以太网）和生态；对上层的推理引擎来说，通常只是换一个通信库的配置。
+
+## 回顾
+
+GPU 之间、GPU 和外部之间有几种互联：PCIe 是通用总线，PCIe 5.0 x16 每个方向约 64 GB/s，连接 GPU 和 CPU、网卡；NVLink 是 GPU 之间的专用高速连接，H100 每卡单向约 450 GB/s，一台机器的 8 张卡经 NVSwitch 全连，组成 NVLink 域；机器之间用 InfiniBand 或 RoCE 网络，都基于 RDMA，H100 服务器每卡一张 400 Gb/s（约 50 GB/s）的网卡。一条路径的带宽由最慢的一段决定，机内比机间快约 9 倍；小消息的时间主要是固定开销 α。
+
+机内机间 9 倍的差距，让很多本该放在高速链路上的通信被迫走慢路。能不能把几十、上百张卡都放进同一个 NVLink 域？下一讲：**scale-up、scale-out 与超节点**。

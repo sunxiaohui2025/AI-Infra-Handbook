@@ -19,7 +19,7 @@ const BOXES: Box[] = [
   { id: 'ln2', name: '归一化', lec: [30, 36], shape: ['[4, 4] → [4, 4]', '[s, 4096] → [s, 4096]'], params: [0, d[1]], note: ['LayerNorm（这一层的输出）', 'RMSNorm，放在 FFN 之前'], inBlock: true },
   { id: 'lnf', name: '最后的归一化', lec: [36], shape: ['（没有）', '[s, 4096] → [s, 4096]'], params: [0, d[1]], note: ['Post-Norm 每层已经以归一化结束', 'Pre-Norm 的残差流没归一化，输出前补一个 RMSNorm'] },
   { id: 'head', name: '输出层 lm_head', lec: [33], shape: ['[4, 4] → [4, 6]', '[s, 4096] → [s, 128256]'], params: [d[0] * V[0], d[1] * V[1]], note: ['给词表里每个词打分（logits）', '同左；Llama-3-8B 不和嵌入表共享'] },
-  { id: 'soft', name: 'softmax → 下一个词', lec: [6, 23, 24], shape: ['[4, 6]，每行和为 1', '[s, 128256]'], params: [0, 0], note: ['推理时只用最后一行', '同左；再按解码策略选词（第 65 讲）'] },
+  { id: 'soft', name: 'softmax → 下一个词', lec: [6, 23, 24], shape: ['[4, 6]，每行和为 1', '[s, 128256]'], params: [0, 0], note: ['推理时只用最后一行', '同左；再按解码策略选词（第 73 讲）'] },
 ];
 const LAYERS = [2, 32];
 ---

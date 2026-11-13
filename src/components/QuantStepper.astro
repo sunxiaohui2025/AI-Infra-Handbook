@@ -1,5 +1,5 @@
 ---
-// 量化与反量化步进器（规则与第 80 讲的代码相同）。
+// 量化与反量化步进器（规则与第 90 讲的代码相同）。
 // 对称：scale = max|x| / (2^(bits−1) − 1)，q = round(x / scale) 截断到 ±qmax，x̂ = q · scale。
 // 非对称：scale = (max − min) / (2^bits − 1)，z = round(−min / scale)，q = round(x / scale) + z 截断到 [0, 2^bits − 1]，x̂ = (q − z) · scale。
 // 分组：每 4 个数各算一个 scale（和零点）。读者可以：改 8 个数（逗号分隔）、调位宽、切换对称/非对称、整体/分组，

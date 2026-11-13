@@ -1,5 +1,5 @@
 ---
-// 读一张 Profiler 时间线（模拟数据，模型与第 58 讲的代码相同）：Llama-3-8B，TP = 4，decode 一步，批 8、上下文 2048。
+// 读一张 Profiler 时间线（模拟数据，模型与第 66 讲的代码相同）：Llama-3-8B，TP = 4，decode 一步，批 8、上下文 2048。
 // 每层 12 个 kernel，耗时按 Roofline 估算（矩阵乘法按带宽的 80%，每个 kernel 另有约 3 μs 固定开销）；CPU 每发射一个约 8 μs。
 // 两行：CPU（发射 kernel）、GPU（执行 kernel，颜色 = 类别）。读者可以：看前 2 层或整步；切换 eager / CUDA Graph；点一个 kernel 看它的耗时、读写量和实际带宽。
 interface Props { title?: string; caption?: string }
@@ -48,7 +48,7 @@ const { title = '一步 decode 的时间线', caption } = Astro.props;
       const by: Record<string, number> = {}; all.forEach((x) => (by[x.cat] = (by[x.cat] ?? 0) + x.dur));
       fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `选中：第 ${k.layer} 层 <b>${k.name}</b>（${k.cat}），${(k.dur * 1e6).toFixed(1)} μs，读写 ${(k.bytes / 1e6).toFixed(2)} MB，实际带宽 ${(k.bytes / k.dur / 1e12).toFixed(2)} TB/s（峰值 3.35）。点时间线上的 kernel 换一个看。`
         + `<br>整步：${(Tall * 1e3).toFixed(2)} ms，GPU 忙 ${Math.round(busy / Tall * 100)}%，空等 ${((Tall - busy) * 1e3).toFixed(2)} ms；${Object.entries(by).sort((a, b) => b[1] - a[1]).map(([c, t]) => `${c} ${(t * 1e3).toFixed(2)} ms`).join('，')}。`
-        + `<br><span class="ai-faint">${graph ? 'CUDA Graph 一次发射整步，GPU 上的 kernel 首尾相接，空白消失了。' : '小 kernel 之间的空白：GPU 算完了，下一个 kernel 还没被 CPU 发射过来（第 79 讲）。'}</span>`;
+        + `<br><span class="ai-faint">${graph ? 'CUDA Graph 一次发射整步，GPU 上的 kernel 首尾相接，空白消失了。' : '小 kernel 之间的空白：GPU 算完了，下一个 kernel 还没被 CPU 发射过来（第 89 讲）。'}</span>`;
     }
     fig.addEventListener('click', (e) => {
       const t = e.target as Element, b = t.closest<HTMLElement>('[data-group] [data-v]'), kk = t.closest<SVGRectElement>('[data-i]');

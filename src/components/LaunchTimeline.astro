@@ -1,5 +1,5 @@
 ---
-// 启动开销时间线（模型与第 79 讲的代码相同，数字是假设的量级）：decode 一步（批大小 1）里的几百个 kernel。
+// 启动开销时间线（模型与第 89 讲的代码相同，数字是假设的量级）：decode 一步（批大小 1）里的几百个 kernel。
 // eager：CPU 每发射一个 kernel 花 LAUNCH 微秒，GPU 只能在 kernel 被发射之后开始执行；CPU 可以跑在 GPU 前面，但跑得比 GPU 慢时，GPU 就在两个 kernel 之间空等。
 // CUDA Graph：整步提前录成一张图，CPU 只发射一次（约 20 μs），之后 GPU 一个接一个地执行，中间没有空隙。
 // 读者可以：选模型、切换 eager / CUDA Graph、调 CPU 发射一个 kernel 的时间，看整步或前 2 层的 CPU、GPU 两条时间线。

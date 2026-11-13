@@ -1,0 +1,147 @@
+---
+id: 77
+slug: chunked-prefill
+title: Chunked Prefill
+chapter: 3
+part: 10
+problem: 长 prompt 怎么不卡住其他请求
+prereqs: [68, 70, 74]
+level: 主线
+minutes: 30
+demos: [ChunkTimeline]
+video: ""
+formula: '每一步有一个 token 预算：先给每个 decode 请求 1 个，剩下的给 prefill；长提示切成若干块，分几步做完'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import ChunkTimeline from '../../components/ChunkTimeline.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[68, 70, 74]} />
+
+第 74 讲最后留了一个问题：连续批处理让新请求随时加入，可新请求要先做 prefill。假设 32 个用户正在流畅地接收回答，每 6 ms 左右蹦出一个字；这时来了一个新请求，带着一份 8000 token 的长文档。它的 prefill 被塞进下一步，这一步要算 8000 多个 token，耗时一下子变成了一百多毫秒。这一百多毫秒里，那 32 个用户的回答全都停住了。
+
+这一讲的 **Chunked Prefill**（分块 prefill）解决的就是这个问题：把长提示的 prefill 切成小块，分几步做，每一步都和 decode 一起进行，谁也不卡谁。
+
+## 一个长提示能卡多久
+
+先用第 68 讲的方法算一下（Llama-3-8B，一张 H100，每一步的耗时 ≈ max(计算量 ÷ 算力, 读写字节 ÷ 带宽)）。
+
+32 个请求一起 decode，每个上下文约 1000 个 token。这一步每个请求只处理 1 个新 token，计算量很小，主要的时间花在把权重读一遍、再读一遍 KV Cache 上，约 **6.05 ms**。这就是这 32 个请求平时的 TPOT（第 70 讲）。
+
+这时来了一个 8000 token 的提示。如果把它的 prefill 整段放进下一步，这一步要处理 8032 个 token，计算量是平时的两百多倍，变成了计算受限，耗时约 **138.9 ms**。
+
+对那 32 个正在 decode 的请求来说，这一步也只给每人出了 1 个 token。它们的 TPOT 从 6 ms 突然跳到了 139 ms，用户看到的就是回答正流畅地往外蹦字，忽然卡了一下。如果来的是 3 万、10 万 token 的提示，卡顿就是半秒、几秒。第 70 讲说过，TPOT 决定了用户感受到的“流畅程度”，服务通常对它有严格的要求（比如 P99 不超过 50 ms）。偶尔一次长提示，就能让所有人的 P99 超标。
+
+反过来，如果为了不卡别人，让长提示等到没有 decode 请求时再做，它的 TTFT 又会无限地拖下去。两头都不好。
+
+## 把 prefill 切开
+
+第 69 讲说过，prefill 和 decode 做的其实是同一件事：处理一批新 token，把它们的 k、v 写进 KV Cache。prefill 一次处理很多个，decode 一次处理 1 个。所以 prefill **不必一次做完**：8000 个 token，可以先处理前 480 个，把它们的 KV 写进缓存；下一步再处理第 481 到 960 个，这时它们的注意力要看的“前面的 token”，一部分在缓存里（前 480 个），一部分在这一块里；依此类推。每一块的计算方式和 decode 完全一样，只是一次处理的新 token 多一些。最后一块处理完，就得到了第一个输出 token，和一次做完的结果完全相同。
+
+于是调度器可以这样安排每一步：
+
+1. 给这一步定一个 **token 预算**，比如 512 个。
+2. 先把预算分给所有正在 decode 的请求，每个 1 个（32 个请求用掉 32 个）。
+3. 剩下的 480 个，分给正在 prefill 的请求：从长提示里切下 480 个 token，这一步处理它们。
+
+每一步处理的 token 数不超过预算，耗时就有了上限。8000 个 token 的提示，每步 480 个，分 17 步做完。这 17 步里，32 个 decode 请求每一步都照常出 1 个 token，每步最长约 **9.7 ms**；长提示的 TTFT 约 **146.9 ms**，和一次做完的 138.9 ms 差不多。
+
+这个做法来自 2023–2024 年的 SARATHI 和 Sarathi-Serve 论文，后者把它叫作“不停顿的批处理”（stall-free batching）：decode 永远不会因为 prefill 而停下来。
+
+下面的时间线画出了这两种安排。每一格是一步，宽度是这一步的耗时，琥珀色的步里带着 prefill。下面的小竖线是某个 decode 请求每出一个 token 的时刻，竖线之间的间隔就是它的 TPOT。换一换预算、拖一拖提示长度看看。
+
+<ChunkTimeline caption="图 77-1　长提示插进来时，不切块（上）和每步预算 512（下）。不切块时，整段 prefill 挤进一步，decode 请求有一百多毫秒出不了 token；切块后每步都不长，decode 照常进行，长提示的 TTFT 几乎不变。" />
+
+<Note kind="point">Chunked Prefill 给每一步设一个 token 预算：先保证每个 decode 请求的 1 个 token，剩下的预算给 prefill，长提示被切成若干块分几步做完。每一步的耗时有了上限，decode 不再被长提示卡住。</Note>
+
+## 预算多大合适
+
+预算是一个权衡。代码算出了几个不同预算的结果（8000 token 的提示，32 个请求在 decode）：
+
+- **不切块**：1 步，TTFT 138.9 ms，decode 被卡 138.9 ms。
+- **2048**：4 步，TTFT 140.4 ms，最长 TPOT 37.4 ms。
+- **1024**：9 步，TTFT 147.5 ms，最长 TPOT 19.5 ms。
+- **512**：17 步，TTFT 146.9 ms，最长 TPOT 9.7 ms。
+- **256**：36 步，TTFT 223.5 ms，最长 TPOT 6.4 ms。
+
+预算越小，decode 越平稳；但预算太小，长提示的 TTFT 会明显变长。原因是**每一步都要把权重从显存里读一遍**（约 4.8 ms），预算 256 时，每步只能处理 224 个 prefill token，读权重的时间占了大头，步数又多（36 步），总时间就长了。预算 512 以上时，每一步基本是计算受限的，切成几块总的计算量不变，TTFT 也就几乎不变。
+
+这和第 62 讲的 Roofline 是同一个道理：每一步要读一遍权重是固定成本，一步里处理的 token 越多，这个固定成本就被摊得越薄。
+
+## 白捡的算力
+
+还有一个更妙的地方。第 68 讲说过，decode 是带宽受限的：32 个请求一起 decode 一步，计算单元大部分时间在等数据。代码算出，这一步**再塞进 363 个 prefill token**，计算时间也还没超过读数据的时间，耗时仍然约 6.06 ms，几乎不变。
+
+也就是说，decode 的每一步里，本来就有一部分算力闲着。Chunked Prefill 把 prefill 切成块，正好填进这些闲着的算力里：prefill 几乎是“搭顺风车”完成的。这让 GPU 的利用率更高，整体吞吐也会提高。
+
+## 到了大模型里
+
+**vLLM 的新版本默认开启。**vLLM 的 V1 引擎里，chunked prefill 默认打开，预算由参数 `max_num_batched_tokens` 控制（第 74 讲提过它）。调度器每一步先排 decode，再用剩下的预算排 prefill。SGLang 也有对应的参数（`chunked_prefill_size`）。具体默认值随版本和硬件变化，以文档为准。
+
+**预算怎么定。**预算大一些，吞吐和 TTFT 更好；预算小一些，TPOT 更稳。延迟要求严的在线服务，预算可以设小一点；离线批量处理，预算可以设得很大。经验上，预算让一步落在“刚好开始计算受限”的位置附近比较好，对 H100 上的 8B 模型，大约是几百到两千个 token。
+
+**和前缀缓存配合。**长提示如果开头命中了前缀缓存（第 76 讲），命中的部分直接跳过，只把没命中的部分切块。
+
+**另一种思路：干脆分开。**chunked prefill 让 prefill 和 decode 在同一张卡上和平共处。另一种做法是让 prefill 和 decode 在不同的卡上进行，互不干扰，这就是第 14 篇的 PD 分离。两种思路各有适用的场景，到那时再比较。
+
+## 用代码复现
+
+下面的代码按第 68 讲的方法估算每一步的耗时，先算出平时 decode 一步的耗时和“白捡”的 prefill 容量，再比较不同预算下长提示的 TTFT 和 decode 请求的最长 TPOT。
+
+```python
+# Llama-3-8B（BF16）+ 一张 H100。一步的耗时 ≈ max(计算量 / 算力, 读写字节 / 带宽)（第 68 讲）
+N, N_emb, L, d = 8.03e9, 128256 * 4096, 32, 4096
+W_BYTES, KV, F, BW = N * 2, 2 * 32 * 8 * 128 * 2, 989e12, 3.35e12
+
+def cost(dec, dec_ctx, pre, pre_ctx):
+    """一步：dec 个请求各 decode 1 个 token（上下文 dec_ctx）；外加一段 pre 个 token 的 prefill（这段前面已有 pre_ctx 个）。"""
+    flops = 2 * (N - N_emb) * (dec + pre) + 4 * L * d * (dec * dec_ctx + pre * (pre_ctx + pre / 2))
+    bytes_ = W_BYTES + KV * (dec * dec_ctx + pre_ctx + pre)
+    return flops / F * 1e3, bytes_ / BW * 1e3           # (算的时间, 读写的时间)，取大的那个
+
+def step_ms(*a):
+    return max(cost(*a))
+
+D, CTX, P = 32, 1000, 8000            # 32 个请求正在 decode；来了一个 8000 token 的长提示
+print(f"平时：{D} 个请求一起 decode 一步 ≈ {step_ms(D, CTX, 0, 0):.2f} ms（这就是它们的 TPOT）")
+free = 0
+while cost(D, CTX, free + 1, 0)[0] <= cost(D, CTX, free + 1, 0)[1]: free += 1
+print(f"这一步最多再塞进 {free} 个 prefill token，仍然卡在带宽上，耗时 {step_ms(D, CTX, free, 0):.2f} ms，几乎不变")
+
+print("token 预算 | prefill 分几步 | 长提示的 TTFT | 这期间 decode 请求的最长 TPOT")
+for budget in [P + D, 2048, 1024, 512, 256]:
+    done, t, worst, steps = 0, 0.0, 0.0, 0
+    while done < P:
+        chunk = min(budget - D, P - done)     # 先给 decode 留位置，剩下的预算给 prefill
+        ms = step_ms(D, CTX, chunk, done)
+        t, worst, done, steps = t + ms, max(worst, ms), done + chunk, steps + 1
+    name = "不切块" if budget > P else f"{budget:6d}"
+    print(f"{name:>8} | {steps:6d} 步 | {t:7.1f} ms | {worst:6.1f} ms")
+```
+
+输出：
+
+```text
+平时：32 个请求一起 decode 一步 ≈ 6.05 ms（这就是它们的 TPOT）
+这一步最多再塞进 363 个 prefill token，仍然卡在带宽上，耗时 6.06 ms，几乎不变
+token 预算 | prefill 分几步 | 长提示的 TTFT | 这期间 decode 请求的最长 TPOT
+     不切块 |      1 步 |   138.9 ms |  138.9 ms
+    2048 |      4 步 |   140.4 ms |   37.4 ms
+    1024 |      9 步 |   147.5 ms |   19.5 ms
+     512 |     17 步 |   146.9 ms |    9.7 ms
+     256 |     36 步 |   223.5 ms |    6.4 ms
+```
+
+第一行是平时的 TPOT（6.05 ms）；第二行是 decode 一步里还能白捡的 prefill 容量（363 个 token）；表格就是上面那五种预算的结果。“prefill 分几步”同时也是这期间每个 decode 请求出的 token 数：不切块时只出 1 个，预算 512 时出了 17 个。
+
+## 容易混淆的地方
+
+1. **切块不改变结果。**每一块的注意力都会看到前面所有块的 KV（从缓存里读），最后得到的 KV Cache 和第一个输出 token，与一次做完完全相同。
+2. **切块也有代价。**后面的块要从缓存里读前面块的 KV，块切得越细，这部分重复读取越多；每一步还要读一遍权重。所以预算不能无限小。
+3. **长提示自己的 TTFT 并没有变短。**chunked prefill 主要保护的是**别人**的 TPOT，长提示自己的 TTFT 基本不变，预算太小时还会变长。要缩短长提示的 TTFT，靠的是前缀缓存、更多的算力，或者第 14 篇的并行方法。
+
+## 回顾
+
+连续批处理让新请求随时加入，可长提示的 prefill 挤进一步，会让这一步耗时暴涨，所有 decode 请求都被卡住：32 个请求在 decode 时来了 8000 token 的提示，这一步要 138.9 ms，而平时只要 6.05 ms。Chunked Prefill 给每一步设一个 token 预算，先给每个 decode 请求 1 个，剩下的给 prefill，长提示切成块分几步做完。预算 512 时，分 17 步，每步最长 9.7 ms，长提示的 TTFT 仍然约 147 ms。预算太小，每步都要读一遍权重，TTFT 会变长；decode 一步里本来闲着的算力，还能顺带处理几百个 prefill token。
+
+到这里，每一步“处理哪些 token”已经有了章法。可显存总是有限的：如果正在运行的请求越生成越长，KV Cache 的块用完了，怎么办？是拒绝新请求，还是让某些请求先让出位置？下一讲：**调度与抢占**。

@@ -1,6 +1,6 @@
 ---
-// 推理引擎的进程结构和一个请求的路径（第 16 篇共用）：engine="vllm"（vLLM V1，提交 821851e）、"sglang"（提交 48da6bd），
-// 以及第 118 讲的 "vllm-dp"（两个节点、4 个数据并行副本）和 "vllm-pd"（PD 分离的 KV connector）。
+// 推理引擎的进程结构和一个请求的路径（第 17 篇共用）：engine="vllm"（vLLM V1，提交 821851e）、"sglang"（提交 48da6bd），
+// 以及第 130 讲的 "vllm-dp"（两个节点、4 个数据并行副本）和 "vllm-pd"（PD 分离的 KV connector）。
 // 虚线框是进程，实线框是进程里的模块。按步骤播放：每一步高亮参与的模块，下方说明这一步发生了什么、在哪个文件。
 // 读者可以：上一步 / 下一步，或直接点某一步；点模块看说明。
 interface Props { engine: 'vllm' | 'sglang' | 'vllm-dp' | 'vllm-pd'; title?: string; caption?: string }
@@ -54,7 +54,7 @@ const { engine, title, caption } = Astro.props;
         { id: 'api', x: 26, y: 44, w: 250, h: 40, label: 'API 服务器：FastAPI + AsyncLLM', info: '<code>vllm/entrypoints/openai/</code> 收 HTTP 请求，<code>v1/engine/async_llm.py</code> 分词、为每个请求建一个输出流。' },
         { id: 'lb', x: 26, y: 100, w: 250, h: 40, label: 'DPLBAsyncMPClient：挑副本', info: '<code>v1/engine/core_client.py</code> 第 1777 行起。用协调器发来的负载快照、加上自己记的在途请求数，给每个副本打分，挑分最低的。' },
         { id: 'coord', x: 26, y: 156, w: 250, h: 40, label: 'DP 协调器（单独的进程）', info: '<code>v1/engine/coordinator.py</code>：收集各副本的等待数、运行数、KV 占用率，最快每 100 ms 发布给前端；MoE 模型时还负责“请求波次”的启停。' },
-        { id: 'e0', x: 296, y: 44, w: 258, h: 64, label: '副本 0：EngineCore（GPU 0–3）', info: '一个完整的 EngineCore 进程（第 117 讲），里面的 MultiprocExecutor 带 4 个 worker 做张量并行。' },
+        { id: 'e0', x: 296, y: 44, w: 258, h: 64, label: '副本 0：EngineCore（GPU 0–3）', info: '一个完整的 EngineCore 进程（第 129 讲），里面的 MultiprocExecutor 带 4 个 worker 做张量并行。' },
         { id: 'e1', x: 296, y: 124, w: 258, h: 64, label: '副本 1：EngineCore（GPU 4–7）', info: '和副本 0 一样，用这个节点的另外 4 张卡。' },
         { id: 'mq', x: 26, y: 228, w: 528, h: 40, label: '副本内部：共享内存消息队列 → 4 个 worker，只有一个 worker 回结果', info: '<code>v1/executor/multiproc_executor.py</code>：调度结果写进共享内存的广播队列，4 个 worker 同时读到、一起前向，只由输出 rank 把结果写回。' },
         { id: 'pb', x: 590, y: 10, w: 300, h: 300, group: true, label: '节点 B：headless（无 API 服务器）', info: '启动命令带 --headless，DP 起始编号为 2。它只跑引擎，通过 ZMQ 和节点 A 的前端、协调器通信。' },

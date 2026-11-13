@@ -1,0 +1,49 @@
+---
+// 多 LoRA 服务的一步 decode（第 79 讲）：基座 Llama-3-8B（BF16 约 16.06 GB），每个 LoRA 适配器加在 7 个线性层上（q、k、v、o、gate、up、down），秩 r。
+// 一共有 N 个适配器，请求按 Zipf 分布落到各个适配器上（指数 s = 0 是均匀，越大越集中在少数热门适配器）。
+// 一步 decode 的 batch 里有 B 个请求：期望出现 D = Σ(1 − (1 − pᵢ)^B) 个不同的适配器。decode 受带宽限制，一步要读基座权重一遍、再读 D 个适配器各一遍。
+// 读者可以：调 N、s、B、r，看 D、每步多读的字节、按 H100 的 3.35 TB/s 估的时间，以及逐个适配器调用 vs 分段矩阵乘（SGMV）的 kernel 次数。
+interface Props { title?: string; caption?: string }
+const { title = '一个 batch 里混着多个 LoRA', caption } = Astro.props;
+---
+<figure class="ai-gt ai-lora" data-loraserve>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-k">适配器总数 N <input type="range" min="1" max="1000" value="100" data-n /> <b data-nv></b></label>
+    <label class="ai-tl-k">热门程度 s <input type="range" min="0" max="2" step="0.1" value="1" data-s /> <b data-sv></b></label>
+    <label class="ai-tl-k">batch 里的请求 B <input type="range" min="1" max="256" value="64" data-b /> <b data-bv></b></label>
+    <label class="ai-tl-k">秩 r <input type="range" min="0" max="6" value="1" data-r /> <b data-rv></b></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const BASE = 16.06e9, L = 32, IO = 8192 + 5120 + 5120 + 8192 + 3 * 18432, BW = 3.35e12, RANKS = [8, 16, 32, 64, 128, 256, 512];
+  function init(fig: HTMLElement) {
+    const q = (s: string) => fig.querySelector<HTMLInputElement>(s)!;
+    const nI = q('[data-n]'), sI = q('[data-s]'), bI = q('[data-b]'), rI = q('[data-r]');
+    function draw() {
+      const N = +nI.value, s = +sI.value, B = +bI.value, r = RANKS[+rI.value];
+      fig.querySelector('[data-nv]')!.textContent = String(N); fig.querySelector('[data-sv]')!.textContent = s.toFixed(1);
+      fig.querySelector('[data-bv]')!.textContent = String(B); fig.querySelector('[data-rv]')!.textContent = String(r);
+      const w = Array.from({ length: N }, (_, i) => 1 / Math.pow(i + 1, s)), Z = w.reduce((a, b) => a + b, 0);
+      const D = w.reduce((a, x) => a + 1 - Math.pow(1 - x / Z, B), 0);
+      const ad = 2 * r * L * IO, extra = D * ad, t0 = BASE / BW, t1 = (BASE + extra) / BW;
+      const W = 880, x0 = 10, sc = (W - x0) / ((BASE + Math.max(extra, 1)) * 1.02);
+      let svg = `<svg class="ai-tl-svg" viewBox="0 0 900 70"><rect x="${x0}" y="10" width="${BASE * sc}" height="24" class="ai-lora-base"/><text class="ai-al-gl" x="${x0 + 6}" y="27">基座权重 16.06 GB</text>`;
+      svg += `<rect x="${x0 + BASE * sc}" y="10" width="${Math.max(1, extra * sc)}" height="24" class="ai-lora-ad"/>`;
+      svg += `<text class="ai-al-gl" x="${x0}" y="54">一步 decode 要从显存读的权重：基座一遍 + ${D.toFixed(1)} 个不同适配器各一遍（每个 ${(ad / 1e6).toFixed(1)} MB）</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = svg;
+      const flops = 2 * r * L * IO / (2 * 8.03e9);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `batch 里平均有 <b>${D.toFixed(1)}</b> 个不同的适配器。每步多读 <b>${(extra / 1e9).toFixed(2)} GB</b>，是基座的 <b>${(extra / BASE * 100).toFixed(1)}%</b>；只算读权重，一步从 ${(t0 * 1e3).toFixed(2)} ms 变成 ${(t1 * 1e3).toFixed(2)} ms。`
+        + ` 计算量只多 ${(flops * 100).toFixed(2)}%（每个 token 只过自己那个适配器）。`
+        + `<br>kernel 调用：逐个适配器各算一次，每步 ${L} 层 × 7 个线性层 × 2 次矩阵乘 × ${Math.ceil(D)} 个适配器 ≈ <b>${(L * 7 * 2 * Math.ceil(D)).toLocaleString()}</b> 次；分段矩阵乘（SGMV / BGMV）把一层里所有适配器合成一次，固定 <b>${L * 7 * 2}</b> 次。`
+        + (D > 4 ? ` <span class="ai-faint">batch 里的适配器数受 max_loras 限制，超过的请求要等下一步。</span>` : '');
+    }
+    [nI, sI, bI, rI].forEach((x) => x.addEventListener('input', draw));
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-loraserve]').forEach(init);
+</script>

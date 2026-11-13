@@ -1,5 +1,5 @@
 ---
-// GPU 的存储层级（H100 SXM 的量级，与第 53 讲的代码相同）：寄存器、L1/共享内存、L2、HBM 显存、CPU 内存（经 PCIe）。
+// GPU 的存储层级（H100 SXM 的量级，与第 61 讲的代码相同）：寄存器、L1/共享内存、L2、HBM 显存、CPU 内存（经 PCIe）。
 // 每层画两根对数刻度的条：容量、带宽。读者可以：调数据量，看从每一层读这么多数据要多久、放不放得下；
 // 以及读每个字节期间 Tensor Core 能做多少次运算（算力 ÷ 带宽）。
 interface Props { title?: string; caption?: string }

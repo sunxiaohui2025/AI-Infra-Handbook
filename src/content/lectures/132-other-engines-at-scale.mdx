@@ -1,0 +1,67 @@
+---
+id: 132
+slug: other-engines-at-scale
+title: 其他引擎与规模化部署
+chapter: 5
+part: 17
+problem: TensorRT-LLM、LMDeploy、llama.cpp；大规模 EP 怎么落地
+prereqs: [108, 111, 112, 113, 114, 129, 130, 131]
+level: 主线
+demos: [EngineMatrix]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineMatrix from '../../components/EngineMatrix.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[108, 111, 112, 113, 114, 129, 130, 131]} />
+
+第 129、131 讲读了 vLLM 和 SGLang 的单机结构，第 130 讲读了 vLLM 怎么组成一个多节点的在线服务。这一讲做两件事：一是看看其他几个常见引擎各自的定位，知道什么场景该选什么；二是看第 14 篇讲过的大规模专家并行在真实的引擎里由哪几样东西拼起来（PD 分离和多副本服务在第 130 讲已经读过）。
+
+<Note kind="warn">这一讲关于各引擎特点的描述是定性的，来自各项目的公开文档和本篇读过的源码，不是本站测出来的性能排名。这些项目更新很快，选型时请以官方文档和自己的压测为准（第 133 讲讲怎么压测）。</Note>
+
+## 几个常见的引擎
+
+<EngineMatrix caption="图 132-1　六个引擎的定位。选一个部署场景，强调色的是适合的引擎，下方说明原因。" />
+
+按“它们在第 125 讲那张差距表上各自押注在哪一行”来理解，比记功能列表更有用：
+
+**TensorRT-LLM**（NVIDIA，Apache-2.0）押注在 **kernel**。它最初的思路是把模型“编译”成一个针对具体 GPU、具体 batch 形状优化好的引擎（TensorRT 的老路），后来改成以 PyTorch 为主的后端，调度部分（in-flight batching，即 continuous batching；分页 KV；分块 prefill；投机解码）和 vLLM 大同小异。它的优势在 NVIDIA 自家写的 kernel 和低精度支持：新一代 GPU 上的 FP8、FP4 矩阵乘、融合的注意力和 MoE kernel，往往在这里最先成熟。代价是只支持 NVIDIA 的卡，部署链路也更重。
+
+**LMDeploy**（书生 InternLM 团队）有两个引擎：C++ 写的 TurboMind，和一个纯 PyTorch 的引擎。TurboMind 押注在**量化**：4 位权重量化（AWQ 等）和 KV Cache 量化下的矩阵乘、注意力 kernel 是它的强项。第 123 讲我们亲手验证过，量化要快起来，必须有直接读低位宽权重的 kernel；TurboMind 就是这类 kernel 做得好的例子。PyTorch 引擎更容易扩展到新模型和昇腾等其他硬件。
+
+**llama.cpp**（C/C++）押注在**能在任何地方跑**。它用自己的 GGUF 格式存权重，内置十几种量化格式（如 Q4_K_M 这类 k-quant，按小块分组、每组带缩放），在 CPU（AVX、ARM NEON）、Apple 的 Metal、CUDA、Vulkan 上都有 kernel。它的目标是本地和端侧：单用户、低并发、内存紧，关心的是单请求的延迟和占用，而不是几百个请求的吞吐。Ollama、LM Studio 这类桌面工具都以它为内核。它也有 continuous batching 和多槽位的服务模式，但不是为大规模并发设计的。
+
+**MLC-LLM** 押注在**编译器**：用 TVM 为每种硬件生成 kernel，因此能部署到手机、浏览器（WebGPU）这类别的引擎去不了的地方。
+
+此外，各家国产加速卡厂商通常为 vLLM、SGLang 提供插件或分支（例如昇腾的 vllm-ascend），也有自己的推理服务（例如昇腾的 MindIE）。选型时先看自己的硬件上哪些引擎有官方支持。
+
+<Note kind="column" title="怎么快速判断一个引擎的定位">看三样东西：它的 kernel 是自己写的、调用的库，还是编译器生成的（决定在什么硬件上快）；它的调度器是 Python 还是 C++、有没有分页 KV 和前缀缓存（决定高并发时的吞吐）；它的服务层有没有 OpenAI 兼容接口、流式输出、监控指标（决定上线的成本）。第 117–125 讲的 miniinfer 在这三样上都是最简单的版本，用它当参照系，任何引擎的取舍都能看出来。</Note>
+
+## PD 分离与编排层
+
+第 130 讲已经完整读过：vLLM 的数据并行副本、DP 协调器和负载均衡，以及 PD 分离用的 KV connector（调度器一侧回答“外部有多少 KV、写进哪些块、何时释放”，worker 一侧负责加载和保存；NIXL、Mooncake、LMCache 等是不同的实现）。SGLang 的做法类似：用 `disaggregation_mode` 区分 prefill 和 decode 实例，传输后端可以选 mooncake、nixl 等。
+
+在引擎之上，还需要一层编排：把请求先送到 prefill 实例，再把 decode 交给合适的 decode 实例，按负载伸缩两类实例的数量（第 116 讲的容量规划）。这一层常见的有 NVIDIA 的 Dynamo（后端可以是 vLLM、SGLang 或 TensorRT-LLM）、基于 Kubernetes 的 llm-d（以 vLLM 为后端），以及 SGLang 自己的路由器。第 114 讲的缓存感知路由也在这一层实现。
+
+## 大规模专家并行：几样东西拼起来
+
+第 111 讲讲过 DeepSeek 这类 MoE 模型的大规模部署：注意力部分用数据并行（每张卡处理不同的请求），专家部分用专家并行（每张卡放几个专家），两次 All-to-All 把 token 送到专家所在的卡再送回来（第 108 讲）。落到引擎里，是这几样东西拼起来：
+
+| 要解决的问题 | 做法 | 在源码里 |
+| --- | --- | --- |
+| 注意力用数据并行，各卡 batch 不一样大 | 每一步各卡同步 batch 大小，空闲的卡也要跑一个空 batch 陪着做 All-to-All | vLLM：`--data-parallel-size`、`v1/worker/gpu/dp_utils.py`；SGLang：DP 注意力（`managers/scheduler_components/dp_attn.py`） |
+| All-to-All 要快 | 专门的通信库（如 DeepSeek 开源的 DeepEP），prefill 用高吞吐的模式，decode 用低延迟的模式 | 两个引擎都把它作为 MoE 层的通信后端之一 |
+| 专家负载不均（第 108 讲） | EPLB：统计每个专家的负载，把热门专家复制到多张卡，周期性地重排 | vLLM：`v1/worker/gpu/eplb_utils.py` |
+| 通信时 GPU 空等 | 把一个 batch 切成两个微批，一个在通信时另一个在计算 | vLLM：`v1/worker/ubatching.py`（2 个微批）；SGLang：two-batch overlap（`managers/overlap_utils.py` 等） |
+| prefill 和 decode 互相干扰 | PD 分离，prefill 和 decode 各用不同的并行配置 | 第 130 讲 |
+
+这些单独看都不复杂，难在组合：DP 注意力要求各卡步调一致，微批重叠要求注意力和通信的时间配得上，EPLB 重排专家时不能打断服务，PD 分离要求两边的块大小、KV 布局能对上。这也是为什么大规模 MoE 部署往往有一份专门的、写死了各项参数的“部署方案”，而不是几个开关就能打开。
+
+<Note kind="point">选引擎先看它押注在哪：TensorRT-LLM 押 kernel（NVIDIA 新卡上的低精度），LMDeploy 押量化 kernel，llama.cpp 押“哪里都能跑”，MLC-LLM 押编译器，vLLM 和 SGLang 押通用的高并发服务。规模化部署是在引擎上“接”出来的：PD 分离靠 KV connector 接口（第 130 讲），大规模专家并行靠 DP 注意力、All-to-All 通信库、EPLB 和微批重叠拼起来，再由上层的编排系统调度实例。</Note>
+
+## 回顾
+
+TensorRT-LLM、LMDeploy、llama.cpp、MLC-LLM 和 vLLM、SGLang 的调度骨架大同小异，区别在押注的方向：kernel、量化、硬件覆盖面还是编译器。PD 分离和多副本服务在 vLLM 里怎么实现，第 130 讲已经读过。大规模专家并行则是 DP 注意力、DeepEP 这类通信库、EPLB 和微批重叠的组合。
+
+第五章的最后一讲，回到方法：面对 17 万行的 vLLM，怎么找到入口、怎么定位一个功能、怎么压测，怎么开始贡献代码。下一讲：**怎么读大型引擎的源码**。

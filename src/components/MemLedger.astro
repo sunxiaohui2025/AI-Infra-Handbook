@@ -1,6 +1,6 @@
 ---
 // 显存账本：一张卡上，权重、激活、其他开销、KV Cache 各占多少，能同时放下多少个请求。
-// 公式与第 63 讲的代码一致：可用 = 显存 × 90%；权重 = 参数 × 字节 / 卡数；激活 ≈ 8192 × (4d + 3·d_ff) × 2 / 卡数（prefill 一块的临时空间，粗估）；
+// 公式与第 71 讲的代码一致：可用 = 显存 × 90%；权重 = 参数 × 字节 / 卡数；激活 ≈ 8192 × (4d + 3·d_ff) × 2 / 卡数（prefill 一块的临时空间，粗估）；
 // 其他 ≈ 2 GB（CUDA 上下文、通信缓冲等，粗估）；每 token KV = 2 × 层数 × KV 头数 × 每头维度 × 字节 / 卡数。
 // 读者可以：换模型、精度、显卡、卡数（张量并行）、请求长度和并发数，看占用条和最大并发。
 interface Props { title?: string; caption?: string }
@@ -46,7 +46,7 @@ const { title = '一张卡的显存，都被谁占了', caption } = Astro.props;
       fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = room <= 0
         ? `<b class="c-key">放不下</b>：每张卡的权重 ${g1(W)} 加上激活和其他开销，已经超过可用的 ${g1(total)}，没有地方放 KV Cache。试试更低的精度或更多的卡。`
         : `每个 token 的 KV Cache 在每张卡上占 ${(kvTok / 1024).toFixed(0)} KiB，一个 ${ctx} token 的请求占 ${g1(kvTok * ctx)}。这张卡最多同时放 <b>${maxReq}</b> 个这样的请求。`
-          + (b > maxReq ? `<br><b class="c-key">现在的 ${b} 个请求放不下</b>：推理引擎会让多出来的请求排队，或者把一些请求的 KV Cache 换出（第 70 讲）。` : `<br>现在的 ${b} 个请求用掉了 ${g1(kvNeed)} 的 KV Cache。`);
+          + (b > maxReq ? `<br><b class="c-key">现在的 ${b} 个请求放不下</b>：推理引擎会让多出来的请求排队，或者把一些请求的 KV Cache 换出（第 78 讲）。` : `<br>现在的 ${b} 个请求用掉了 ${g1(kvNeed)} 的 KV Cache。`);
     }
     fig.addEventListener('input', draw);
     fig.addEventListener('change', draw);

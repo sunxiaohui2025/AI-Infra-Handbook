@@ -1,5 +1,5 @@
 ---
-// vLLM V1 统一的 token 预算调度（简化自 v1/core/sched/scheduler.py 的 schedule()，见第 117 讲）：
+// vLLM V1 统一的 token 预算调度（简化自 v1/core/sched/scheduler.py 的 schedule()，见第 129 讲）：
 //   每个请求只有 num_computed_tokens 和 num_tokens_with_spec（提示 + 已生成 + 草稿）两个数；
 //   每一步先按顺序给运行中的请求分 token（每个请求最多 long_prefill_token_threshold 个），再按先来先到放等待中的请求，
 //   直到 max_num_batched_tokens 用完。没有 prefill / decode 阶段：分块 prefill、decode、投机解码都是“补上差额”。

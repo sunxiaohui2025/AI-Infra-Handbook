@@ -1,8 +1,8 @@
 ---
-// 推理速度与成本计算器（与第 64 讲的代码同一套公式）。
+// 推理速度与成本计算器（与第 72 讲的代码同一套公式）。
 // prefill 每秒处理的输入 token = 总算力 / 每 token 计算量 × 效率；decode 一步 = max(计算, 读写) / 效率，吞吐 = 并发 / TPOT；
 // 每百万 token 成本 = 每小时租金 / 每小时处理的 token 数 × 10⁶。prefill 和 decode 分别按“整卡都用来做这件事”计算。
-// 读者可以：换模型、改 GPU 租金和效率、调并发、提示和输出长度。显存是否放得下用第 63 讲的账本粗查。
+// 读者可以：换模型、改 GPU 租金和效率、调并发、提示和输出长度。显存是否放得下用第 71 讲的账本粗查。
 interface Props { title?: string; caption?: string }
 const { title = '每百万 token 要花多少钱', caption } = Astro.props;
 ---
@@ -46,7 +46,7 @@ const { title = '每百万 token 要花多少钱', caption } = Astro.props;
         + `<div><span>每百万输入 token</span><b>$${cin.toFixed(3)}</b><small>租金 $${price.toFixed(1)}/小时 ÷ 每小时 ${(preTps * 3600 / 1e6).toFixed(0)}M 个</small></div>`
         + `<div><span>每百万输出 token</span><b>$${cout.toFixed(3)}</b><small>÷ 每小时 ${(decTps * 3600 / 1e6).toFixed(1)}M 个</small></div>`
         + `<div><span>一个请求</span><b>$${((p * cin + o * cout) / 1e6).toFixed(5)}</b><small>${p} 个输入 + ${o} 个输出</small></div>`;
-      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = (b > maxReq ? `<b class="c-key">注意：按第 63 讲的账本，这样的请求最多只能同时放约 ${maxReq} 个，${b} 个放不下。</b><br>` : '')
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = (b > maxReq ? `<b class="c-key">注意：按第 71 讲的账本，这样的请求最多只能同时放约 ${maxReq} 个，${b} 个放不下。</b><br>` : '')
         + `<span class="ai-faint">输出 token 比输入贵得多：prefill 时同一份权重被很多 token 共用，decode 时每一步都要把权重重读一遍。并发越高，权重的读取被分摊得越多，输出越便宜。</span>`;
     }
     fig.addEventListener('input', draw);

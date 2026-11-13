@@ -1,5 +1,5 @@
 ---
-// KV Cache 分层存储：读回来 vs 重新算（数字与第 101 讲的代码相同，带宽是示意的量级）。
+// KV Cache 分层存储：读回来 vs 重新算（数字与第 113 讲的代码相同，带宽是示意的量级）。
 // 读回时间 = 前缀 token 数 × 每 token KV 字节 ÷ 这一层的带宽；重算时间 = token 数 × 2 × 激活参数 ÷ 算力（只算线性层）。
 // 读者可以：选模型、调前缀长度，看每一层存储的读回时间和重算时间的对比；分界带宽 = 每 token KV ÷ 每 token 重算时间。
 interface Props { title?: string; caption?: string }

@@ -1,13 +1,16 @@
 ---
-// 解码策略：“今天天气真 ___” 的 12 个候选词（示意的 logits，与第 65 讲的代码相同）。
+// 解码策略：“今天天气真 ___” 的 12 个候选词（示意的 logits，与第 73 讲的代码相同）。
 // 依次应用：温度 → Top-k → Top-p → Min-p → 重新归一化。浅色条是原始概率，深色条是最终概率，被去掉的词变灰。
 // 读者可以：调四个参数；点“抽 100 次”看按最终分布随机抽样的结果。
-interface Props { title?: string; caption?: string }
-const { title = '温度、Top-k、Top-p：从分布里怎么选词', caption } = Astro.props;
+// 可选 file：读 minigpt/outputs/ 里存的真实模型打分（{ prompt, words, logits }，第 57 讲），代替示意的 12 个词。
+import { readMini } from './_mini';
+interface Props { title?: string; caption?: string; file?: string }
+const { title = '温度、Top-k、Top-p：从分布里怎么选词', caption, file } = Astro.props;
+const ext = file ? JSON.parse(readMini(file)) : null;
 ---
-<figure class="ai-gt ai-dec" data-decode>
+<figure class="ai-gt ai-dec" data-decode data-w={ext ? JSON.stringify(ext.words) : undefined} data-z={ext ? JSON.stringify(ext.logits) : undefined}>
   <div class="ai-ms-title">{title}</div>
-  <div class="ai-cg-eq">提示：“今天天气真 ___”</div>
+  <div class="ai-cg-eq">提示：“{ext ? ext.prompt : '今天天气真'} ___”</div>
   <div class="ai-dec-sl">
     <label class="ai-tl-lr"><span>温度 T = <b data-v="t"></b></span><input type="range" min="0.1" max="2" step="0.1" value="1" data-s="t" /></label>
     <label class="ai-tl-lr"><span>Top-k = <b data-v="k"></b></span><input type="range" min="0" max="12" step="1" value="0" data-s="k" /></label>
@@ -21,10 +24,12 @@ const { title = '温度、Top-k、Top-p：从分布里怎么选词', caption } =
 </figure>
 
 <script>
-  const W = ['好', '不错', '晴朗', '热', '冷', '糟糕', '适合', '闷', '美', '差', '蓝', '猫'];
-  const Z = [3.0, 2.6, 2.2, 1.8, 1.5, 1.0, 0.8, 0.5, 0.4, 0.0, -1.0, -3.0];
+  const W0 = ['好', '不错', '晴朗', '热', '冷', '糟糕', '适合', '闷', '美', '差', '蓝', '猫'];
+  const Z0 = [3.0, 2.6, 2.2, 1.8, 1.5, 1.0, 0.8, 0.5, 0.4, 0.0, -1.0, -3.0];
   const soft = (z: number[]) => { const m = Math.max(...z), e = z.map((v) => Math.exp(v - m)), s = e.reduce((a, b) => a + b, 0); return e.map((v) => v / s); };
   function init(fig: HTMLElement) {
+    const W: string[] = fig.dataset.w ? JSON.parse(fig.dataset.w) : W0, Z: number[] = fig.dataset.z ? JSON.parse(fig.dataset.z) : Z0;
+    fig.querySelector<HTMLInputElement>('[data-s="k"]')!.max = String(W.length);
     const g = (k: string) => Number(fig.querySelector<HTMLInputElement>(`[data-s="${k}"]`)!.value);
     let counts: number[] | null = null, seed = 1;
     const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };

@@ -1,5 +1,5 @@
 ---
-// 两台 8 卡服务器的互联拓扑（以 DGX H100 一类的设计为原型的示意，数字与第 56 讲的代码相同）。
+// 两台 8 卡服务器的互联拓扑（以 DGX H100 一类的设计为原型的示意，数字与第 64 讲的代码相同）。
 // 机内：8 张 GPU 都接在 NVSwitch 上（每卡单向约 450 GB/s）；每张 GPU 经 PCIe 交换芯片接一张 400 Gb/s 的网卡和 CPU。
 // 机间：网卡接到网络交换机（InfiniBand 或 RoCE，每卡约 50 GB/s）。读者可以：选一条路径，调消息大小，看路径上的瓶颈、延迟和传输时间。
 interface Props { title?: string; caption?: string }
@@ -19,10 +19,10 @@ const { title = '数据从一张卡到另一张卡走哪条路', caption } = Ast
 <script>
   const MS = [8e3, 64e3, 1e6, 16e6, 256e6, 1e9, 16e9];
   const PATHS: Record<string, { segs: [string, number][]; a: number; hl: string[]; note: string }> = {
-    nv: { segs: [['NVLink → NVSwitch → NVLink', 450e9]], a: 3e-6, hl: ['g0', 'nvs0', 'g1'], note: '同一台机器里，8 张卡都接在 NVSwitch 上，任意两张卡之间都是满带宽。张量并行的 All-Reduce 就走这里（第 93 讲）。' },
+    nv: { segs: [['NVLink → NVSwitch → NVLink', 450e9]], a: 3e-6, hl: ['g0', 'nvs0', 'g1'], note: '同一台机器里，8 张卡都接在 NVSwitch 上，任意两张卡之间都是满带宽。张量并行的 All-Reduce 就走这里（第 105 讲）。' },
     pcie: { segs: [['GPU → PCIe 交换芯片', 64e9], ['PCIe 交换芯片 → GPU', 64e9]], a: 5e-6, hl: ['g0', 'pcie0', 'g1'], note: '没有 NVLink 的机器（比如消费级显卡、一些推理卡），卡与卡之间只能走 PCIe，带宽只有 NVLink 的七分之一。' },
     net: { segs: [['GPU → PCIe → 网卡', 64e9], ['网卡 → 交换机 → 网卡（400 Gb/s）', 50e9], ['网卡 → PCIe → GPU', 64e9]], a: 6e-6, hl: ['g0', 'pcie0', 'nic0', 'sw', 'nic1', 'pcie1', 'g8'], note: '跨机时，数据经 PCIe 到网卡，经网络交换机到对方的网卡，再经 PCIe 进对方的 GPU。用 GPUDirect RDMA 时网卡直接读写 GPU 显存，不经过 CPU 内存中转。瓶颈是网卡的 50 GB/s。' },
-    cpu: { segs: [['GPU → PCIe → CPU 内存', 64e9]], a: 5e-6, hl: ['g0', 'pcie0', 'cpu0'], note: 'KV Cache 卸载到 CPU 内存（第 101 讲）、加载模型权重，都走这条路。' },
+    cpu: { segs: [['GPU → PCIe → CPU 内存', 64e9]], a: 5e-6, hl: ['g0', 'pcie0', 'cpu0'], note: 'KV Cache 卸载到 CPU 内存（第 113 讲）、加载模型权重，都走这条路。' },
   };
   function init(fig: HTMLElement) {
     let p = 'nv';

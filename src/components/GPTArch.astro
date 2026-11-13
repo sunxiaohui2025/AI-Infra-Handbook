@@ -1,0 +1,73 @@
+---
+// minigpt 的结构图（第 7 篇各讲共用）：同一张图，按版本显示已有的模块，本版新增或改动的模块用强调色。
+// 读者可以：切换版本，看仓库一步步长大；点模块看它在哪个文件、做什么、在哪一讲写。
+// 用法：<GPTArch ver="g2" />（ver 取 g0–g7）
+interface Props { ver?: string; title?: string; caption?: string }
+const { ver = 'g7', title = 'minigpt 的结构', caption } = Astro.props;
+const VERS = ['g0', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7'];
+---
+<figure class="ai-gt ai-ea" data-gptarch data-ver={ver}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="v"><span class="ai-tl-k">版本：</span>{VERS.map((v) => <button data-v={v} aria-pressed={ver === v ? 'true' : 'false'}>{v}</button>)}</div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const ORDER = ['g0', 'g1', 'g2', 'g3', 'g4', 'g5', 'g6', 'g7'];
+  type M = { id: string; x: number; y: number; w: number; h: number; since: string; changed?: string[]; label: (v: string) => string; info: (v: string) => string; group?: boolean };
+  const at = (v: string, s: string) => ORDER.indexOf(v) >= ORDER.indexOf(s);
+  const MODS: M[] = [
+    { id: 'data', x: 20, y: 20, w: 200, h: 316, since: 'g0', group: true, label: () => '数据', info: () => '<b>数据</b>：语料来自这门课自己的讲义，分词、切样本都在模型外面做好，模型只看到一批批的编号。' },
+    { id: 'corpus', x: 38, y: 54, w: 164, h: 40, since: 'g0', label: () => 'corpus.txt：讲义正文', info: () => '<b>语料</b>（data/prepare.py → data/corpus.txt）：121 讲的正文，去掉代码、公式、组件，约 50 万字，讲与讲之间用 &lt;|endoftext|&gt; 隔开。最后 10% 留作验证集（第 52 讲）。' },
+    { id: 'tok', x: 38, y: 116, w: 164, h: 44, since: 'g0', label: () => 'tokenizer.py：BPE', info: () => '<b>分词器</b>（tokenizer.py）：从字符出发做 BPE，生僻字退回 UTF-8 字节；词表 4096 个，平均一个 token 约 1.5 个字（第 52 讲）。' },
+    { id: 'loader', x: 38, y: 182, w: 164, h: 44, since: 'g1', label: () => 'data.py：滑动窗口', info: () => '<b>数据加载器</b>（data.py）：在长长的编号序列上开 T + 1 长的窗口，前 T 个是输入 x，后 T 个是目标 y；步长决定窗口重叠多少（第 53 讲）。' },
+    { id: 'sft_data', x: 38, y: 270, w: 164, h: 44, since: 'g7', label: () => 'sft.json：指令数据', info: () => '<b>指令数据</b>（data/make_sft.py → data/sft.json）：用课程目录的“技术点”“解决什么问题”两栏出题，200 条训练、24 条测试（第 59 讲）。' },
+    { id: 'model', x: 248, y: 20, w: 370, h: 316, since: 'g1', changed: ['g3'], group: true, label: (v) => at(v, 'g3') ? 'model.py · GPT' : '模型（还只有嵌入）', info: () => '<b>模型</b>（model.py）：嵌入 → L 个 Transformer Block → LayerNorm → 输出层，结构和 GPT-2 相同。我们训练用 d = 256、4 个头、4 层，约 530 万个参数（第 55 讲）。' },
+    { id: 'emb', x: 266, y: 54, w: 334, h: 34, since: 'g1', label: () => 'token 嵌入 + 位置嵌入 → [B, T, d]', info: () => '<b>嵌入</b>：两张表，按编号查 token 嵌入，按位置查位置嵌入，相加。同一个字在不同位置得到不同的向量（第 53 讲）。' },
+    { id: 'n1', x: 278, y: 120, w: 92, h: 34, since: 'g3', label: () => 'LayerNorm', info: () => '<b>LayerNorm</b>：每个 token 的 d 个数减均值、除标准差，再乘 γ 加 β。放在注意力和 FFN 之前（Pre-Norm）（第 55 讲）。' },
+    { id: 'attn', x: 382, y: 120, w: 206, h: 34, since: 'g2', label: () => 'attention.py：因果多头注意力', info: () => '<b>因果多头注意力</b>（attention.py）：一次矩阵乘算出所有头的 Q、K、V，拆成 H 个头，打分、盖掩码、softmax、加权求和，拼回 d 维再过 out_proj（第 54 讲）。' },
+    { id: 'n2', x: 278, y: 186, w: 92, h: 34, since: 'g3', label: () => 'LayerNorm', info: () => '<b>LayerNorm</b>：第二个归一化，在 FFN 之前。' },
+    { id: 'ff', x: 382, y: 186, w: 206, h: 34, since: 'g3', label: () => 'FFN：d → 4d → GELU → d', info: () => '<b>前馈网络</b>：每个位置各自升到 4d 维、过 GELU、降回 d 维。参数是注意力的两倍（第 55 讲）。' },
+    { id: 'head', x: 266, y: 278, w: 334, h: 40, since: 'g3', label: () => 'LayerNorm + 输出层 → [B, T, V] 的打分', info: () => '<b>输出层</b>：最后一次 LayerNorm，再乘 d × V 的矩阵，每个位置得到对 4096 个 token 的打分（logits）（第 55 讲）。' },
+    { id: 'tools', x: 646, y: 20, w: 234, h: 316, since: 'g3', group: true, label: () => '用模型', info: () => '<b>用模型</b>：训练、生成、存档、换权重、微调，都只调用 model(idx) 这一个接口。' },
+    { id: 'gen', x: 662, y: 54, w: 202, h: 40, since: 'g3', changed: ['g5'], label: (v) => at(v, 'g5') ? 'generate.py：温度 / Top-k / Top-p' : 'generate.py：贪心生成', info: (v) => at(v, 'g5') ? '<b>生成</b>（generate.py）：取最后一个位置的 logits，除以温度，按 Top-k、Top-p 去掉尾部，按概率抽一个；遇到结束符就停（第 57 讲）。' : '<b>生成</b>（generate.py）：每步把整段序列送进模型，取最后一个位置打分最高的 token 接在后面（第 55 讲）。' },
+    { id: 'train', x: 662, y: 110, w: 202, h: 40, since: 'g4', changed: ['g5'], label: (v) => at(v, 'g5') ? 'train.py：+ 存最好的、续训' : 'train.py：预训练循环', info: (v) => '<b>训练</b>（train.py）：交叉熵 loss → 反向传播 → 梯度裁剪 → AdamW 更新；学习率先预热再余弦下降；每 100 步估一次训练、验证 loss（第 56 讲）。' + (at(v, 'g5') ? ' g5 起验证 loss 创新低时存档，可以从存档续训（第 57 讲）。' : '') },
+    { id: 'ckpt', x: 662, y: 166, w: 202, h: 40, since: 'g5', label: () => 'checkpoint.py：存档 / 读档', info: () => '<b>存档</b>（checkpoint.py）：配置 + 参数 + 优化器状态。只生成用前两样；续训必须带上优化器状态（第 57 讲）。' },
+    { id: 'gpt2', x: 662, y: 222, w: 202, h: 40, since: 'g6', label: () => 'gpt2.py：装 GPT-2 权重', info: () => '<b>GPT-2 权重</b>（gpt2.py）：改名字、拆开 c_attn、转置 Conv1D，把 HuggingFace 的 GPT-2 装进同一个 GPT 类；logits 和 transformers 一致（第 58 讲）。' },
+    { id: 'sft', x: 662, y: 278, w: 202, h: 40, since: 'g7', label: () => 'sft.py：指令微调', info: () => '<b>指令微调</b>（sft.py）：指令和回答拼成一条，指令部分的目标设成 −100 不算 loss，在预训练好的模型上接着训练（第 59 讲）。' },
+  ];
+  const EDGES: [string, number, number, number, number][] = [
+    ['g0', 120, 94, 120, 116], ['g1', 120, 160, 120, 182], ['g1', 202, 204, 266, 71],
+    ['g3', 433, 88, 433, 120], ['g3', 433, 220, 433, 278], ['g7', 202, 292, 662, 298],
+  ];
+  function init(fig: HTMLElement) {
+    let v = fig.dataset.ver || 'g7', pick = 'model';
+    function draw() {
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 900 350"><defs><marker id="ga-ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" class="ai-ea-arh"/></marker></defs>';
+      for (const [since, x1, y1, x2, y2] of EDGES) if (at(v, since)) s += `<line class="ai-ea-edge" x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" marker-end="url(#ga-ar)"/>`;
+      if (at(v, 'g2')) s += `<rect x="266" y="104" width="334" height="128" rx="6" class="ai-st-grid" fill="none" stroke-dasharray="4 3"/><text class="ai-al-gl" x="594" y="250" text-anchor="end">${at(v, 'g3') ? '× L 层，每个子层外面一条残差：x + 子层(LN(x))' : 'g3 才把注意力装进 Block'}</text>`;
+      for (const m of MODS) {
+        const has = at(v, m.since), isNew = has && (m.since === v || (m.changed || []).includes(v));
+        if (!has) { s += `<g class="ai-ea-m is-future"><rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="6"/><text x="${m.x + m.w / 2}" y="${m.y + (m.group ? 18 : m.h / 2 + 4)}" text-anchor="middle">${m.since} 加入</text></g>`; continue; }
+        const cls = `ai-ea-m${m.group ? ' is-group' : ''}${isNew ? ' is-new' : ''}${pick === m.id ? ' is-pick' : ''}`;
+        const ty = m.group ? m.y + 18 : m.y + m.h / 2 + 4, tx = m.group ? m.x + 12 : m.x + m.w / 2, anchor = m.group ? 'start' : 'middle';
+        s += `<g class="${cls}" data-m="${m.id}"><rect x="${m.x}" y="${m.y}" width="${m.w}" height="${m.h}" rx="6"/><text x="${tx}" y="${ty}" text-anchor="${anchor}">${m.label(v)}</text></g>`;
+      }
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const m = MODS.find((x) => x.id === pick)!;
+      const fresh = MODS.filter((x) => !x.group && at(v, x.since) && (x.since === v || (x.changed || []).includes(v))).map((x) => x.label(v).split(/[：·]/)[0]);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = (at(v, m.since) ? m.info(v) : `<b>${m.label(v)}</b>：${m.since} 才加入。`)
+        + `<br><span class="ai-faint">${v} 新增或改动（强调色）：${fresh.join('、') || '无'}。点模块看说明。</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bt = t.closest<HTMLElement>('[data-group] [data-v]');
+      if (bt) { bt.closest('[data-group]')!.querySelectorAll('[data-v]').forEach((x) => x.setAttribute('aria-pressed', x === bt ? 'true' : 'false')); v = bt.dataset.v!; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-m]'); if (g) { pick = g.dataset.m!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-gptarch]').forEach(init);
+</script>

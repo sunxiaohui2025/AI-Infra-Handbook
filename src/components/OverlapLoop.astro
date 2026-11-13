@@ -1,5 +1,5 @@
 ---
-// 调度和计算重叠（SGLang 的 event_loop_overlap、vLLM 的异步调度，见第 117、119 讲）。
+// 调度和计算重叠（SGLang 的 event_loop_overlap、vLLM 的异步调度，见第 129、131 讲）。
 //   串行：每一步 = CPU 调度并准备输入 C + GPU 计算 G + CPU 处理结果 P，GPU 在 C、P 期间空着。
 //   重叠：发射第 i 步之后不等它算完，立刻处理第 i−1 步的结果、调度第 i+1 步；稳态下一步 = max(G, C + P)。
 //   代价：调度第 i+1 步时还不知道第 i 步采样出的 token，只能先放占位（vLLM 的 output placeholders），所以多跑一步、晚一步发现请求已经结束。

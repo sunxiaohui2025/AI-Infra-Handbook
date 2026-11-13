@@ -1,0 +1,20 @@
+读入 checkpoints/gpt_best.pt：第 900 步的存档，验证 loss 4.876
+
+“生成下一个 token 时，”之后，概率最高的 12 个 token：
+  decode:0.032  所以:0.027  所有请求:0.018  再:0.018  TPOT:0.016  这:0.015  第:0.014  注意力:0.014  每步:0.013  每个:0.012  prefill:0.011  模型:0.010
+  这 12 个加起来 0.201，剩下 4084 个 token 分掉 0.799
+  温度 0.5：最高的概率 0.164，凑够 90% 要 60 个 token
+  温度 1.0：最高的概率 0.032，凑够 90% 要 573 个 token
+  温度 1.5：最高的概率 0.011，凑够 90% 要 1270 个 token
+  Top-k = 10：留下 10 个候选
+  Top-p = 0.9：留下 573 个候选
+
+从“KV Cache 的大小”开始各生成 60 个 token（随机的几种都用种子 0）：
+【贪心】KV Cache 的大小。 <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> <|endoftext|> 我们把 KV Cache Cache Cache Cache
+【温度 0.7 + Top-k 40】KV Cache 的大小，看清楚： 第 1 讲说过 讲清楚：Llama-3-8B 的 个 token。 一张 8 token 在第 2000 亿 个 token，2N 亿，每个 token 10 token
+【温度 1.0】KV Cache 的大小，看清楚：不必算一步 30 GiB、按应用，一个 400.056 个请求、平均 2.4 GbE 左右、2.3 ms、decode、2N 里，延迟前面每次差；D decode
+【温度 1.5】KV Cache 的大小比较朴素面：不必单字（Sling 返回多段还按上下文便宜万卡的 正是每一块两步、下面的adDecoding 发给专家大模型的参数和计算累加写缓存算出来的几百倍堆相加，存的加权等软烦里常只实验每次快？。Mech
+【温度 1.0 + Top-p 0.9】KV Cache 的大小，看清楚：为什么单字（30 讲），还需要一个用户看到第一个 KV Cache Cache。下面的平均参数都是 头 Cache 的空间，耗时也随长度线性增长。MoE 的 等分块 All-to-Reduce（All 份）
+
+只存参数：20.6 MiB；参数 + 优化器状态：61.2 MiB（AdamW 给每个参数存两份滑动平均）
+重新读一遍存档，同一句话的 logits 完全一样：True

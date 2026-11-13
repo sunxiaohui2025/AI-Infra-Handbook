@@ -9,7 +9,10 @@ import { codeToHtml } from 'shiki';
 // 本地开发时若 miniinfer/ 里的代码或 outputs/ 有更新，把对应文件同步到 ./miniinfer/ 即可。
 const __here = path.dirname(fileURLToPath(import.meta.url));
 export const MINI = path.resolve(__here, '..', '..', 'miniinfer');
-export const readMini = (rel: string) => fs.readFileSync(path.join(MINI, rel), 'utf8').replace(/\s+$/, '');
+// 第 7 篇的 minigpt/ 同样镜像在 site/minigpt/；文章里写 file="minigpt/g3/model.py"。
+export const GPT = path.resolve(__here, '..', '..', 'minigpt');
+export const resolveRel = (rel: string) => (rel.startsWith('minigpt/') ? path.join(GPT, rel.slice(8)) : path.join(MINI, rel));
+export const readMini = (rel: string) => fs.readFileSync(resolveRel(rel), 'utf8').replace(/\s+$/, '');
 
 /** 用 Shiki 高亮，每一行的 <span class="line"> 带上 data-line（从 first 开始编号）。 */
 export async function highlight(code: string, first = 1, lang = 'python') {

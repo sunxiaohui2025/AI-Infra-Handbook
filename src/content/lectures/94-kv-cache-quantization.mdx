@@ -1,0 +1,140 @@
+---
+id: 94
+slug: kv-cache-quantization
+title: KV Cache 量化
+chapter: 3
+part: 12
+problem: 怎么压缩缓存来提升并发
+prereqs: [69, 71, 85, 90, 93]
+level: 主线
+minutes: 30
+demos: [KVQuantCalc]
+video: ""
+formula: 'KV 每个 token 的字节数减半 → 池子能放的 token 翻倍 → 并发翻倍；满载 decode 主要读 KV，TPOT 几乎不变，吞吐翻倍'
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import KVQuantCalc from '../../components/KVQuantCalc.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[69, 71, 85, 90, 93]} />
+
+第 71 讲的显存账本说：一张 80 GB 的卡跑 Llama-3-8B，权重占 16 GB，留给 KV Cache 的约 49 GiB，能放约 40 万个 token。每个 token 的 KV Cache 是 128 KiB（BF16）。如果每个请求有 4096 个 token，最多只能同时服务 98 个请求。
+
+前几讲压缩了权重。可在并发高、上下文长的场景里，KV Cache 往往比权重还大：98 个请求的 KV 就有 49 GiB，是权重的三倍。而且 decode 的每一步都要把所有请求的 KV 读一遍（第 85 讲）。这一讲把 KV Cache 也量化，看它能换来多少并发和吞吐，又要注意什么。
+
+## 字节减半，并发翻倍
+
+KV Cache 的大小 = token 数 × 每个 token 的字节数。池子的大小固定，每个 token 的字节数减半，能放的 token 就翻倍：
+
+- **BF16**：每个 token 128 KiB，池子放 403,865 个 token，4096 token 的请求 98 个。
+- **FP8**：64 KiB，807,731 个 token，197 个请求。
+- **INT4**（每 128 个数配一个 FP16 的 scale）：33 KiB，1,566,508 个 token，382 个请求。
+
+并发多了，速度会不会变慢？代码估算了满载时 decode 一步的耗时：BF16 98 个请求时约 20.5 ms，FP8 197 个请求时约 20.6 ms，几乎一样。原因是满载时 decode 一步的时间主要花在读 KV 上（98 × 4096 个 token 的 KV 有 49 GiB，比权重的 16 GB 大得多）。KV 的字节减半，同样的时间能读两倍的请求，所以 **TPOT 几乎不变，吞吐翻倍**：从 4781 token/s 到 9573 token/s。INT4 时吞吐又翻一倍，约 18,564 token/s。
+
+注意力 kernel 读进片上之后，先把 FP8 或 INT4 的 KV 反量化成 BF16 再计算（第 85 讲），从显存读的字节少了，计算方式不变。
+
+下面的计算器可以调请求长度，看每种精度能放多少个请求，以及满载时的 TPOT 和吞吐。
+
+<KVQuantCalc caption="图 94-1　同样 49.3 GiB 的 KV 池子，不同精度能放的请求数（Llama-3-8B）。满载时 decode 主要在读 KV，所以 KV 越小，并发和吞吐越高，TPOT 几乎不变。" />
+
+<Note kind="point">KV Cache 量化让每个 token 的 KV 字节数变小，同样的显存能放更多 token、服务更多请求。满载的 decode 主要花在读 KV 上，所以字节减半时 TPOT 几乎不变、吞吐翻倍。它对长上下文、高并发的场景收益最大。</Note>
+
+## 精度：K 比 V 难
+
+KV 量化的误差会进入注意力：K 的误差让打分变了，softmax 之后的权重跟着变；V 的误差直接进入加权求和。研究者发现，K 和 V 的数值分布很不一样：
+
+- **K 有离群通道。**和第 92 讲的激活类似，K 向量的少数几维（固定的那几个通道）在几乎所有 token 上都特别大。一般认为这和 RoPE（第 37 讲）转得慢的那些维度有关。
+- **V 比较均匀**，没有明显的离群通道。
+
+这就决定了 scale 该怎么分组。代码造了一个类似的例子：512 个 token、每个头 128 维，K 的两个通道大 15 倍，V 正常，比较注意力输出的误差：
+
+- **FP8**（K、V 各一个整体的 scale）：3.87%。
+- **INT8**，每个 token 一个 scale：5.00%。
+- **INT4**，K、V 都每个 token 一个 scale：**64.71%**。K 的每个 token 向量里都有那两个大通道，scale 被它们撑开，其余 126 维几乎都被量化成 0。
+- **INT4**，K 每个**通道**一个 scale、V 每个 token 一个：**18.84%**。离群通道单独一个 scale，其余通道的精度保住了。
+
+这个“K 按通道、V 按 token”的分法来自 KIVI 等论文。和第 92 讲不同，KV Cache 不需要做整数矩阵乘法，读进片上以后先反量化，所以 scale 沿哪个方向分都可以。
+
+不过 18.84% 的误差仍然不小，4 位以下的 KV 量化还需要更多技巧：比如最近的一小段 token 保持高精度（它们往往最受关注，而且按通道量化需要攒够一组 token 才能算 scale），或者对 K 先做旋转（第 92 讲）把离群值摊平。
+
+## 到了大模型里
+
+**FP8 KV Cache 已经是常规选项。**vLLM、SGLang、TensorRT-LLM 都支持把 KV Cache 存成 FP8（vLLM 的参数 `kv_cache_dtype="fp8"`），scale 可以是每层一个，也可以从校准数据里算出。对大多数模型，FP8 KV 的效果损失很小，是提高并发最省事的办法。
+
+**INT4、更低的位宽还在发展中。**它们的压缩比更高，但需要细致的分组和专门的注意力 kernel，效果也更依赖模型，部署前要认真评测，尤其是长上下文的任务（第 51 讲）。
+
+**和其他省 KV 的办法叠加。**GQA、MLA（第 39、40 讲）从模型结构上减少 KV 的数量；分页和前缀缓存（第 75、76 讲）减少浪费和重复；KV 量化减少每个数的位数。它们可以叠加使用。另外，KV 也可以搬到 CPU 内存或其他机器上（第 14 篇），量化后搬运的字节也少了。
+
+**量化 KV 和量化权重是独立的。**可以只量化 KV，权重仍用 BF16；也可以 FP8 权重配 FP8 KV。KV 量化主要提高并发和长上下文的能力，权重量化主要省下权重的显存和读取时间。
+
+## 用代码复现
+
+下面的代码先按第 71 讲的池子算出不同精度能放多少 token 和请求，以及满载时 decode 一步的时间和吞吐；再造一个 K 有离群通道的例子，比较几种量化方式的注意力输出误差。
+
+```python
+import numpy as np
+
+# 1. 同样 49.3 GiB 的 KV Cache 池子（第 71 讲），不同精度能放多少个 token、多少个 4096 token 的请求
+POOL = 49.3 * 2**30
+ELEMS = 2 * 32 * 8 * 128                                  # Llama-3-8B 每个 token 的 K、V 元素数（65536 个）
+N, NE, L, d, F, BW = 8.03e9, 128256 * 4096, 32, 4096, 989e12, 3.35e12
+print("精度 | 每个 token | 池子能放的 token | 4096 token 的请求 | 满载时 TPOT | 吞吐")
+for name, bits in [("BF16", 16), ("FP8", 8), ("INT4（每 128 个一个 FP16 scale）", 4 + 16 / 128)]:
+    per = ELEMS * bits / 8
+    toks = int(POOL // per); b = toks // 4096
+    t = max((2 * (N - NE) + 4 * L * d * 4096) * b / F, (N * 2 + per * 4096 * b) / BW)   # decode 一步（上下文都按 4096 算）
+    print(f"{name} | {per / 1024:6.1f} KiB | {toks:9,d} | {b:4d} | {t * 1e3:5.1f} ms | {b / t:7,.0f} token/s")
+
+# 2. 精度：K 里有几个“离群通道”（固定的几维总是很大），V 没有
+rng = np.random.default_rng(0)
+T, dh = 512, 128
+K = rng.standard_normal((T, dh)); K[:, [7, 70]] *= 15
+V = rng.standard_normal((T, dh))
+Q = rng.standard_normal((16, dh)); Q[:, [7, 70]] *= 0.2
+
+def attn(K, V):
+    s = Q @ K.T / np.sqrt(dh); p = np.exp(s - s.max(1, keepdims=True)); p /= p.sum(1, keepdims=True)
+    return p @ V
+def q(A, axis, qm=7):                                     # 对称量化（默认 INT4），axis=1：每个 token 一个 scale；axis=0：每个通道一个 scale
+    s = np.abs(A).max(axis, keepdims=True) / qm
+    return np.clip(np.round(A / s), -qm, qm) * s
+def fp8(A):                                               # 粗略模拟 E4M3：保留 3 位尾数（整体一个 scale 把最大值放到 448）
+    s = np.abs(A).max() / 448; x = A / s
+    e = np.floor(np.log2(np.maximum(np.abs(x), 2.0**-6)))
+    return np.round(x / 2**e * 8) / 8 * 2**e * s
+
+O = attn(K, V)
+rel = lambda o: np.linalg.norm(o - O) / np.linalg.norm(O)
+print(f"FP8（K、V 各一个 scale）：注意力输出误差 {rel(attn(fp8(K), fp8(V))):.2%}")
+print(f"INT8，K、V 都每个 token 一个 scale：{rel(attn(q(K, 1, 127), q(V, 1, 127))):.2%}")
+print(f"INT4，K、V 都每个 token 一个 scale：{rel(attn(q(K, 1), q(V, 1))):.2%}")
+print(f"INT4，K 每个通道一个 scale、V 每个 token 一个 scale：{rel(attn(q(K, 0), q(V, 1))):.2%}")
+```
+
+输出：
+
+```text
+精度 | 每个 token | 池子能放的 token | 4096 token 的请求 | 满载时 TPOT | 吞吐
+BF16 |  128.0 KiB |   403,865 |   98 |  20.5 ms |   4,781 token/s
+FP8 |   64.0 KiB |   807,731 |  197 |  20.6 ms |   9,573 token/s
+INT4（每 128 个一个 FP16 scale） |   33.0 KiB | 1,566,508 |  382 |  20.6 ms |  18,564 token/s
+FP8（K、V 各一个 scale）：注意力输出误差 3.87%
+INT8，K、V 都每个 token 一个 scale：5.00%
+INT4，K、V 都每个 token 一个 scale：64.71%
+INT4，K 每个通道一个 scale、V 每个 token 一个 scale：18.84%
+```
+
+表格是池子的容量和满载时的速度：FP8 的并发和吞吐是 BF16 的两倍，TPOT 几乎不变。下面四行是注意力输出的误差：FP8 3.87%，INT8 5.00%；INT4 时 K 按 token 量化误差高达 64.71%，改成按通道量化降到 18.84%。
+
+## 容易混淆的地方
+
+1. **KV 量化不让单个请求变快多少。**并发低时，decode 主要在读权重，KV 小一半对 TPOT 影响不大；它的收益在于同样的显存能服务更多请求、支持更长的上下文。
+2. **K 和 V 应该区别对待。**K 有离群通道，适合按通道分组；V 适合按 token 分组。用同一种方式处理，低位宽时会损失很多。
+3. **FP8 的 KV 不需要 FP8 的计算单元。**注意力读进 FP8 的 KV 后反量化成 BF16 计算，所以在不支持 FP8 计算的 GPU 上，FP8 KV Cache 同样能省显存和带宽。
+
+## 回顾
+
+高并发、长上下文时，KV Cache 往往比权重还大，而且 decode 每一步都要读一遍。把 KV 存成 FP8，每个 token 从 128 KiB 变成 64 KiB，49.3 GiB 的池子能放的 4096 token 请求从 98 个变成 197 个；满载时 decode 主要在读 KV，TPOT 几乎不变（20.5 对 20.6 ms），吞吐从 4781 翻倍到 9573 token/s。精度上，K 有固定的离群通道，V 比较均匀：INT4 时 K 按 token 量化误差高达 64.71%，按通道量化降到 18.84%。FP8 KV 已经是常规选项，更低的位宽还需要更多技巧。
+
+量化让每个 token 的 KV 小了一半。可上下文一长，减半也不够：128K 的上下文，FP8 的 KV 也有 8 GiB。生成下一个 token 时，真的需要前面每一个 token 的 K、V 吗？下一讲：**KV Cache 压缩与驱逐**。

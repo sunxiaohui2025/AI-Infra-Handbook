@@ -1,0 +1,58 @@
+---
+// 训练曲线（第 7 篇）：读 minigpt/outputs/ 里训练脚本记下的日志（每 eval_every 步一次训练、验证 loss），画成折线。
+// 读者可以：拖滑块看某一步的两条 loss 和差距；多份日志时切换看哪一次训练。
+// 用法：<TrainCurve runs={[{ file: 'minigpt/outputs/train_log_gpt.json', label: '3000 步' }]} />
+import { readMini } from './_mini';
+interface Run { file: string; label: string }
+interface Props { runs: Run[]; title?: string; caption?: string; ymin?: number; ymax?: number }
+const { runs, title = '训练集和验证集上的 loss', caption, ymin, ymax } = Astro.props;
+const data = runs.map((r) => ({ label: r.label, log: JSON.parse(readMini(r.file)) }));
+---
+<figure class="ai-gt ai-tc" data-traincurve data-runs={JSON.stringify(data)} data-ymin={ymin ?? ''} data-ymax={ymax ?? ''}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    {data.length > 1 && <span class="ai-gt-pre ai-pc-sets" data-group="r">{data.map((d, i) => <button data-r={i} aria-pressed={i === 0 ? 'true' : 'false'}>{d.label}</button>)}</span>}
+    <label class="ai-tl-k">看第 <input type="range" min="0" value="0" data-s /> 个记录点</label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Row = { step: number; tokens: number; train: number; val: number; lr: number };
+  function init(fig: HTMLElement) {
+    const runs: { label: string; log: Row[] }[] = JSON.parse(fig.dataset.runs!);
+    const sI = fig.querySelector<HTMLInputElement>('[data-s]')!;
+    let r = 0;
+    const all = runs.flatMap((x) => x.log.flatMap((p) => [p.train, p.val]));
+    const lo = fig.dataset.ymin ? +fig.dataset.ymin : Math.floor(Math.min(...all) * 2) / 2;
+    const hi = fig.dataset.ymax ? +fig.dataset.ymax : Math.ceil(Math.max(...all));
+    function setRun(i: number) { r = i; sI.max = String(runs[r].log.length - 1); if (+sI.value > +sI.max) sI.value = sI.max; }
+    function draw() {
+      const log = runs[r].log, k = +sI.value, p = log[k];
+      const W = 880, H = 220, x0 = 46, y0 = 14, smax = log[log.length - 1].step;
+      const X = (st: number) => x0 + st / smax * (W - x0), Y = (v: number) => y0 + (hi - Math.min(hi, v)) / (hi - lo) * H;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 900 ${H + 50}">`;
+      for (let v = Math.ceil(lo); v <= hi; v++) s += `<line x1="${x0}" y1="${Y(v)}" x2="${W}" y2="${Y(v)}" class="ai-st-grid"/><text class="ai-al-gl" x="${x0 - 6}" y="${Y(v) + 4}" text-anchor="end">${v}</text>`;
+      const line = (key: 'train' | 'val', cls: string) => `<polyline points="${log.map((q) => `${X(q.step).toFixed(1)},${Y(q[key]).toFixed(1)}`).join(' ')}" fill="none" class="${cls}" stroke-width="2"/>`;
+      s += line('train', 'ai-tc-train') + line('val', 'ai-tc-val');
+      const best = log.reduce((a, b) => (b.val < a.val ? b : a));
+      s += `<circle cx="${X(best.step)}" cy="${Y(best.val)}" r="4" class="ai-tc-best"/><text class="ai-al-gl" x="${X(best.step)}" y="${Y(best.val) + 18}" text-anchor="middle">验证最低</text>`;
+      s += `<line x1="${X(p.step)}" y1="${y0}" x2="${X(p.step)}" y2="${y0 + H}" class="ai-tc-cur"/>`;
+      s += `<text class="ai-al-gl" x="${x0}" y="${H + 34}">0</text><text class="ai-al-gl" x="${W}" y="${H + 34}" text-anchor="end">${smax} 步</text>`;
+      s += `<text class="ai-al-gl ai-tc-train-t" x="${W - 150}" y="${y0 + 14}">— 训练集</text><text class="ai-al-gl ai-tc-val-t" x="${W - 70}" y="${y0 + 14}">— 验证集</text></svg>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s;
+      const ppl = (v: number) => Math.exp(v).toFixed(0);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `第 <b>${p.step}</b> 步（已看 ${(p.tokens / 1e6).toFixed(2)} M 个 token，学习率 ${p.lr.toExponential(1)}）：训练 loss <b>${p.train.toFixed(3)}</b>（困惑度 ${ppl(p.train)}），验证 loss <b>${p.val.toFixed(3)}</b>（困惑度 ${ppl(p.val)}），差 ${(p.val - p.train).toFixed(3)}。`
+        + ` 验证 loss 最低是第 ${best.step} 步的 ${best.val.toFixed(3)}` + (p.step > best.step ? '，之后训练 loss 还在降、验证 loss 却回升：模型开始背训练集了。' : '。');
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as Element).closest<HTMLElement>('[data-r]'); if (!b) return;
+      fig.querySelectorAll('[data-r]').forEach((x) => x.setAttribute('aria-pressed', String(x === b))); setRun(+b.dataset.r!); draw();
+    });
+    sI.addEventListener('input', draw);
+    setRun(0); sI.value = sI.max; draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-traincurve]').forEach(init);
+</script>

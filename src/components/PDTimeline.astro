@@ -2,7 +2,7 @@
 // 一个请求的时间线：先 prefill（一次处理整段提示），再一步步 decode（每步一个 token）。
 // 模型：Llama-3-8B（BF16），硬件：一张 H100（989 TFLOPS、3.35 TB/s）。每一步耗时 = max(计算时间, 读写时间)，
 // 计算 = 2 × 非嵌入参数 × 新 token 数 + 4 × 层数 × d × 上下文 × 新 token 数；读写 = 权重 16 GB + KV Cache（每 token 128 KiB）。
-// 与第 60 讲的代码同一套公式。都是理想值（假设硬件跑满），实际会慢一些。
+// 与第 68 讲的代码同一套公式。都是理想值（假设硬件跑满），实际会慢一些。
 interface Props { title?: string; caption?: string }
 const { title = '一个请求的时间线：prefill 一次，decode 一步一步', caption } = Astro.props;
 ---

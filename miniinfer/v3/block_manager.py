@@ -40,7 +40,7 @@ class SeqKV:
 
 
 class BlockManager:
-    """管块的分配和回收。前缀缓存（第 110 讲）也在这里：内容相同的整块可以被多个请求共用。"""
+    """管块的分配和回收。前缀缓存（第 122 讲）也在这里：内容相同的整块可以被多个请求共用。"""
 
     def __init__(self, num_blocks, block_size, prefix_cache=False):
         self.block_size = block_size

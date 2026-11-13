@@ -999,19 +999,19 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-ph-blk.is-miss { background: var(--key-soft); border-color: var(--key); }
 .ai-ph-blk.is-tail { background: var(--surface-sunk); border-color: var(--line-strong); color: var(--ink-3); }
 
-/* ChunkTimeline（第 69 讲） */
+/* ChunkTimeline（第 77 讲） */
 .ai-ck-dec { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 0.6; }
 .ai-ck-pre { fill: var(--key-soft); stroke: var(--key); stroke-width: 0.6; }
 .ai-ck-tick { stroke: var(--ink-2); stroke-width: 1; }
 .ai-ck-ft { stroke: var(--key); stroke-width: 2; stroke-dasharray: 3 2; }
 
-/* SchedSim（第 70 讲） */
+/* SchedSim（第 78 讲） */
 .ai-ss-pool { grid-template-columns: repeat(8, 1fr); }
 .ai-ss-qs { display: flex; flex-direction: column; gap: 4px; }
 .ai-ss-q { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-height: 30px; }
 .ai-ss-q > .ai-tl-k { width: 52px; }
 
-/* ConstrainView（第 71 讲） */
+/* ConstrainView（第 80 讲） */
 .ai-cd-out { margin: var(--space-2) 0; font-size: 13px; overflow-wrap: anywhere; }
 .ai-cd-out mark { background: var(--key-soft); color: var(--ink); border-bottom: 2px solid var(--key); }
 .ai-cd-cands { display: flex; flex-direction: column; gap: 3px; }
@@ -1021,7 +1021,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-cd-row.is-bad { color: var(--ink-3); } .ai-cd-row.is-bad code { text-decoration: line-through; } .ai-cd-row.is-bad .ai-cd-bar i { background: var(--line-strong); }
 .ai-cd-row.is-pick code { font-weight: 700; color: var(--accent); }
 
-/* RequestFlow（第 72 讲） */
+/* RequestFlow（第 81 讲） */
 .ai-rf-zone { fill: none; stroke: var(--line-strong); stroke-dasharray: 4 3; }
 .ai-rf-link { stroke: var(--line-strong); stroke-width: 1.2; }
 .ai-rf-link.is-on { stroke: var(--accent); stroke-width: 2.5; }
@@ -1032,7 +1032,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-rf-mod.is-on text { fill: var(--ink); font-weight: 600; }
 .ai-rf-mod.is-pick rect { stroke: var(--key); stroke-width: 2; }
 
-/* BenchCurve（第 73 讲） */
+/* BenchCurve（第 82 讲） */
 .ai-bc-ax { stroke: var(--ink-3); }
 .ai-bc-grid { stroke: var(--line); stroke-dasharray: 2 3; }
 .ai-bc-line { fill: none; stroke-width: 2; }
@@ -1042,7 +1042,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-bc-good { fill: var(--accent-soft); opacity: 0.6; }
 .ai-bc-dot { fill: var(--ink); }
 
-/* FusionView（第 74 讲） */
+/* FusionView（第 83 讲） */
 .ai-fu-ks { display: flex; flex-direction: column; gap: 6px; margin: var(--space-2) 0; }
 .ai-fu-k { border: 1px solid var(--line-strong); border-radius: var(--radius-md); padding: 6px 10px; background: var(--surface); }
 .ai-fu-kn { font-size: 11.5px; color: var(--ink-3); margin-bottom: 3px; }
@@ -1053,7 +1053,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-fu-w { background: var(--accent-soft); border: 1px solid var(--accent); }
 .ai-fu-f { color: var(--ink-2); }
 
-/* FlashSoftmax（第 75 讲） */
+/* FlashSoftmax（第 84 讲） */
 .ai-fs-top { display: grid; grid-template-columns: minmax(0, 230px) minmax(0, 1fr); gap: var(--space-3); align-items: start; margin-bottom: var(--space-3); }
 .ai-fs-side { display: flex; flex-direction: column; gap: var(--space-2); }
 .ai-fs-sram { font-size: 12.5px; line-height: 1.7; padding: 6px 10px; border: 1px dashed var(--accent); border-radius: var(--radius-md); background: var(--accent-soft); }
@@ -1067,7 +1067,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-fs-sep { stroke: var(--ink-3); stroke-dasharray: 3 3; }
 @media (max-width: 640px) { .ai-fs-top { grid-template-columns: 1fr; } }
 
-/* PagedDecode（第 76 讲） */
+/* PagedDecode（第 85 讲） */
 .ai-pd-pool { grid-template-columns: repeat(8, 1fr); }
 .ai-pd-fill i.is-kv { background: var(--line-strong); }
 .ai-pd-fill i.on.p0 { background: var(--accent); } .ai-pd-fill i.on.p1 { background: hsl(280 40% 55%); } .ai-pd-fill i.on.p2 { background: hsl(30 70% 50%); }
@@ -1077,14 +1077,14 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-pd-sms i { height: 10px; border-radius: 2px; background: var(--surface-sunk); border: 1px solid var(--line); }
 .ai-pd-sms i.on { background: var(--accent); border-color: transparent; }
 
-/* CudaGrid（第 77 讲） */
+/* CudaGrid（第 86 讲） */
 .ai-cu-c { fill: hsl(var(--h) 45% 86%); cursor: pointer; }
 .ai-cu-c.is-out { fill: var(--surface-sunk); }
 .ai-cu-c.is-warp { fill: hsl(var(--h) 45% 62%); }
 .ai-cu-c.is-sel { fill: var(--key); }
 .ai-cu-mat { fill: none; stroke: var(--ink); stroke-width: 1.5; pointer-events: none; }
 
-/* TritonTiles（第 78 讲） */
+/* TritonTiles（第 88 讲） */
 .ai-tt-wrap { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: var(--space-3); align-items: start; }
 .ai-tt-code { margin: 0; padding: 8px 10px; font-size: 11.5px; line-height: 1.6; background: var(--surface-sunk); border-radius: var(--radius-md); overflow-x: auto; white-space: pre; }
 .ai-tt-code .is-hl { background: var(--key-soft); display: inline-block; min-width: 100%; }
@@ -1099,12 +1099,12 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 @media (max-width: 640px) { .ai-tt-wrap { grid-template-columns: 1fr; } }
 .ai-tt [hidden] { display: none; }
 
-/* LaunchTimeline（第 79 讲） */
+/* LaunchTimeline（第 89 讲） */
 .ai-lt-bg { fill: var(--surface-sunk); }
 .ai-lt-cpu { fill: var(--key); } .ai-lt-cpu.alt { fill: var(--key-soft); stroke: var(--key); stroke-width: 0.4; }
 .ai-lt-gpu { fill: var(--accent); } .ai-lt-gpu.alt { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 0.4; }
 
-/* QuantStepper（第 80 讲） */
+/* QuantStepper（第 90 讲） */
 .ai-qs-grid { stroke: var(--line-strong); stroke-width: 1; }
 .ai-qs-err { stroke: var(--key); stroke-width: 2; }
 .ai-qs-x { fill: var(--surface); stroke: var(--ink); stroke-width: 1.3; }
@@ -1114,25 +1114,25 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-qs-tab th { text-align: left; font-weight: 500; color: var(--ink-2); padding: 2px 8px 2px 0; white-space: nowrap; font-family: var(--font-sans); }
 .ai-qs-tab td { text-align: right; padding: 2px 6px; border-left: 1px solid var(--line); }
 
-/* OutlierQuant（第 81 讲） */
+/* OutlierQuant（第 91 讲） */
 .ai-oq-a { fill: var(--surface-sunk); stroke: var(--line-strong); }
 .ai-oq-a.is-out { fill: var(--key-soft); stroke: var(--key); }
 .ai-oq-c { fill: var(--accent-soft); stroke: var(--accent); }
 .ai-oq-c.is-out { fill: var(--key); stroke: var(--key); }
 
-/* FPFormats（第 83 讲） */
+/* FPFormats（第 93 讲） */
 .ai-fp-bits { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin: var(--space-2) 0; }
 .ai-fp-bit { width: 30px; height: 30px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: 14px; cursor: pointer; border: 1px solid var(--line-strong); color: var(--ink); }
 .ai-fp-bit.s { background: var(--surface-sunk); } .ai-fp-bit.e { background: var(--key-soft); border-color: var(--key); } .ai-fp-bit.m { background: var(--accent-soft); border-color: var(--accent); }
 
-/* KVQuantCalc（第 84 讲） */
+/* KVQuantCalc（第 94 讲） */
 .ai-kq-rows { display: flex; flex-direction: column; gap: 6px; margin: var(--space-2) 0; }
 .ai-kq-row { display: grid; grid-template-columns: 48px minmax(80px, 1fr) 80px minmax(0, 1.6fr); gap: 8px; align-items: center; font-size: 12.5px; }
 .ai-kq-bar { height: 14px; background: var(--surface-sunk); border-radius: 3px; overflow: hidden; }
 .ai-kq-bar i { display: block; height: 100%; background: var(--accent); }
 @media (max-width: 640px) { .ai-kq-row { grid-template-columns: 44px 1fr 70px; } .ai-kq-row .ai-faint { grid-column: 1 / -1; } }
 
-/* SpecDecode（第 85 讲） */
+/* SpecDecode（第 96 讲） */
 .ai-sd-rounds { display: flex; flex-direction: column; gap: 3px; margin: var(--space-2) 0; }
 .ai-sd-row { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
 .ai-sd-row > .ai-tl-k { width: 48px; }
@@ -1144,7 +1144,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-sd-out { font-size: 13px; margin-top: 4px; color: var(--ink-2); }
 .ai-sd-dot { fill: var(--accent); }
 
-/* TreeVerify（第 86 讲） */
+/* TreeVerify（第 97 讲） */
 .ai-tv-truth { display: flex; flex-direction: column; gap: 4px; }
 .ai-tv-truth .ai-pc-sets { margin: 0; align-items: center; }
 .ai-tv-wrap { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: var(--space-3); align-items: start; }
@@ -1161,16 +1161,16 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-tv-m.row { stroke: var(--key); stroke-width: 1; }
 @media (max-width: 640px) { .ai-tv-wrap { grid-template-columns: 1fr; } }
 
-/* PruneView（第 87 讲） */
+/* PruneView（第 98 讲） */
 .ai-pr-c { fill: var(--accent); fill-opacity: var(--o); }
 .ai-pr-c.is-cut { fill: var(--surface-sunk); fill-opacity: 1; stroke: var(--line); stroke-width: 0.5; }
 
-/* ModelVsGPU（第 88 讲） */
+/* ModelVsGPU（第 99 讲） */
 .ai-mg-w { fill: hsl(210 60% 55% / 0.55); stroke: hsl(210 60% 45%); }
 .ai-mg-kv { fill: var(--key-soft); stroke: var(--key); }
 .ai-mg-gpu { stroke: var(--ink); stroke-width: 1.5; stroke-dasharray: 4 2; }
 
-/* CollectiveView（第 89 讲） */
+/* CollectiveView（第 100 讲） */
 .ai-cv-gpus { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: var(--space-2) 0; }
 .ai-cv-gpu { border: 1px solid var(--line-strong); border-radius: var(--radius-md); padding: 6px; text-align: center; font-size: 12.5px; }
 .ai-cv-cells { display: grid; grid-template-columns: repeat(2, 1fr); gap: 3px; margin-top: 4px; }
@@ -1179,7 +1179,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-cv-c.is-empty { background: transparent; border: 1px dashed var(--line); color: var(--ink-3); }
 @media (max-width: 640px) { .ai-cv-gpus { grid-template-columns: repeat(2, 1fr); } }
 
-/* RingAllReduce（第 90 讲） */
+/* RingAllReduce（第 101 讲） */
 .ai-ra-gpu { fill: var(--surface); stroke: var(--line-strong); }
 .ai-ra-c { fill: var(--surface-sunk); stroke: var(--line); }
 .ai-ra-c.is-fin { fill: var(--ink); }
@@ -1190,11 +1190,11 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-ra-link.is-on { stroke: var(--key); stroke-width: 2.5; }
 .ai-ra-head { fill: var(--key); }
 
-/* AlphaBetaCalc（第 91 讲） */
+/* AlphaBetaCalc（第 102 讲） */
 .ai-ab-lat { fill: var(--line-strong); }
 .ai-ab-bw { fill: var(--accent); }
 
-/* ZeroShard（第 92 讲） */
+/* ZeroShard（第 103 讲） */
 .ai-zs-p { fill: hsl(210 60% 55% / 0.6); stroke: hsl(210 60% 45%); }
 .ai-zs-g { fill: var(--key-soft); stroke: var(--key); }
 .ai-zs-o { fill: var(--accent-soft); stroke: var(--accent); }
@@ -1202,7 +1202,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-zs-full { fill: var(--surface-sunk); stroke: var(--line-strong); }
 .ai-zs-t { font-size: 11px; fill: var(--ink); }
 
-/* TPSplit（第 93 讲） */
+/* TPSplit（第 105 讲） */
 .ai-tp-gpus { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: var(--space-2) 0; }
 .ai-tp-gpu { border: 1px solid var(--line-strong); border-radius: var(--radius-md); padding: 6px 8px; font-size: 12.5px; }
 .ai-tp-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; align-items: flex-start; }
@@ -1215,17 +1215,17 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-tp-m.is-final td { background: var(--ink); color: var(--surface); }
 @media (max-width: 640px) { .ai-tp-gpus { grid-template-columns: 1fr; } }
 
-/* PipeGantt（第 94 讲） */
+/* PipeGantt（第 106 讲） */
 .ai-pp-f { fill: hsl(210 60% 55%); }
 .ai-pp-b { fill: var(--key); }
 
-/* RingAttnView（第 95 讲） */
+/* RingAttnView（第 107 讲） */
 .ai-rt-c { fill: hsl(var(--h) 55% 50% / 0.12); stroke: hsl(var(--h) 50% 50% / 0.5); }
 .ai-rt-c.is-done { fill: hsl(var(--h) 55% 50% / 0.35); }
 .ai-rt-c.is-now { fill: hsl(var(--h) 55% 45%); }
 .ai-rt-c.is-mask { fill: var(--surface-sunk); stroke: var(--line); }
 
-/* EPDispatch（第 96 讲） */
+/* EPDispatch（第 108 讲） */
 .ai-ep-gpus { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin: var(--space-2) 0; }
 .ai-ep-gpu { border: 1px solid var(--line-strong); border-radius: var(--radius-md); padding: 5px; font-size: 12px; }
 .ai-ep-gpu small { display: block; color: var(--ink-3); font-size: 10.5px; }
@@ -1239,7 +1239,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-ep-mat td.is-self { outline: 1.5px dashed var(--ink-3); outline-offset: -3px; }
 @media (max-width: 640px) { .ai-ep-gpus { grid-template-columns: repeat(2, 1fr); } .ai-ep-bot { grid-template-columns: 1fr; } }
 
-/* TopoMap（第 97 讲） */
+/* TopoMap（第 109 讲） */
 .ai-tm-nodes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: var(--space-2) 0; }
 .ai-tm-node { border: 1.5px solid var(--ink-3); border-radius: var(--radius-md); padding: 6px; font-size: 12px; }
 .ai-tm-gpus { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-top: 4px; }
@@ -1248,22 +1248,22 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-tm-g i { font-style: normal; font-family: var(--font-mono); font-size: 10px; color: var(--ink-2); }
 @media (max-width: 640px) { .ai-tm-nodes { grid-template-columns: 1fr; } }
 
-/* TPCurve（第 98 讲） */
+/* TPCurve（第 110 讲） */
 .ai-tc-comp { fill: hsl(210 60% 55% / 0.7); }
 .ai-tc-comp.is-nofit { fill: var(--surface-sunk); stroke: var(--line-strong); stroke-dasharray: 3 2; }
 .ai-tc-comm { fill: hsl(210 60% 55% / 0.3); }
 
-/* MoEBandwidth（第 99 讲） */
+/* MoEBandwidth（第 111 讲） */
 .ai-mb-a { fill: var(--line-strong); }
 .ai-mb-e { fill: hsl(210 60% 55%); }
 .ai-mb-c { fill: var(--key); }
 .ai-mb-e.is-hid, .ai-mb-c.is-hid { opacity: 0.5; }
 
-/* SupernodeCompare（第 103 讲） */
+/* SupernodeCompare（第 115 讲） */
 .ai-sn-a { fill: var(--key); }
 .ai-sn-b { fill: var(--accent); }
 
-/* GPUView（第 52 讲） */
+/* GPUView（第 60 讲） */
 .ai-gv-die { fill: var(--surface); stroke: var(--ink-3); stroke-width: 1.5; }
 .ai-gv-part { fill: var(--surface-sunk); stroke: var(--line); }
 .ai-gv-p { cursor: pointer; }
@@ -1278,11 +1278,11 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-gv-p.tc rect { fill: var(--key); } .ai-gv-p.tc text { fill: #fff; font-weight: 600; }
 .ai-gv-p.is-pick rect { stroke: var(--ink); stroke-width: 2.5; }
 
-/* MemLevels（第 53 讲） */
+/* MemLevels（第 61 讲） */
 .ai-ml-cap { fill: hsl(210 60% 55% / 0.5); }
 .ai-ml-bw { fill: var(--accent); }
 
-/* RooflinePlot（第 54、59 讲） */
+/* RooflinePlot（第 62、67 讲） */
 .ai-rl-roof { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
 .ai-rl-roof.is-on { stroke: var(--ink); stroke-width: 2.5; }
 .ai-rl-ridge { stroke: var(--ink-3); stroke-dasharray: 3 3; }
@@ -1291,11 +1291,11 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-rl-meas { fill: var(--accent); }
 .ai-rl-cur { stroke: var(--ink-3); stroke-dasharray: 2 2; }
 
-/* PrecisionCompare（第 55 讲） */
+/* PrecisionCompare（第 63 讲） */
 .ai-pr2-bar { fill: var(--accent); }
 .ai-pr2-mul { fill: var(--key-soft); stroke: var(--key); }
 
-/* InterconnectView（第 56 讲） */
+/* InterconnectView（第 64 讲） */
 .ai-ic-node { fill: none; stroke: var(--ink-3); stroke-dasharray: 4 3; }
 .ai-ic-b rect { fill: var(--surface-sunk); stroke: var(--line-strong); }
 .ai-ic-b text { font-size: 10.5px; fill: var(--ink-2); }
@@ -1305,11 +1305,11 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-ic-w { stroke: var(--line-strong); stroke-width: 1.5; }
 .ai-ic-w.is-on { stroke: var(--key); stroke-width: 3; }
 
-/* ScaleCompare（第 57 讲） */
+/* ScaleCompare（第 65 讲） */
 .ai-sc-nv { fill: hsl(210 60% 55%); }
 .ai-sc-net { fill: var(--key); }
 
-/* ProfilerTimeline（第 58 讲） */
+/* ProfilerTimeline（第 66 讲） */
 .ai-pt-k { cursor: pointer; }
 .ai-pt-k.k-gemm { fill: hsl(210 60% 55%); } .ai-pt-k.k-attn { fill: hsl(280 45% 60%); }
 .ai-pt-k.k-elem { fill: var(--ink-3); } .ai-pt-k.k-comm { fill: var(--key); }
@@ -1365,7 +1365,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-fb-bits i.s { background: var(--surface-sunk); } .ai-fb-bits i.e { background: var(--key-soft); } .ai-fb-bits i.m { background: var(--accent-soft); }
 @media (max-width: 640px) { .ai-fb-row { grid-template-columns: 70px 1fr; } }
 
-/* 架构图、拓扑图（SupernodeArch、TorusVsSwitch，第 103 讲；Figure 通用外框） */
+/* 架构图、拓扑图（SupernodeArch、TorusVsSwitch，第 115 讲；Figure 通用外框） */
 .ai-dg svg { width: 100%; height: auto; display: block; }
 .ai-sa-tx { font-size: 11px; fill: var(--ink-2); }
 .ai-sa-b rect { fill: var(--surface-sunk); stroke: var(--line-strong); stroke-width: 1; }
@@ -1490,7 +1490,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-ea-arh { fill: var(--ink-3); }
 .ai-st-grid { stroke: var(--line); stroke-width: 0.5; }
 
-/* SlotMap（第 115 讲）：块池里的槽位和送进 GPU 的数组 */
+/* SlotMap（第 127 讲）：块池里的槽位和送进 GPU 的数组 */
 .ai-sm-note { font-size: 13.5px; line-height: 1.65; margin: var(--space-2) 0; }
 .ai-sm-pool { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; margin: var(--space-2) 0; }
 .ai-sm-blk { font-size: 11.5px; text-align: center; }
@@ -1509,7 +1509,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-gb-bar { fill: var(--surface-sunk); stroke: var(--line-strong); stroke-width: 0.8; }
 .ai-gb-on { fill: var(--key-soft); stroke: var(--key); stroke-width: 2; }
 
-/* RadixTree（第 119 讲） */
+/* RadixTree（第 131 讲） */
 .ai-rt-tree { font-size: 13px; margin: var(--space-2) 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-sunk); }
 .ai-rt-node { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; padding: 3px 0; border-left: 2px solid var(--line); padding-left: 8px; }
 .ai-rt-node.is-hot { border-left-color: var(--key); }
@@ -1525,3 +1525,40 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-em tr.is-on { background: var(--key-soft); }
 .ai-em tr.is-off { opacity: .55; }
 @media (max-width: 640px) { .ai-em .ai-sm-arr td:nth-child(2) { display: none; } }
+
+/* TrainCurve（第 7 篇）：训练、验证 loss 曲线 */
+.ai-tc-train { stroke: var(--accent); }
+.ai-tc-val { stroke: var(--key); }
+.ai-tc-train-t { fill: var(--accent); }
+.ai-tc-val-t { fill: var(--key); }
+.ai-tc-best { fill: var(--key); }
+.ai-tc-cur { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 3 3; }
+
+/* SlideWindow（第 53 讲）：token 序列上的滑动窗口 */
+.ai-sw-seq { display: flex; flex-wrap: wrap; gap: 4px; margin: 10px 0; }
+.ai-sw-t { display: inline-flex; flex-direction: column; align-items: center; min-width: 22px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; font-size: 13px; background: var(--surface); color: var(--ink); }
+.ai-sw-t i { font-style: normal; font-size: 10px; color: var(--ink-3); }
+.ai-sw-t.is-prev { border-style: dashed; border-color: var(--ink-3); }
+.ai-sw-t.is-x { background: var(--accent-soft, var(--surface-sunk)); border-color: var(--accent); }
+.ai-sw-t.is-y { box-shadow: inset 0 -3px 0 var(--key); }
+.ai-sw-xy > div { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 4px 0; }
+.ai-sw-xy b { width: 18px; font-family: var(--mono, monospace); }
+.ai-sw-xy .ai-sw-t.is-y { background: var(--key-soft); border-color: var(--key); box-shadow: none; }
+
+/* KVEvict（第 95 讲）：保留 / 驱逐的上下文位置 */
+.ai-kve-on { fill: var(--key); }
+.ai-kve-off { fill: var(--line-strong); opacity: .55; }
+
+/* GemmTiles（第 87 讲）：块分波上 SM */
+.ai-gemm-on { fill: var(--accent); }
+.ai-gemm-off { fill: var(--surface-sunk); stroke: var(--line); stroke-width: .5; }
+
+/* LoRAServe（第 79 讲） */
+.ai-lora-base { fill: var(--surface-sunk); stroke: var(--line-strong); }
+.ai-lora-ad { fill: var(--key); }
+
+/* ActMem（第 104 讲） */
+.ai-act-st { fill: var(--surface-sunk); stroke: var(--line-strong); }
+.ai-act-on { fill: var(--key); }
+.ai-act-off { fill: var(--key-soft); stroke: var(--key); stroke-width: .6; }
+.ai-act-cap { stroke: var(--ink-3); stroke-dasharray: 4 3; }

@@ -1,0 +1,107 @@
+---
+id: 118
+slug: v0-forward
+title: v0 · 从权重文件到第一个 token
+chapter: 5
+part: 15
+problem: 不借助任何框架，自己写出 Qwen3 的前向
+prereqs: [33, 34, 36, 37, 39, 117]
+level: 主线
+demos: [EngineArch, CodeWalk, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineArch from '../../components/EngineArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[33, 34, 36, 37, 39, 117]} />
+
+我们手里有一个 1.5 GB 的文件 `model.safetensors`，和一句提示 “The capital of France is”。这一讲的目标只有一个：**不用 transformers，自己写代码，让这个文件算出下一个词是 “Paris”**，而且接下来生成的 32 个 token 和 HuggingFace 一个不差。
+
+这就是 v0。它很慢（下一讲就会看到慢在哪里），但它是后面所有版本的地基：模型前向写对了，之后的 KV Cache、批处理、分页都只是在“怎么组织调用”上做文章。
+
+<EngineArch ver="v0" caption="图 118-1　v0 只有四个文件：config.py 读模型的尺寸，weights.py 读权重，model.py 写前向，engine.py 写生成循环。分词直接用模型自带的 tokenizer.json。" />
+
+## 权重文件里有什么
+
+先打开文件看一眼。safetensors 是一种很简单的格式：文件头是一段 JSON，记录每个张量的名字、形状、数据类型和在文件里的位置，后面是连续存放的原始数据。
+
+<RunOutput cmd=".venv/bin/python bench/inspect_weights.py" file="outputs/inspect_weights.txt" caption="图 118-2　Qwen3-0.6B 的权重：311 个张量，BF16。这里只列出第 0 层和层外的张量，其余 27 层的名字和形状都一样。" />
+
+对照第 34 讲的完整前向，每个名字都能对上号：
+
+- `embed_tokens`：嵌入表，[151936, 1024]，每个 token 一行 1024 维（第 22 讲）。
+- 每层 4 个注意力投影：`q_proj` 是 [2048, 1024]，`k_proj`、`v_proj` 是 [1024, 1024]，`o_proj` 是 [1024, 2048]。注意 q 的输出是 2048 维 = 16 个头 × 128，而 k、v 只有 1024 维 = 8 个头 × 128：这就是 GQA（第 39 讲），两个查询头共用一组 K、V。还要注意 16 × 128 = 2048 比隐藏维度 1024 大，Qwen3 的头维度不等于 d ÷ 头数。
+- `q_norm`、`k_norm`：只有 128 个数。这是 Qwen3 特有的：在 RoPE 之前，对每个头的 q、k 各做一次 RMSNorm，让注意力打分更稳定。
+- 每层 3 个 FFN 矩阵：`gate_proj`、`up_proj` 是 [3072, 1024]，`down_proj` 是 [1024, 3072]，这是 SwiGLU（第 38 讲）。
+- 两个 RMSNorm 的缩放（各 1024 个数），加上最后的 `model.norm`。
+- `lm_head`：输出层，[151936, 1024]。它和嵌入表一模一样（`tie_word_embeddings`），文件里存了两份，所以 752 M 个参数里有 1.56 亿是重复的，模型实际约 6 亿参数，这就是“0.6B”。
+
+PyTorch 的线性层把权重存成 [输出, 输入]，所以 y = x · Wᵀ。后面的代码里到处是 `x @ W.T`，就是这个原因。
+
+## config.py 和 weights.py：读进来
+
+层数、头数这些数从 `config.json` 读，代码里不写死任何一个尺寸，换一个同结构的模型（比如 Qwen3-1.7B）也能直接用。
+
+<CodeWalk file="v0/config.py" steps={[
+  { lines: [6, 17], title: '需要的只有这几个数', body: '<p>前向计算只需要 10 个数：词表大小、隐藏维度 d、FFN 宽度、层数、查询头数、KV 头数、头维度、RoPE 的 θ、RMSNorm 的 ε，以及结束符的编号。</p><p>用 <code>dataclass</code> 而不是直接用字典，是为了在代码里写 <code>c.num_kv_heads</code> 这样有名字的属性，写错名字会立刻报错。</p>' },
+  { lines: [19, 33], title: '从 config.json 对应过来', body: '<p>HuggingFace 的字段名比较长（<code>num_hidden_layers</code>），这里换成短一点的名字。Qwen3-0.6B：28 层、d = 1024、16 个查询头、8 个 KV 头、头维度 128、θ = 1,000,000、ε = 10⁻⁶，结束符是 151645（<code>&lt;|im_end|&gt;</code>）。</p>' },
+]} />
+
+<CodeWalk file="v0/weights.py" steps={[
+  { lines: [6, 8], title: '读出来，转成需要的精度', body: '<p><code>safetensors.torch.load_file</code> 把整个文件读成一个“名字 → 张量”的字典。文件里是 BF16，这里统一转成 FP32：精度和 HuggingFace 的参考答案一致，才能逐 token 比对（第 117 讲）。</p><p>FP32 的权重有 752 M × 4 字节 ≈ 3 GB，16 GB 内存的笔记本放得下。</p>' },
+  { lines: [9, 13], title: '共用的输出层', body: '<p>有的模型文件不单独存 <code>lm_head</code>，这时直接让它指向嵌入表：两个名字引用同一个张量，不多占内存。</p>' },
+]} />
+
+## model.py：一层一层地算
+
+这是这一讲的主体。整个 Qwen3 的前向只有 59 行，用到的运算只有矩阵乘、逐元素运算、softmax 和查表。左边是代码，右边逐段解释；点步骤或者“下一步”，左边会高亮对应的行。
+
+<CodeWalk file="v0/model.py" title="Qwen3 的完整前向" steps={[
+  { lines: [5, 8], title: 'RMSNorm', body: '<p>每个向量除以自己的均方根，再乘一组可学习的缩放（第 36 讲）。<code>mean(-1, keepdim=True)</code> 沿最后一维（1024 维）求平均，保留这一维方便广播。</p><p>用 <code>rsqrt</code>（平方根的倒数）再相乘，而不是相除，是常见的写法；ε 防止除以零。</p>' },
+  { lines: [11, 19], title: 'RoPE：按位置旋转', body: '<p>输入 <code>x</code> 是 [T, 头数, 128]。RoPE 把每个头的 128 维分成 64 对，第 j 对按角度 pos × θ<sup>−j/64</sup> 旋转（第 37 讲）。</p><p><b>最容易写错的地方是“怎么配对”。</b>Qwen3（和 Llama 一样）把<b>前一半和后一半</b>配对：第 j 维和第 j + 64 维是一对，所以这里把 x 切成 <code>x1 = x[..., :64]</code>、<code>x2 = x[..., 64:]</code>。如果按相邻两维（0 和 1、2 和 3）配对，数学上也是一种 RoPE，但和训练时的不一样，模型会输出乱码。</p><p>角度在 FP32 下计算，<code>cos</code>、<code>sin</code> 在“头”这一维上广播，所有头用同样的旋转。</p>' },
+  { lines: [26, 31], title: '注意力：q、k、v 投影', body: '<p><code>x</code> 是 [T, 1024]，T 是这一次送进来的 token 数。三次矩阵乘得到 q [T, 2048]、k [T, 1024]、v [T, 1024]，再用 <code>view</code> 拆成 [T, 头数, 128]。</p><p>参数 <code>i</code> 是层号，<code>p</code> 是这一层权重名字的前缀，比如 <code>model.layers.3.self_attn.</code>。</p>' },
+  { lines: [32, 34], title: 'q、k 的 RMSNorm，然后 RoPE', body: '<p>Qwen3 特有的一步：对每个头的 q、k（128 维）各做一次 RMSNorm，缩放只有 128 个数，所有头共用。顺序很重要：<b>先归一化，再旋转</b>。</p>' },
+  { lines: [35, 36], title: 'GQA：把 K、V 复制给多个查询头', body: '<p>16 个查询头、8 个 KV 头，每组 K、V 给 2 个查询头用。<code>repeat_interleave(2, dim=1)</code> 把 KV 头 0、1、2…… 变成 0、0、1、1、2、2……，正好对上查询头 0、1 用 KV 头 0。</p><p>注意不能用 <code>repeat</code>：它会变成 0、1、…、7、0、1、…、7，对应关系就错了。这样复制只是为了代码好懂，K、V 的存储仍然只有 8 个头。</p>' },
+  { lines: [37, 41], title: '打分、掩码、softmax、加权求和', body: '<p><code>einsum("qhd,khd-&gt;hqk")</code>：对每个头，每个查询位置和每个键位置做点积，得到 [头数, T, T] 的打分，再除以 √128（第 26 讲）。</p><p>因果掩码：下三角为 True，查询位置只能看自己和前面的位置，其余填 −∞，softmax 后权重为 0（第 27 讲）。</p><p>最后用权重对 V 加权求和，拼回 [T, 2048]，乘 <code>o_proj</code> 变回 1024 维。</p>' },
+  { lines: [43, 46], title: 'SwiGLU', body: '<p>两次投影到 3072 维，一路过 SiLU 当“门”，和另一路逐元素相乘，再投影回 1024 维（第 38 讲）。</p>' },
+  { lines: [48, 59], title: '整个前向', body: '<p><code>@torch.no_grad()</code>：推理不需要梯度，省掉记录计算图的开销。</p><p>位置从 0 开始编号；查嵌入表得到 [T, 1024]；28 层，每层两个子块，都是“先 RMSNorm，再计算，再加回残差”（Pre-Norm，第 30 讲）；最后一次 RMSNorm，乘输出层，得到每个位置对 151,936 个词的打分。</p><p>v0 返回所有 T 个位置的打分，其实只有最后一个位置有用。下一讲会改掉。</p>' },
+]} />
+
+<Note kind="warn">写模型前向时，最容易出错的四个地方：RoPE 的配对方式（前后两半，而不是相邻两维）；GQA 的复制方式（<code>repeat_interleave</code>，而不是 <code>repeat</code>）；Qwen3 在 RoPE 之前对 q、k 做的 RMSNorm；位置从 0 开始数。这四处任何一处写错，模型都还能输出看似通顺的文字，只有和参考答案逐 token 比对才能发现。</Note>
+
+## engine.py：生成循环
+
+有了前向，生成就是一个循环：把当前的全部 token 送进模型，取最后一个位置打分最高的 token，接到后面，再来一遍。
+
+<CodeWalk file="v0/engine.py" steps={[
+  { lines: [10, 15], title: '把三样东西装起来', body: '<p>配置、分词器、模型。分词器用 <code>tokenizers</code> 库直接读模型自带的 <code>tokenizer.json</code>，和 HuggingFace 用的是同一份规则。</p>' },
+  { lines: [17, 25], title: '每生成一个 token，整段重算一遍', body: '<p>“The capital of France is” 分词后是 5 个 token：<code>[785, 6722, 315, 9625, 374]</code>。第一次送进 5 个，取最后一个位置的最高分，得到 “ Paris”（编号 12095），接到后面；第二次送进 6 个……</p><p>这就是问题所在：第 n 次要把 5 + n 个 token 全部重算一遍，而前面 5 + n − 1 个 token 的计算结果，和上一次一模一样。</p><p>遇到结束符就停下。<code>argmax</code> 是贪心采样（第 73 讲），为了和参考答案比对，这一篇都用贪心。</p>' },
+  { lines: [27, 33], title: '给测试用的接口', body: '<p><code>check_generate</code> 让 <code>tests/check.py</code> 能用同样的方式调用每个版本：给一组提示，返回每条新生成的 token。后面的版本内部实现完全不同，但都提供这个接口。</p>' },
+]} />
+
+## 跑起来
+
+<RunOutput cmd="cd v0 && ../.venv/bin/python run.py" file="outputs/run_v0.txt" caption="图 118-3　v0 的第一次运行。模型接着写出了 “Paris”，还顺着往下列了几个国家的首都。" />
+
+模型说对了。再用 `tests/check.py` 和 HuggingFace 逐 token 比一比：
+
+<RunOutput cmd=".venv/bin/python tests/check.py v0" file="outputs/check_v0.txt" caption="图 118-4　v0 和 HuggingFace 逐 token 一致。四条提示覆盖英文、代码、中文和数字序列。" />
+
+四条全部一致：我们 59 行的前向，和 transformers 的实现算出了同样的结果。
+
+## 它慢在哪里
+
+上面生成 32 个 token 用了约 7 秒，平均每个 200 多毫秒。看起来每个 token 的耗时差不多，那是因为提示很短。把提示加长到 199 个 token、生成 64 个，每一步的耗时就看得出变化了（这个压测下一讲会完整展示）：第 1 步约 419 ms，第 64 步约 724 ms，64 步一共约 34 秒。
+
+原因就在生成循环里：第 n 步要算 199 + n 个 token 的前向，越往后越长。总计算量大约是 64 × 230 ≈ 15,000 个 token 的前向，而真正“新”的只有 199 + 64 = 263 个。
+
+前面的 token 每一步都在重算，结果却和上一步一样。能不能把算过的东西存下来？第 68、69 讲已经给出了答案：把每层的 K、V 存起来，新 token 只需要和存好的 K、V 做注意力。
+
+## 回顾
+
+v0 用四个文件让 Qwen3-0.6B 跑了起来：config.py 读模型的 10 个尺寸，weights.py 把 311 个张量读进字典，model.py 用 59 行写出完整的前向（RMSNorm、RoPE、q/k 归一化、GQA、因果注意力、SwiGLU、残差），engine.py 用一个循环做贪心生成。和 HuggingFace 比对，4 条提示的 32 个 token 全部一致。
+
+它的毛病是每生成一个 token 都要把整段序列重算一遍：199 个 token 的提示，第 64 步要算 263 个 token，耗时从 419 ms 涨到 724 ms。下一讲：**v1 · KV Cache**。

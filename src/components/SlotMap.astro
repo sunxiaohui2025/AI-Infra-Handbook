@@ -1,5 +1,5 @@
 ---
-// nano-vllm 的 prepare_prefill / prepare_decode 拼出来的输入（公式与 engine/model_runner.py 相同，见第 115 讲）。
+// nano-vllm 的 prepare_prefill / prepare_decode 拼出来的输入（公式与 engine/model_runner.py 相同，见第 127 讲）。
 // 为了看得清，块大小取 4（nano-vllm 实际是 256），块池 8 块，共 32 个槽位：槽位号 = 块号 × 块大小 + 块内偏移。
 // 场景：两个新请求的 prefill；前缀缓存命中后的 prefill；分块 prefill 的第二段；三个请求的 decode；decode 补齐到 CUDA Graph 的档位。
 // 读者可以：切换场景，看这一步要写哪些槽位（深色）、注意力要读哪些槽位（浅色），以及送进 GPU 的每个数组。

@@ -1,7 +1,7 @@
 ---
-// Decode 阶段的注意力 kernel（与第 76 讲的代码相同）。
+// Decode 阶段的注意力 kernel（与第 85 讲的代码相同）。
 // 上半部分：一个请求的 KV Cache 按块表散落在 16 个物理块里（每块 4 个 token，上下文 18 个），kernel 按逻辑块的顺序查块表、读物理块，
-//   一边读一边维护在线 softmax 的 m、l（第 75 讲）。可以切成 3 段并行读，各段算出自己的 (m, l, acc)，最后合并。
+//   一边读一边维护在线 softmax 的 m、l（第 84 讲）。可以切成 3 段并行读，各段算出自己的 (m, l, acc)，最后合并。
 // 下半部分：Llama-3-8B 一层的 decode 注意力，估算工作单元数和耗时：每个请求的每个 KV 头至少一个工作单元；
 //   单元少于 132 个（H100 的 SM 数）时，带宽按 单元数 / 132 打折（粗略模型）。可以每 512 个 token 切一段，增加并行度。
 interface Props { title?: string; caption?: string }
@@ -51,7 +51,7 @@ const { title = '按块表读 KV，以及把上下文切开并行', caption } = 
       q<HTMLElement>('[data-pool]').innerHTML = h;
       const desc = now.map((i) => `token ${i} → 块表[${i} ÷ ${B} = ${Math.floor(i / B)}] = 物理块 ${TABLE[Math.floor(i / B)]}，块内第 ${i % B} 个`).join('<br>');
       q<HTMLElement>('[data-eq1]').innerHTML = (T ? `这一轮读：<br>${desc}` : '还没开始读。')
-        + `<br><span class="ai-faint">${parts === 1 ? `一个工作单元按顺序读完 ${CTX} 个 token，要 ${CTX} 轮。` : `3 段同时读，每段各自维护 m、l、acc，${rounds} 轮就读完；最后再用 e^(m − M) 把 3 段合并（和第 75 讲的在线 softmax 是同一个公式）。`}</span>`;
+        + `<br><span class="ai-faint">${parts === 1 ? `一个工作单元按顺序读完 ${CTX} 个 token，要 ${CTX} 轮。` : `3 段同时读，每段各自维护 m、l、acc，${rounds} 轮就读完；最后再用 e^(m − M) 把 3 段合并（和第 84 讲的在线 softmax 是同一个公式）。`}</span>`;
     }
     function drawB() {
       const b = BS[Number(bIn.value)], c = CS[Number(cIn.value)];

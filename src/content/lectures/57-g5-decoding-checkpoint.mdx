@@ -1,0 +1,135 @@
+---
+id: 57
+slug: g5-decoding-checkpoint
+title: g5 · 解码与存档
+chapter: 2
+part: 7
+problem: 温度、Top-k、Top-p 怎么改变生成；训练怎么存档、续训
+prereqs: [7, 24, 56, 73]
+level: 主线
+demos: [GPTArch, CodeWalk, CodeDiff, TrainCurve, DecodeView, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import GPTArch from '../../components/GPTArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CodeDiff from '../../components/CodeDiff.astro';
+import TrainCurve from '../../components/TrainCurve.astro';
+import DecodeView from '../../components/DecodeView.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[7, 24, 56, 73]} />
+
+上一讲留下两个毛病。第一，`train.py` 只在最后存一次档，存下的是第 3000 步、验证 loss 5.86 的模型；第 900 步那个验证 loss 4.84 的模型，训练过程中出现过，却没有留下来。第二，生成一直是贪心的：同一个开头，永远得到同一句话，而且这句话常常不太好。
+
+g5 解决这两件事。存档这边：验证 loss 创新低时存一份，训练可以从存档接着跑；顺便把 dropout 从 0.1 加到 0.2，看能不能推迟过拟合。解码这边：加上温度、Top-k、Top-p 三种控制随机性的办法（原理在第 73 讲），在我们自己训练的模型上看它们的实际效果。
+
+<GPTArch ver="g5" caption="图 57-1　g5 改动 generate.py（加入温度、Top-k、Top-p、结束符）和 train.py（存最好的存档、续训），新增 checkpoint.py。" />
+
+## checkpoint.py：存什么
+
+<CodeWalk file="minigpt/g5/checkpoint.py" steps={[
+  { lines: [11, 13], title: '三样东西放进一个字典', body: '<p>模型配置（重建同样形状的模型要用）、模型参数（<code>state_dict</code>，一个“名字 → 张量”的字典）、优化器状态，外加调用者想存的任何东西：这里会存步数、已看的 token 数和训练日志。</p><p>为什么要存配置？只存参数的话，读档时得先知道 d、H、L 是多少，才能建出形状对得上的模型。把配置和参数放在一起，存档就是自描述的。</p>' },
+  { lines: [16, 20], title: '读档', body: '<p><code>map_location</code> 指定把张量读到哪个设备：在 GPU 上存的存档，在一台没有 GPU 的机器上也能读。按配置建模型，再 <code>load_state_dict</code> 把参数装进去。名字或形状对不上会直接报错，这是 PyTorch 帮我们做的检查（上一讲手写的 <code>put</code> 做的是同样的事）。</p>' },
+]} />
+
+优化器状态是什么？AdamW 给每个参数记两个数：梯度的滑动平均（动量）和梯度平方的滑动平均（第 19 讲）。530 万个参数，就是 1060 万个额外的数，所以存档里优化器状态是模型参数的两倍大。只用模型生成，不需要它；要接着训练，最好带上，后面会实测不带会怎样。
+
+## train.py：存最好的、能续训
+
+<CodeDiff a="minigpt/g4/train.py" b="minigpt/g5/train.py" caption="图 57-2　g5 的 train.py 和 g4 的差别：多了 --resume 参数；验证 loss 创新低时存 _best.pt；存档改用 checkpoint.save，带上步数、token 数和日志。" />
+
+改动有三处。
+
+**验证 loss 创新低时存档**。每 100 步估一次验证 loss，比之前所有的都低，就存一份 `gpt_best.pt`。训练结束时，我们手里有两份：最后一步的 `gpt.pt`，和验证 loss 最低的 `gpt_best.pt`。这就是常说的**早停**（early stopping）的思路：不必真的停下训练，只要留住最好的那一份。
+
+**续训**。`--resume` 读回存档里的参数、优化器状态、步数和日志，从那一步接着跑。学习率按步数算，所以续训后学习率曲线也是接着走的。训练跑到一半机器重启、或者想再多训几百步，都用得上。
+
+**存档里带上日志**。续训之后，日志是接起来的一整条，曲线不会断。
+
+## 加大 dropout 再训一次
+
+<RunOutput cmd=".venv/bin/python g5/train.py --dropout 0.2" file="minigpt/outputs/train_g5.txt" caption="图 57-3　dropout 0.2 训练 3000 步：验证 loss 最低 4.876（第 900 步），最后 5.250。最好的存档存在 checkpoints/gpt_best.pt。" />
+
+<TrainCurve runs={[{ file: 'minigpt/outputs/train_log_gpt.json', label: 'g5：dropout 0.2' }, { file: 'minigpt/outputs/train_log_g4.json', label: 'g4：dropout 0.1' }]} caption="图 57-4　两次训练对比，用上面的按钮切换。dropout 0.2 让训练 loss 降得慢，验证 loss 回升得也慢，但验证 loss 的最低点并没有更低。" />
+
+结果有点出乎意料。dropout 加大之后：
+
+- 过拟合确实慢了：第 3000 步的训练 loss 是 1.86（g4 是 1.00），验证 loss 是 5.25（g4 是 5.86）。
+- 可验证 loss 的**最低点**几乎没变，甚至略差：还是在第 900 步，4.876，g4 是 4.843。
+
+也就是说，dropout 把“背原文”的速度拖慢了，却没让模型多学到一点“规律”。原因还是上一讲那笔账：数据只有计算最优的三百五十分之一，第 900 步时模型已经把训练集看了 12 遍，能从这 30 万个 token 里学到的东西差不多都学到了。正则化能决定模型“背得多快”，决定不了“能学到多少”。真想让验证 loss 更低，只能加数据。
+
+所以这一讲之后，我们用的都是 `gpt_best.pt`：第 900 步、验证 loss 4.876 的那一份。
+
+## generate.py：温度、Top-k、Top-p
+
+第 73 讲讲过这几种解码方式的原理。这里看代码：
+
+<CodeWalk file="minigpt/g5/generate.py" from={16} to={44} steps={[
+  { lines: [16, 18], title: '温度', body: '<p>打分除以温度 T，再做 softmax。T &lt; 1 把打分之间的差距放大，分布变尖，高分的 token 更容易被选中；T &gt; 1 把差距缩小，分布变平，低分的 token 也有机会。T → 0 就是贪心。</p>' },
+  { lines: [19, 21], title: 'Top-k', body: '<p>找出第 k 大的打分，比它小的全部设成 −∞，softmax 后概率为 0。只在打分最高的 k 个里抽。</p>' },
+  { lines: [22, 28], title: 'Top-p', body: '<p>把打分从高到低排序，算 softmax 后的累计概率。一个 token 前面所有 token 的累计概率如果已经 ≥ p，它就被去掉。这样留下的是“累计概率刚好凑够 p”的最少几个 token：分布尖的时候只留几个，平的时候留很多。</p><p><code>cum − 自己的概率</code> 是“排在它前面的累计概率”，用它判断，保证第一个 token 永远留着。最后用 <code>scatter</code> 按原来的顺序放回去。</p>' },
+  { lines: [31, 44], title: '生成循环', body: '<p>和 g3 的贪心循环一样，只是选 token 的方式换了：温度为 0 时取最大值，否则按处理过的分布用 <code>torch.multinomial</code> 抽一个。传了 <code>seed</code> 就用固定种子的随机数生成器，同样的参数每次抽出同样的结果，便于对比和写文章。</p><p>新加了 <code>eos</code>：生成了结束符就停。下一讲的指令微调要靠它：回答说完了，模型会输出 <code>&lt;|endoftext|&gt;</code>。</p>' },
+]} />
+
+## 在我们的模型上试试
+
+`scripts/sampling_demo.py` 读入 `gpt_best.pt`，在 CPU 上跑（随机数固定，每次结果相同）：
+
+<RunOutput cmd=".venv/bin/python scripts/sampling_demo.py" file="minigpt/outputs/sampling_demo.txt" caption="图 57-5　读入第 900 步的存档：下一个 token 的分布很平；贪心解码陷入了重复；加了随机性之后，句子才像讲义。" />
+
+**下一个 token 的分布非常平。**“生成下一个 token 时，”之后，概率最高的是“decode”，也只有 0.032；前 12 个加起来才 0.201，剩下 80% 的概率分散在其余 4084 个 token 上。温度 1.0 时要 573 个 token 才能凑够 90% 的概率。这和验证 loss 4.876 是一致的：困惑度 e^4.876 ≈ 131，模型平均相当于在一百多个选项里犹豫。
+
+这些候选本身是有道理的：decode、TPOT、prefill、注意力、每步、所有请求，都是“生成下一个 token 时”后面在讲义里真会出现的词。模型学到了“这里该谈推理”，只是拿不准具体谈什么。下面的演示用的就是这 12 个候选的真实打分，可以自己调温度、Top-k、Top-p 看看：
+
+<DecodeView file="minigpt/outputs/next_token.json" title="我们的模型在“生成下一个 token 时，”之后的前 12 个候选" caption="图 57-6　打分来自 gpt_best.pt。注意这里只取了概率最高的 12 个，再在它们之间归一化，所以显示的“原始概率”比上面输出里的大；真实的分布里，这 12 个只占 20%。" />
+
+**温度**：0.5 时最高的概率从 0.032 涨到 0.164，凑够 90% 只要 60 个 token；1.5 时最高的只剩 0.011，要 1270 个。**Top-k = 10** 不管分布怎样都留 10 个；**Top-p = 0.9** 留下 573 个，因为分布太平了。在一个“拿不准”的模型上，Top-p 几乎不起作用，Top-k 反而是更有力的约束。这和大模型上的经验相反：大模型的分布通常很尖，Top-p 只留几个候选，比固定的 k 更灵活。
+
+**几种解码方式的输出**，都从“KV Cache 的大小”开始：
+
+- **贪心**：“KV Cache 的大小。”然后一连串的 `<|endoftext|>`，最后又回到“KV Cache Cache Cache Cache”。句号之后，模型认为最可能的是“换一篇文章”；换了文章，开头最可能的还是一个分隔符……贪心每一步都选最可能的，一旦进入这种自我强化的循环，就再也出不来。这是第 73 讲说的贪心的典型毛病，在小模型上格外明显。
+- **温度 0.7 + Top-k 40**：“看清楚：第 1 讲说过 讲清楚：Llama-3-8B 的 个 token……”句子的碎片都像讲义（“第 1 讲说过”“Llama-3-8B”），连起来没有意思。
+- **温度 1.0**：出现了“30 GiB”“2.4 GbE”“2.3 ms”“decode”：讲义里到处是带单位的数字，模型学会了这种“样子”。
+- **温度 1.5**：分布被抹平，低概率的 token 大量出现，开始出现“Sling”“adDecoding”这样的拼凑和不成词的组合。
+- **温度 1.0 + Top-p 0.9**：“为什么单字（30 讲），还需要一个用户看到第一个 KV Cache……耗时也随长度线性增长。”有几个片段相当像样。
+
+这些结果说明，一个模型生成得好不好，不只看模型本身，**解码方式能把同一个模型变成“复读机”或“胡言乱语”**。实际服务里，温度和 Top-p 通常由调用方设置，推理引擎负责在采样这一步把它们实现对（第 73 讲；miniinfer 只做了贪心）。
+
+<Note kind="point">贪心容易陷进重复的循环；温度控制分布的尖平，Top-k 固定留 k 个，Top-p 留下累计概率够 p 的最少几个。模型越拿不准（分布越平），Top-p 留得越多、约束越弱。</Note>
+
+## 存档有多大、读回来对不对
+
+演示的最后一段：只存参数是 20.6 MiB（530 万 × 4 字节，加上名字等少量开销）；带上优化器状态是 61.2 MiB，正好约 3 倍，因为 AdamW 给每个参数存了两份滑动平均。重新读一遍存档，同一句话的 logits 逐位相同。
+
+放大到真实模型：一个 70 亿参数的模型，BF16 的参数是 14 GB，训练时的存档还要加上 FP32 的主参数和两份 FP32 的滑动平均（每个参数 12 字节），一共约 100 GB。这就是为什么大模型训练的存档要分片、异步地写，存一次档本身就是个工程问题（ZeRO 把优化器状态分到各卡上，见第 103 讲）。
+
+## 续训：优化器状态丢了会怎样
+
+存档里的优化器状态占了三分之二的空间，真的有必要吗？`scripts/resume_demo.py` 从第 900 步的存档出发，用同样的数据顺序、同样的学习率接着训练 140 步，一次读回 AdamW 的状态，一次新建一个 AdamW：
+
+<RunOutput cmd=".venv/bin/python scripts/resume_demo.py" file="minigpt/outputs/resume_demo.txt" caption="图 57-7　从第 900 步接着训练：带不带优化器状态，前 40 步的平均 loss 差约 0.02–0.03，60 步之后基本看不出差别。" />
+
+结果和很多人的直觉相反：差别很小。第 1 步两者完全一样（3.828，这一步的 loss 是在更新之前算的）；前 20 步新建的优化器平均高 0.03，第 21–40 步高 0.02，第 61 步以后，新建的那一次反而略低 0.002–0.008，这已经在噪声的范围内了。
+
+为什么？Adam 有“偏差修正”：滑动平均从 0 开始时，前几步会除以一个小于 1 的系数把它放大回来，所以新建的优化器从第一步起步长就是合理的，并不会因为“没有记忆”而乱走。它丢掉的只是过去的梯度方向信息，几十步就重新攒回来了。
+
+那为什么还要存？一是**可复现**：带上状态，续训和不中断地训练是同一条轨迹，出了问题能对得上；二是在大模型、大学习率的训练里，前几十步的偏差可能触发 loss 尖峰，代价远比这里大。这个实验能说明的只是：在我们这个小模型上，丢了优化器状态不是灾难。
+
+## 检查
+
+<RunOutput cmd=".venv/bin/python tests/check.py g5" file="minigpt/outputs/check_g5.txt" caption="图 57-8　g5 的检查：对一组 5 个打分，Top-k = 2 留下 2 个；Top-p = 0.8 留下累计概率 0.56、0.77、0.90 的前 3 个。" />
+
+## 容易写错的地方
+
+- **Top-p 的边界。**用“自己加上之后的累计概率 ≥ p 就去掉”，会把刚好凑够 p 的那个 token 也去掉；分布特别尖时（第一个就超过 p），会把所有 token 都去掉，softmax 得到一串 NaN。要用“前面的累计概率”判断。
+- **温度为 0 时除以 0。**单独处理成贪心。
+- **续训时数据顺序和学习率没接上。**我们的 `--resume` 接上了步数和学习率，但数据加载器从新的一轮开头重新打乱，所以续训和不中断的训练不是逐位相同的。要完全复现，还得存随机数生成器的状态。
+
+## 回顾
+
+g5 新增 `checkpoint.py`（配置 + 参数 + 优化器状态），`train.py` 在验证 loss 创新低时存 `gpt_best.pt`、支持 `--resume` 续训，`generate.py` 加入温度、Top-k、Top-p 和结束符。dropout 加到 0.2，过拟合变慢了（最后的验证 loss 从 5.86 降到 5.25），最低点却没有更低（4.876，仍在第 900 步）。在第 900 步的存档上，下一个 token 的分布很平，贪心解码陷入了分隔符的循环，加上温度和 Top-k、Top-p 之后，生成的句子才像讲义。
+
+到这里，模型只会“接着写”。下一讲先换个角度：同一份代码，能不能装下别人训练好的、大得多的模型？**g6 · 装进 GPT-2 的权重**。

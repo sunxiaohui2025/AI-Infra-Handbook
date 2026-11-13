@@ -1,0 +1,110 @@
+---
+id: 58
+slug: g6-load-gpt2
+title: g6 · 装进 GPT-2 的权重
+chapter: 2
+part: 7
+problem: 同一份代码换上公开的权重，怎么确认装对了
+prereqs: [35, 43, 55]
+level: 主线
+demos: [GPTArch, CodeWalk, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import GPTArch from '../../components/GPTArch.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[35, 43, 55]} />
+
+我们的模型在 30 万个 token 上训练，十分钟就背下了训练集。OpenAI 的 GPT-2 small 是在约 40 GB 的网页文本（WebText）上训练的，参数是我们的 23 倍，训练用的 token 是我们的几万倍。我们没有条件训练它，但它的权重是公开的。
+
+第 55 讲说过，GPT-2 small 的结构和我们的 `GPT` 类完全一样，只是尺寸不同：V = 50,257、T_max = 1024、d = 768、12 个头、12 层。那么，**能不能把它的权重原封不动地装进我们自己写的模型里？**能。这一讲就做这件事，重点是第二个问题：装完之后，怎么确认装对了。
+
+这也是所有推理引擎都要做的事。第五章 miniinfer 的 `weights.py`（第 118 讲）、vLLM 里每个模型文件的 `load_weights`，做的都是同一件事：把别人训练好的权重文件，按名字对应到自己写的模型里。
+
+<GPTArch ver="g6" caption="图 58-1　g6 新增 gpt2.py：把 HuggingFace 格式的 GPT-2 权重改名、拆分、转置，装进同一个 GPT 类。模型本身一行不改。" />
+
+## 名字对上，形状对上
+
+HuggingFace 的 GPT-2 权重是一个“名字 → 张量”的字典，一共 149 个张量。拿我们的模型对照，每个都能找到对应：
+
+| HuggingFace 的名字 | 我们的名字 | 要做什么 |
+| --- | --- | --- |
+| `wte.weight` [50257, 768] | `tok_emb.weight` | 直接复制 |
+| `wpe.weight` [1024, 768] | `pos_emb.weight` | 直接复制 |
+| `h.i.ln_1.weight` / `.bias` | `blocks[i].norm1.scale` / `.shift` | 直接复制 |
+| `h.i.attn.c_attn.weight` [768, 2304] | `W_q`、`W_k`、`W_v` 的权重 | 按列切成三份，各自转置 |
+| `h.i.attn.c_attn.bias` [2304] | `W_q`、`W_k`、`W_v` 的偏置 | 切成三份 |
+| `h.i.attn.c_proj.weight` [768, 768] | `out_proj.weight` | 转置 |
+| `h.i.mlp.c_fc.weight` [768, 3072] | `ff.net[0].weight` | 转置 |
+| `h.i.mlp.c_proj.weight` [3072, 768] | `ff.net[2].weight` | 转置 |
+| `ln_f.weight` / `.bias` | `final_norm.scale` / `.shift` | 直接复制 |
+| `lm_head.weight` | `out_head.weight` | 就是 `wte`，复制一份 |
+
+有两处存法和我们不同。
+
+**第一，Conv1D 的权重要转置。**GPT-2 最早是用 TensorFlow 写的，它的线性层叫 Conv1D（名字是历史遗留，其实就是线性层），权重存成 [输入, 输出]，计算是 x · W。PyTorch 的 `nn.Linear` 存成 [输出, 输入]，计算是 x · Wᵀ。同一个变换，两种存法互为转置。HuggingFace 为了能直接读 OpenAI 原始的权重文件，保留了 Conv1D 的存法。
+
+**第二，q、k、v 拼在一起。**GPT-2 用一个 [768, 2304] 的 `c_attn` 一次算出 q、k、v，2304 = 3 × 768，前 768 列是 q，接着 768 列是 k，最后 768 列是 v。我们的模型是三个分开的线性层，所以要按列切成三份。这和第 54 讲“所有头的投影合成一个矩阵”是同一个道理，只是再往前走了一步：把 q、k、v 三个矩阵也合成一个。vLLM 里叫 `QKVParallelLinear`，也是这样合并的，一次矩阵乘法比三次快。
+
+还有一处配置要打开：GPT-2 的 q、k、v 投影带偏置，所以 `qkv_bias=True`。LayerNorm 的 ε = 10⁻⁵、GELU 用 tanh 近似、方差除以 d，这些第 55 讲写模型时就是照 GPT-2 来的，不用改。
+
+## gpt2.py
+
+<CodeWalk file="minigpt/g6/gpt2.py" steps={[
+  { lines: [13, 15], title: '从 HuggingFace 的配置换算', body: '<p>HuggingFace 的 <code>config.json</code> 里，词表叫 <code>vocab_size</code>，上下文叫 <code>n_positions</code>，隐藏维度叫 <code>n_embd</code>，头数、层数是 <code>n_head</code>、<code>n_layer</code>。换成我们的名字，打开 q/k/v 偏置；dropout 设成 0，因为只用来推理。</p>' },
+  { lines: [18, 27], title: '一个带检查的复制函数', body: '<p>先建一个同尺寸的空模型，权重是随机的；然后一个个覆盖掉。</p><p><code>put</code> 做三件事：需要的话转置；检查形状一致，不一致就报错并打印两边的形状；用 <code>copy_</code> 原地复制。原地复制保证参数还是模型里原来那个张量对象，优化器、设备都不受影响。</p><p>名字去掉 <code>transformer.</code> 前缀：HuggingFace 的 <code>GPT2LMHeadModel</code> 存的名字带这个前缀，OpenAI 原始格式转来的文件有的不带，两种都能读。</p>' },
+  { lines: [29, 32], title: '嵌入：直接复制', body: '<p><code>nn.Embedding</code> 的权重本来就是 [词表, d]，和 <code>wte</code> 的存法一样，不用转置。</p>' },
+  { lines: [33, 38], title: '注意力：切开、转置', body: '<p><code>split(c.d, dim=1)</code> 把 [768, 2304] 按列切成三个 [768, 768]，依次是 q、k、v。每个都是 Conv1D 的存法 [输入, 输出]，转置后装进 <code>nn.Linear</code>。偏置是一维的 [2304]，切成三段，不用转置。</p><p>切的方向很重要：按行切（<code>dim=0</code>）也能得到三个 768 × 768 的方阵，形状对得上，结果却完全错了。</p>' },
+  { lines: [39, 42], title: '其余的线性层：转置', body: '<p><code>c_proj</code>、<code>c_fc</code>、<code>mlp.c_proj</code> 都要转置。注意 <code>c_fc</code> 是 [768, 3072]，我们的是 [3072, 768]，忘了转置会被形状检查拦下来；但 <code>attn.c_proj</code> 是 768 × 768 的方阵，转不转置形状都对，检查拦不住。下面会专门试一下这种错误。</p>' },
+  { lines: [43, 45], title: '最后的 LayerNorm 和输出层', body: '<p>GPT-2 的输出层和 token 嵌入共用一份权重，文件里只有 <code>wte</code>。我们的模型输出层是单独的参数，就把 <code>wte</code> 复制一份进去。这样做多占一份 50257 × 768 的内存（FP32 约 147 MiB）；想省的话，可以写 <code>m.out_head.weight = m.tok_emb.weight</code>，让两者指向同一个张量。</p>' },
+]} />
+
+## 不联网，怎么确认装对了
+
+最直接的验证是：同一份权重，同一串输入，我们的模型和 HuggingFace 的 `GPT2LMHeadModel` 算出的 logits 应该一样。
+
+但这需要先下载 GPT-2 的权重（约 550 MB）。其实不必：**要验证的是“结构和名字的对应关系”，不是权重本身**。transformers 可以按 GPT-2 small 的配置建一个随机初始化的模型，它的权重名字、形状、存法和真正的 GPT-2 完全一样，只是数值是随机的。用它的权重装进我们的模型，两边 logits 一致，就说明 `gpt2.py` 的每一个对应都是对的；换成真正的权重，还是同一套对应。
+
+<RunOutput cmd=".venv/bin/python scripts/check_gpt2.py" file="minigpt/outputs/check_gpt2.txt" caption="图 58-2　和 transformers 的 GPT-2 small 逐位比较：2 条 × 64 个 token、每个位置 50,257 个打分，最大差 5 × 10⁻⁶，每个位置选出的 token 都一样。故意不转置一个方阵，形状照样对，结果全错。" />
+
+**149 个张量、1.24 亿个参数**：这就是“GPT-2 124M”。`lm_head` 和 `wte` 的 `data_ptr` 相同，是同一块内存，印证了共用权重。装进我们的模型是 1.63 亿个参数，多出来的 3860 万就是复制出来的那份输出层，和第 55 讲算的一致。
+
+**最大绝对误差 5 × 10⁻⁶**。为什么不是 0？两边的数学一样，但运算的顺序不完全一样：Conv1D 用 `addmm` 一次算 x · W + b，我们的 `nn.Linear` 走的是另一条路径；softmax、LayerNorm 的实现细节也不同。浮点数加法不满足结合律，加的顺序不同，最后一位就会有差别（第 10 讲）。12 层算下来，差别累积到 10⁻⁶ 量级，相对于几十量级的打分，是第 7 位有效数字的差别。判断标准是 argmax：每个位置选出的 token 都一样，这对生成来说才是重要的。
+
+**故意不转置 `out_proj`**：这个矩阵是 768 × 768，转置前后形状一样，`put` 的形状检查拦不住，程序正常跑完。可 logits 的最大误差变成了 3.29，128 个位置里没有一个选对 token。这是装权重最危险的一类错误：**不报错，只是结果不对**。形状检查只能抓住一部分错误，最后一定要和参考实现逐位比对。第五章 miniinfer 每一版都和 HuggingFace 逐 token 比对，也是这个原因（第 117 讲）。
+
+<Note kind="point">装别人的权重，难点不在复制，而在对应：名字怎么改、哪些要切开、哪些要转置、哪些共用。方阵转置错了不会报错，所以一定要和参考实现比对输出；不需要真的下载权重，同结构的随机权重就能验证对应关系。</Note>
+
+## 用真正的权重生成
+
+验证完结构，换上真正的权重就能生成英文了。`scripts/gpt2_generate.py` 用 `huggingface_hub` 下载 `openai-community/gpt2` 的 `model.safetensors`（约 550 MB）和 `tokenizer.json`，装进我们的模型，再用上一讲写的 `generate` 生成：
+
+```bash
+.venv/bin/python scripts/gpt2_generate.py "Every effort moves you"
+```
+
+注意分词器也要换成 GPT-2 自己的：模型的嵌入表第 i 行，只对它自己的分词器的第 i 个 token 有意义。我们的 4096 词表分词器和它对不上。这里用 tokenizers 库直接读 GPT-2 的 `tokenizer.json`，它是第 21 讲说的字节级 BPE。
+
+本文写作时没有在本机下载、运行这一步，所以这里不贴输出。上面随机权重的比对已经证明，装进去的模型和 transformers 的 GPT-2 逐位一致；换上真正的权重，生成的结果就是 GPT-2 small 本来的水平：语法通顺的英文，内容经常前后不一致。
+
+## 检查
+
+<RunOutput cmd=".venv/bin/python tests/check.py g6" file="minigpt/outputs/check_g6.txt" caption="图 58-3　g6 的检查：一个 2 层、64 维的小号 GPT-2，和 transformers 的 logits 差在 10⁻⁷ 量级。" />
+
+检查里用的是一个 2 层、d = 64 的小号 GPT-2，几毫秒就跑完；它覆盖了和 GPT-2 small 完全相同的名字对应关系。
+
+## 容易写错的地方
+
+- **c_attn 按行切。**`split(d, dim=0)` 也能切出三个方阵，结果是错的。要按列（输出那一维）切。
+- **方阵忘了转置。**`attn.c_proj` 是 d × d，形状检查拦不住，只能靠比对输出。
+- **分词器没换。**用自己的分词器编码、喂给 GPT-2 的权重，模型看到的是一串毫无关系的编号，生成的是乱码；这种错误同样不会报错。
+- **LayerNorm 的 ε 或 GELU 不一致。**ε 写成 10⁻⁶、GELU 用了精确版，误差会明显变大，但大多数位置的 argmax 可能还是对的，容易让人以为只是浮点误差。比对时要同时看最大误差和 argmax，误差比 10⁻⁵ 大很多就要查。
+
+## 回顾
+
+g6 加了 45 行的 `gpt2.py`：把 GPT-2 的 149 个张量改名，`c_attn` 按列切成 q、k、v，Conv1D 的权重转置，`wte` 同时复制进输出层，装进第 55 讲写的 `GPT` 类。和 transformers 的 GPT-2 small 比对，logits 最大差 5 × 10⁻⁶，每个位置的 argmax 一致；忘了转置一个方阵，程序不报错，结果全错。
+
+到这里，我们有了一个自己训练的、只会写讲义腔调的小模型，也能装进一个见过整个互联网的大一点的模型。但它们都只会“接着写”：给它一个问题，它不会回答，只会顺着问题的语气往下编。怎么让模型学会按指令回答？下一讲：**g7 · 指令微调**。

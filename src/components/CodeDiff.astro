@@ -3,10 +3,10 @@
 // 用法：<CodeDiff a="v1/model.py" b="v2/model.py" />。b 文件在 a 版本里不存在时传 a={null}，整份当作新增。
 import fs from 'node:fs';
 import path from 'node:path';
-import { MINI, readMini, lineDiff } from './_mini';
+import { resolveRel, readMini, lineDiff } from './_mini';
 interface Props { a: string | null; b: string; caption?: string; context?: number }
 const { a, b, caption, context = 2 } = Astro.props;
-const left = a && fs.existsSync(path.join(MINI, a)) ? readMini(a) : '';
+const left = a && fs.existsSync(resolveRel(a)) ? readMini(a) : '';
 const d = lineDiff(left, readMini(b));
 const keep = d.map((r, i) => r[0] !== ' ' || d.slice(Math.max(0, i - context), i + context + 1).some((x) => x[0] !== ' '));
 const rows: ({ k: string; t: string; n: number } | { gap: number })[] = [];

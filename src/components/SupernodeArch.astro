@@ -5,7 +5,7 @@
 //   cm384：CloudMatrix384（48 个节点 × 8 NPU，节点内 7 颗一级 UB 交换芯片，7 个二级子平面 × 16 颗）
 //   tpu：TPU v4 的 4×4×4 立方体（每芯片 6 条 ICI 直连邻居，立方体之间经光路交换机 OCS）
 // 读者可以：切换系统；点任意部件看它是什么、带宽多少；切换“路径”看两张卡之间的一次传输经过哪些链路和芯片。
-// 第 103 讲用到；第 56、57 讲也可以复用（传 sys 选默认系统，传 only 只显示部分系统）。
+// 第 115 讲用到；第 64、65 讲也可以复用（传 sys 选默认系统，传 only 只显示部分系统）。
 interface Props { title?: string; caption?: string; sys?: string; only?: string[] }
 const { title = '超节点里是怎么连的', caption, sys = 'hgx', only = ['hgx', 'nvl72', 'cm384', 'tpu'] } = Astro.props;
 const NAMES: Record<string, string> = { hgx: '两台 8 卡服务器', nvl72: 'GB200 NVL72', cm384: 'CloudMatrix384', tpu: 'TPU v4 立方体' };
@@ -65,7 +65,7 @@ const NAMES: Record<string, string> = { hgx: '两台 8 卡服务器', nvl72: 'GB
         gpu: '<b>H100 SXM</b>：80 GB HBM3，显存带宽 3.35 TB/s，BF16 稠密算力约 989 TFLOP/s。18 条第四代 NVLink，每条每方向 25 GB/s，合计每方向 450 GB/s。',
         nvs: '<b>第三代 NVSwitch</b>：每颗 64 个 NVLink 4 端口。HGX H100 的底板上有 4 颗，每张 GPU 的 18 条 NVLink 分别接到这 4 颗上（4、5、5、4 条），任意两张卡之间都能满速通信。',
         nic: '<b>ConnectX-7 网卡</b>：每张 GPU 配一张，400 Gbit/s ≈ 50 GB/s，经 PCIe Gen5 x16 接到 GPU 附近的 PCIe 交换芯片上。跨服务器的数据都要从这里出去。',
-        ib: '<b>InfiniBand 交换网络</b>：连接成百上千台服务器，规模几乎不受限，但每卡只有 50 GB/s，延迟也更高（第 56 讲）。',
+        ib: '<b>InfiniBand 交换网络</b>：连接成百上千台服务器，规模几乎不受限，但每卡只有 50 GB/s，延迟也更高（第 64 讲）。',
         server: '<b>一台 HGX H100 服务器</b>：8 张 GPU、4 颗 NVSwitch、8 张网卡，另有两颗 CPU。DGX H100 整机的功率上限约 10.2 kW。',
       },
     };
@@ -97,7 +97,7 @@ const NAMES: Record<string, string> = { hgx: '两台 8 卡服务器', nvl72: 'GB
       info: {
         tray: '<b>计算托盘</b>：每个托盘 2 颗 Grace CPU + 4 张 Blackwell GPU。CPU 和 GPU 之间用 NVLink-C2C 相连，GPU 可以较高带宽访问 CPU 的内存。',
         gpu: '<b>Blackwell GPU</b>：192 GB HBM3e（公开规格，以官方为准），18 条第五代 NVLink，双向合计 1.8 TB/s，即每方向约 900 GB/s。',
-        spine: '<b>NVLink 背板</b>：机柜后部的铜缆，把 72 张 GPU 和 18 颗交换芯片全部连起来。铜缆在机柜尺度（一两米）内能跑这么高的速率，再远就要用光，成本和功耗会上一个台阶（第 57 讲）。',
+        spine: '<b>NVLink 背板</b>：机柜后部的铜缆，把 72 张 GPU 和 18 颗交换芯片全部连起来。铜缆在机柜尺度（一两米）内能跑这么高的速率，再远就要用光，成本和功耗会上一个台阶（第 65 讲）。',
         nvsw: '<b>NVLink 交换托盘</b>：每盘 2 颗 NVLink Switch 芯片，共 9 盘 18 颗。每张 GPU 往每颗交换芯片各接 1 条 NVLink，所以 72 张卡之间是无阻塞的：任意一半卡同时向另一半全速发送，也不会在交换层排队。',
         nic: '<b>网卡</b>：用于机柜之外的 scale-out 网络。多个 NVL72 之间仍靠 InfiniBand 或以太网连接。',
         ib: '<b>域外网络</b>：连接多个机柜，以及存储和前端服务。',
