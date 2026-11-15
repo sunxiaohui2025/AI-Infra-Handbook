@@ -11,7 +11,7 @@
 [![技术](https://img.shields.io/badge/技术-MDX%20·%20LaTeX-purple)](https://mdxjs.com)
 [![课程规模](https://img.shields.io/badge/课程-133%20讲-brightgreen)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
 [![篇章结构](https://img.shields.io/badge/结构-5%20章%20·%2017%20篇-9cf)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
-[![交互组件](https://img.shields.io/badge/交互组件-135%20个-orange)](#交互组件库)
+[![交互组件](https://img.shields.io/badge/交互组件-135%20个-orange)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
 [![语言](https://img.shields.io/badge/语言-简体中文-green)](#)
 [![GitHub Stars](https://img.shields.io/github/stars/sunxiaohui2025/AI-Infra-Handbook?style=social)](https://github.com/sunxiaohui2025/AI-Infra-Handbook)
 [![GitHub Forks](https://img.shields.io/github/forks/sunxiaohui2025/AI-Infra-Handbook?style=social)](https://github.com/sunxiaohui2025/AI-Infra-Handbook)
@@ -27,12 +27,9 @@
 - [这是什么](#这是什么)
 - [在线阅读](#在线阅读)
 - [课程结构](#课程结构)
-- [设计原则](#设计原则)
-- [示例约定：数字从哪来](#示例约定数字从哪来)
-- [交互组件库](#交互组件库)
+- [全文用到的案例模型：数字从哪来](#全文用到的案例模型数字从哪来)
 - [学习路线](#学习路线)
 - [本地运行](#本地运行)
-- [写作与开发工作流](#写作与开发工作流)
 - [参考与致谢](#参考与致谢)
 
 ---
@@ -49,15 +46,6 @@
 章节主线：**数学基础 → 大模型基础 → 单机推理 → 分布式推理 → 综合项目**。
 前两章打基础，后三章是推理优化的主体。
 
-**网站页面**
-
-| 路径 | 内容 |
-| --- | --- |
-| `/` | 首页学习路线图：5 章横排，完整 / Infra 快速两条路线可切换 |
-| `/p/<篇>` | 篇页：本篇学习目标 + 讲列表 |
-| `/l/<讲>` | 文章页：正文 + 前置知识、上一讲 / 下一讲自动生成 |
-| `/search.json` | 顶栏 `⌘K`（或 `/`）的全局搜索索引 |
-
 ## 在线阅读
 
 **网站：** **<https://ai-infra-handbook.sunxiaohui2022.workers.dev/>**
@@ -65,9 +53,6 @@
 - 首页 5 章横排成学习路线图，「完整路线 / Infra 快速路线」可切换，选择会记在浏览器里。
 - 顶栏 `⌘K` 或 `/` 全局搜索：按讲名 / 问题 / 编号 / 小节即时过滤。
 - 每篇、每讲都有自动生成的前置知识链接与上下讲导航。
-
-> 本仓库即网站仓库（源码在 `site/`）。下面**课程结构**里的每一讲，
-> 都超链接到它的源文件 `src/content/lectures/NN-slug.mdx`，点击即可在 GitHub 上阅读该讲的完整 Markdown。
 
 ---
 
@@ -98,10 +83,7 @@
 | 五 综合项目 | 16 解读 nano-vllm | 126–128 | 读一个千行级的引擎源码，并动手改造 |
 | 五 综合项目 | 17 主流推理引擎 | 129–133 | vLLM、SGLang 等架构与源码阅读方法 |
 
-### 全部课程（点击讲标题即可读对应 .mdx）
-
-> ⭐ = 重点；**（选读）** = 可选跳过（第 6 篇整篇为轻量线）。
-
+### 全部课程（点击讲标题即可读对应 .mdx） 
 
 #### 第一章 数学基础
 
@@ -346,16 +328,8 @@
 | [132 · 其他引擎与规模化部署](./src/content/lectures/132-other-engines-at-scale.mdx) | TensorRT-LLM、LMDeploy、llama.cpp，以及大规模 EP 的实现 | 对应原理讲 108–116 |
 | [133 · 怎么读大型引擎的源码](./src/content/lectures/133-reading-engine-source.mdx) | 从哪里读起、怎么定位、怎么压测和贡献 | 对应原理讲 66、82 |
 
-## 设计原则
 
-- **一讲一个点**：开头能用一句话回答「它解决什么问题」。
-- **从问题出发**：先演示没有它会出什么问题，再引出它本身。
-- **一个例子贯穿全站**：同一个玩具模型从矩阵乘法一直用到完整前向传播。
-- **落到工程**：每讲都说明它对显存、速度、成本的影响。
-- **分主线与选读**：116 讲主线；17 讲选读（含第 6 篇整篇「训练全流程」）可跳过。
-- **组件先行**：交互被归纳成可复用组件，组件服务多讲，而不是每讲单独开发。
-
-## 示例约定：数字从哪来
+## 全文用到的案例模型：数字从哪来
 
 全站只用两套例子，读者在不同讲里反复见到同一组数字，前后就能对上。
 
@@ -381,29 +355,6 @@
 
 **硬件**：一张数据中心 GPU（如 H100）作主参照，DGX Spark 作实测机器；两者带宽相差约十倍，正好用来讲 Roofline。
 
-## 交互组件库
-
-正文共引用 **135 个组件**（`src/components/` 下共 143 个文件；其余的 `Mat`、`Note`、`Callout`、`Figure`、`PrereqLinks`、`SideNav` 等是排版 / 说明用的基础组件）。
-多数组件服务单独一讲的演示，下面这些是**跨讲复用**的核心交互组件。
-
-| 组件 | 被讲引用 | 用途 |
-| --- | --- | --- |
-| `CodeWalk` | 22 | 逐行走读讲解代码 |
-| `RunOutput` | 22 | 展示脚本的真实运行输出 |
-| `EngineArch` | 9 | 推理引擎的模块结构图 |
-| `GPTArch` | 8 | GPT 架构结构图 |
-| `CodeDiff` | 8 | 代码改动的 diff 对比 |
-| `ForwardPass` | 4 | 完整前向传播的数值步进 |
-| `AttentionView` | 3 | 自注意力 / 多头的注意力热力图 |
-| `EngineProcs` | 3 | 引擎里一个请求的运转流程 |
-| `NanoArch` | 3 | nano-vllm 结构图 |
-| `LossSurface` | 2 | loss 曲面与梯度下降轨迹 |
-| `MatrixStepper` | 2 | 矩阵乘法步进器：逐格高亮「行 × 列」 |
-| `VectorPlane` | 2 | 在平面上拖动向量，看坐标与夹角 |
-| `RooflinePlot` | 2 | Roofline 图：算力 / 带宽瓶颈 |
-| `NextToken` | 2 | 下一个 token 的概率排行 |
-
-> 两套例子（TinyLM 与真实模型）的数字一律来自脚本计算结果，不在组件里手写。
 
 ## 学习路线
 
@@ -439,20 +390,8 @@ site/
 
 > 网站构建读的是镜像 `site/miniinfer/`、`site/minigpt/`：文章新引用这些目录下的文件后，在 `site/` 下运行 `python3 scripts/sync_miniinfer.py` 同步。
 
-## 写作与开发工作流
-
-内容由大模型逐讲生成，配套三个「三件套」保证全站统一：`写作规范.md`、玩具模型参数（`tinylm/tinylm.py`）、符号与术语表。
-
-1. 每次只生成一讲：按大纲里该讲的「解决什么问题」和前置讲来写。
-2. 数字必须跑代码：手算部分的每个数值都由脚本算出，文章引用脚本输出，避免手算出错。
-3. 组件单独开发：文章里只引用组件和参数，组件在页面里开发和调试。
-4. 人工审校三件事：「解决什么问题」是否讲清；用到的概念是否都在前面讲过；演示和代码里的数字是否都由脚本算出、前后一致。
-5. 一份内容三处发布：网站文章是母版，公众号长文按篇合并，视频从交互演示里挑最有画面感的一讲来录。
-
 ## 参考与致谢
 
-- 内容结构：`AI Infra 学习网站大纲.md`（133 讲的技术点、要解决的问题、计划中的交互、示例约定）。
-- 写作约定：`写作规范.md`（文风、结构、演示、数字来源、自查清单）。
 - 实践参考：miniinfer（手写迷你推理引擎 v0–v5）、nano-vllm、vLLM、SGLang 等开源项目源码；也向李博杰《深入理解 AI Infra》这类优秀的开源课程/图书致意。
 
 ---
