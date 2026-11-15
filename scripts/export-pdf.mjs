@@ -81,7 +81,7 @@ html, body { background: #f9f8f5; }
 .mid { margin-top: 22mm; text-align: center; }
 .rule { width: 54px; height: 3px; background: #1f6b5a; margin: 0 auto 22px; }
 .kicker { font-family: "Noto Sans SC", sans-serif; font-size: 13px; letter-spacing: .22em; color: #5c5b55; }
-h1.title { font-size: 58px; line-height: 1.14; font-weight: 700; color: #1d1d1b; margin: 12px 0 10px; letter-spacing: .02em; }
+h1.title { font-size: 44px; line-height: 1.22; font-weight: 700; color: #1d1d1b; margin: 14px 0 10px; letter-spacing: .01em; white-space: nowrap; }
 .sub { font-family: "Noto Sans SC", sans-serif; font-size: 15px; color: #706e66; margin-top: 12px; letter-spacing: .08em; }
 .author { margin-top: 30mm; text-align: center; font-family: "Noto Sans SC", sans-serif; }
 .author .row { display: flex; align-items: baseline; justify-content: center; gap: 14px; margin: 7px 0; }
