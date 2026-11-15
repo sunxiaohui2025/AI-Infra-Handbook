@@ -16,7 +16,7 @@
 [![GitHub Stars](https://img.shields.io/github/stars/sunxiaohui2025/AI-Infra-Handbook?style=social)](https://github.com/sunxiaohui2025/AI-Infra-Handbook)
 [![GitHub Forks](https://img.shields.io/github/forks/sunxiaohui2025/AI-Infra-Handbook?style=social)](https://github.com/sunxiaohui2025/AI-Infra-Handbook)
 
-> **在线阅读：** <https://ai-infra-handbook.sunxiaohui2022.workers.dev/> 　 | 　**源码仓库：** <https://github.com/sunxiaohui2025/AI-Infra-Handbook>
+> **在线阅读：** <https://ai-infra-handbook.sunxiaohui2022.workers.dev/> 　 | 　**PDF 下载：** <https://raw.githubusercontent.com/sunxiaohui2025/AI-Infra-Handbook/main/release/AI-Infra-HandBook.pdf> 　 | 　**源码仓库：** <https://github.com/sunxiaohui2025/AI-Infra-Handbook>
 
 </div>
 
@@ -49,6 +49,8 @@
 ## 在线阅读
 
 **网站：** **<https://ai-infra-handbook.sunxiaohui2022.workers.dev/>**
+
+**PDF 合订本下载：** **<https://raw.githubusercontent.com/sunxiaohui2025/AI-Infra-Handbook/main/release/AI-Infra-HandBook.pdf>**（单文件约 1162 页，含书封、目录与页码；同样放在仓库 `release/` 目录里）
 
 - 首页 5 章横排成学习路线图，「完整路线 / Infra 快速路线」可切换，选择会记在浏览器里。
 - 顶栏 `⌘K` 或 `/` 全局搜索：按讲名 / 问题 / 编号 / 小节即时过滤。
@@ -372,12 +374,14 @@ npm run build    # 生成静态站点到 dist/
 npm run preview  # 本地预览构建结果
 ```
 
-**导出 PDF**：`npm run pdf:book` 一键生成**全书合订本**（封面 + 总目录 + 每篇扉页 + 各讲 + 页码），输出到 `exports/AI-Infra-HandBook-全书.pdf`。其它几种形式：
+**导出 PDF**：`npm run pdf:book` 一键生成**全书合订本**（封面 + 总目录 + 每篇扉页 + 各讲 + 页码），输出到 `exports/AI-Infra-HandBook-全书.pdf`（构建临时区，被 `.gitignore` 忽略）。其它几种形式：
 
 - `npm run pdf`：默认导出前 4 讲（01–04）合成一本
 - `npm run pdf:all`：按「篇」分组，每篇一册（封面 + 篇目录 + 各讲）
 - `node scripts/export-pdf.mjs 1 2 3 4`（或 `1,2,3,4`）：指定若干讲合成一本
 - `node scripts/export-pdf.mjs book --no-build`：跳过 `astro build`，直接用现有 `dist/`
+
+**发布下载版**：`npm run pdf:release` 把《全书》压缩后发布到仓库 `release/AI-Infra-HandBook.pdf`——也就是 README 顶部「PDF 下载」链接指向的那个文件。这个目录**单独管理、随仓库版本走**；而 `exports/` 只是被 `.gitignore` 忽略的构建临时区。
 
 原理：先 `astro build` 生成静态 HTML，再用系统里已装的无头 Chrome（playwright）逐讲渲染，注入 `@media print` 样式去掉站点导航、按 A4 分页，拼上程序生成的封面与目录页，最后用 pdf-lib 合成并加页码（本机需装有 Google Chrome）。
 
@@ -394,6 +398,7 @@ site/
     pages/                    首页、篇页、文章页、搜索索引
     layouts/  styles/         布局与设计系统
   scripts/                    同步镜像、逐讲校验等
+  release/                    发布的《全书》PDF 成品（README 顶部下载链接指向这里）
   tinylm/  minigpt/           玩具模型 / 迷你 GPT（数字与代码的来源）
 ```
 

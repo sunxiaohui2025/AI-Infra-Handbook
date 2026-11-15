@@ -10,7 +10,8 @@
     "pdf": "node scripts/export-pdf.mjs",
     "pdf:book": "node scripts/export-pdf.mjs book",
     "pdf:all": "node scripts/export-pdf.mjs all",
-    "pdf:compress": "bash scripts/compress-pdf.sh exports/AI-Infra-HandBook-全书.pdf"
+    "pdf:compress": "bash scripts/compress-pdf.sh exports/AI-Infra-HandBook-全书.pdf",
+    "pdf:release": "bash scripts/publish-pdf.sh"
   },
   "dependencies": {
     "@astrojs/mdx": "4.3.14",
