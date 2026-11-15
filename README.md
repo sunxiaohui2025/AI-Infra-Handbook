@@ -374,7 +374,7 @@ npm run build    # 生成静态站点到 dist/
 npm run preview  # 本地预览构建结果
 ```
 
-**导出 PDF**：`npm run pdf:book` 一键生成**全书合订本**（封面 + 总目录 + 每篇扉页 + 各讲 + 页码），输出到 `exports/AI-Infra-HandBook-全书.pdf`（构建临时区，被 `.gitignore` 忽略）。其它几种形式：
+**导出 PDF**：`npm run pdf:book` 一键生成**全书合订本**（封面 + 总目录 + 每篇扉页 + 各讲 + 页码），输出到 `exports/AI-Infra-HandBook-全书.pdf`（构建临时区，被 `.gitignore` 忽略）。合订本会自动带上**导航目录**：侧边栏书签（篇 → 讲）＋目录页每一行可点击直达对应章节/讲。其它几种形式：
 
 - `npm run pdf`：默认导出前 4 讲（01–04）合成一本
 - `npm run pdf:all`：按「篇」分组，每篇一册（封面 + 篇目录 + 各讲）
@@ -383,7 +383,7 @@ npm run preview  # 本地预览构建结果
 
 **发布下载版**：`npm run pdf:release` 把《全书》压缩后发布到仓库 `release/AI-Infra-HandBook.pdf`——也就是 README 顶部「PDF 下载」链接指向的那个文件。这个目录**单独管理、随仓库版本走**；而 `exports/` 只是被 `.gitignore` 忽略的构建临时区。
 
-原理：先 `astro build` 生成静态 HTML，再用系统里已装的无头 Chrome（playwright）逐讲渲染，注入 `@media print` 样式去掉站点导航、按 A4 分页，拼上程序生成的封面与目录页，最后用 pdf-lib 合成并加页码（本机需装有 Google Chrome）。
+原理：先 `astro build` 生成静态 HTML，再用系统里已装的无头 Chrome（playwright）逐讲渲染，注入 `@media print` 样式去掉站点导航、按 A4 分页，拼上程序生成的封面与目录页，用 pdf-lib 合成并加页码；随后用 `scripts/add-pdf-nav.py`（python3 + PyMuPDF）写入侧边栏书签与目录可点击链接。压缩/发布用的是 Ghostscript（`brew install ghostscript`），会完整保留这些导航。（本机需装有 Google Chrome、python3 + PyMuPDF 与 Ghostscript。）
 
 `scripts/check_lecture.py N` 会运行第 N 讲里的代码，并和贴出的输出逐字比对。
 

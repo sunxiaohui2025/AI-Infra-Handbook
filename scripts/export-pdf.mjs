@@ -16,7 +16,7 @@ import { PDFDocument, rgb } from 'pdf-lib';
 import http from 'node:http';
 import fs, { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 
@@ -305,9 +305,16 @@ function groupByPart(lectures, pn) {
 /* ---------- 渲染 ---------- */
 async function renderHtmlToPdf(browser, html, margin) {
   const page = await browser.newPage({ viewport: { width: 900, height: 1200 } });
-  await page.setContent(html, { waitUntil: 'networkidle' });
-  try { await page.evaluate(() => document.fonts && document.fonts.ready); } catch (e) {}
-  await page.waitForTimeout(200);
+  // 不阻塞外部资源（Google Fonts 等）的加载完成：等 DOM 就绪即可，
+  // 字体只做有界等待（最多 3s），避免单个资源挂起拖垮整本书。
+  await page.setContent(html, { waitUntil: 'domcontentloaded' });
+  try {
+    await Promise.race([
+      page.evaluate(() => document.fonts && document.fonts.ready),
+      new Promise((r) => setTimeout(r, 3000)),
+    ]);
+  } catch (e) {}
+  await page.waitForTimeout(400);
   const buf = await page.pdf({ format: 'A4', printBackground: true, margin });
   await page.close();
   return buf;
@@ -373,7 +380,18 @@ async function renderBook(browser, parts, pn, chStats) {
   const bufs = [cover, tocBuf];
   for (const pd of partData) bufs.push(pd.divider, ...pd.lecBufs);
   const merged = await mergePdfs(bufs, 1);
-  return { merged, totalPages, count: allLectures.length, range, tocPages };
+  // pageMap 是「去掉封面后的编号页码」：mergePdfs 从封面(第1页)起不编页码，
+  // 故「编号页码 N」对应「绝对页 N + 封面页数」。PDF 书签/链接要用绝对页号。
+  const coverPages = (await PDFDocument.load(cover)).getPageCount();
+  const navMerged = await addPdfNav(merged, {
+    title: '《AI Infra-HandBook》',
+    tocPages,
+    parts: parts.map((p) => ({
+      part: p.part, name: p.name, page: pageMap.div[p.part] + coverPages,
+      lectures: p.lectures.map((l) => ({ id: l.id, title: l.title, page: pageMap.lec[l.id] + coverPages })),
+    })),
+  });
+  return { merged: navMerged, totalPages, count: allLectures.length, range, tocPages };
 }
 
 async function renderLecturePdf(browser, id) {
@@ -412,6 +430,27 @@ async function mergePdfs(bufs, firstNumberedIndex) {
     });
   });
   return await merged.save();
+}
+
+/* ---------- 导航目录（书签 + 目录页可点击） ---------- */
+async function addPdfNav(buf, manifest) {
+  // 需要 python3 + PyMuPDF；缺失时降级为无导航版，不阻断导出。
+  const inPdf = path.join(TMP, 'book_in.pdf');
+  const outPdf = path.join(TMP, 'book_out.pdf');
+  const manPdf = path.join(TMP, 'book_manifest.json');
+  fs.writeFileSync(inPdf, buf);
+  fs.writeFileSync(manPdf, JSON.stringify(manifest));
+  try {
+    execFileSync('python3', [path.join(ROOT, 'scripts', 'add-pdf-nav.py'), inPdf, outPdf, manPdf],
+      { stdio: ['ignore', 'pipe', 'pipe'] });
+    const out = fs.readFileSync(outPdf);
+    console.log('  ✓ 已加导航目录（书签 + 目录页可点击）');
+    return out;
+  } catch (e) {
+    const err = (e.stderr || e.message || '').toString().trim().slice(0, 200);
+    console.warn(`  提示：未能生成导航目录（需 python3 + PyMuPDF），已退回无导航版。${err}`);
+    return buf;
+  }
 }
 
 /* ---------- 静态服务器 ---------- */
@@ -484,8 +523,18 @@ async function main() {
           return buf;
         });
         const merged = await mergePdfs([cover, toc, ...lecBufs], 1);
+        const bookletTocPages = (await PDFDocument.load(toc)).getPageCount();
+        const bookletMap = {};
+        let bnext = 1 + bookletTocPages;
+        for (const l of p.lectures) { bookletMap[l.id] = bnext; bnext += (await PDFDocument.load(lecBufs[ids.indexOf(l.id)])).getPageCount(); }
+        const coverPages = (await PDFDocument.load(cover)).getPageCount();
+        const navMerged = await addPdfNav(merged, {
+          title: `第 ${p.part} 篇 · ${p.name}`, tocPages: bookletTocPages,
+          parts: [{ part: p.part, name: p.name, page: 1,
+                    lectures: p.lectures.map((l) => ({ id: l.id, title: l.title, page: bookletMap[l.id] + coverPages })) }],
+        });
         const fname = `第${p.part}篇-${p.name}.pdf`;
-        fs.writeFileSync(path.join(OUT_DIR, fname), merged);
+        fs.writeFileSync(path.join(OUT_DIR, fname), navMerged);
         done++;
         console.log(`  ✓ 第 ${p.part} 篇《${p.name}》 → ${fname}（${p.lectures.length} 讲）`);
       }

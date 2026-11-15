@@ -24,5 +24,5 @@ mkdir -p "$(dirname "$DEST")"
 cp -f "$TMP" "$DEST"
 
 SIZE=$(du -h "$DEST" | cut -f1)
-echo "✅ 已发布下载版：$DEST（${SIZE}）"
+echo "✅ 已发布下载版：${DEST}（${SIZE}）"
 echo "   GitHub 下载链接：https://raw.githubusercontent.com/sunxiaohui2025/AI-Infra-Handbook/main/release/AI-Infra-HandBook.pdf"
