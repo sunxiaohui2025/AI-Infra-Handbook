@@ -1,0 +1,15 @@
+v1：一共编译了 27 张图，每张图的节点数 [6, 72, 17, 8, 72, 17] …
+   prefill，5 个 token：新编译 26 张图
+   decode 第 1 步：新编译 1 张图
+   decode 第 2 步：新编译 0 张图
+   decode 第 3 步：新编译 0 张图
+   explain：25 张图，24 处图中断
+   第一处中断的原因：Unsupported Tensor.item() call with capture_scalar_outputs=False
+port：一共编译了 2 张图，每张图的节点数 [3319, 3320]
+   prefill，5 个 token：新编译 1 张图
+   decode 第 1 步：新编译 1 张图
+   decode 第 2 步：新编译 0 张图
+   decode 第 3 步：新编译 0 张图
+   explain：1 张图，0 处图中断
+默认（按形状特化）：共 3 张图　prefill 8 个 token：+1，prefill 16 个 token：+1，prefill 24 个 token：+0，prefill 8 个 token：+0，decode：+1，decode：+0，decode：+0
+dynamic=True（一次编译，形状当变量）：共 3 张图　prefill 8 个 token：+1，prefill 16 个 token：+1，prefill 24 个 token：+0，prefill 8 个 token：+0，decode：+1，decode：+0，decode：+0

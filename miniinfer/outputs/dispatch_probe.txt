@@ -1,0 +1,30 @@
+一、aten::mm 注册在哪些分发键上（只列设备键和回退键）
+  CPU                 RegisterCPU_0.cpp:3246
+  MPS                 RegisterMPS_0.cpp:12779
+  Meta                _meta_registrations.py:53
+  SparseCPU           RegisterSparseCPU_0.cpp:1319
+
+二、几个算子在各个键上有没有实现（有 = 这个键上注册了一份真正的实现）
+  算子                                                 CPU     MPS    CUDA      复合
+  aten::mm                                               有       有       —       —
+  aten::_scaled_mm                                       有       —       —       —
+  aten::_int_mm                                          有       有       —       —
+  aten::_scaled_dot_product_flash_attention              —       —       —       —
+  aten::rms_norm                                         —       —       —       有
+  CUDA 一列全是空：本机这份 PyTorch 没有编进 CUDA 实现，分发表里就没有这个键的条目。
+  rms_norm 一行三个设备键都是空，但它能在任何设备上跑：它是复合算子，最后一列说明它被拆成 pow、mean、rsqrt、mul 再分发。
+
+三、分发是按设备键查表：给 MPS 换一份 mm 的实现，看调用被转到哪里
+  注册之后 x @ w：进了我们的实现 1 次，输入形状 ((2, 3), (3, 4))，输出 (2, 4)，每个元素都是 3：True
+  注销之后再算一次：进我们的实现 1 次（没有再进），结果仍然对：True
+  一块新卡的接入就是这件事的规模化：几千个算子逐个注册到自己的键上。
+
+三之二、注册一个全新的设备名（PrivateUse1）
+  rename + 生成接口之后，Python 侧多出来的东西：Tensor.mychip -> True ，Tensor.is_mychip -> True ，Module.mychip -> True
+  但 torch.empty(2, 2, device='mychip') 还不能用：显存分配器、流、事件、拷贝都要在 C++ 里实现。
+  这就是 ROCm 式接法（沿用 CUDA 键）和 PrivateUse1 式接法的分界：前者白拿 CUDA 那一套，后者从零铺。
+
+四、缺算子时的两种结局（以 MPS 上没有的 aten::_scaled_mm 为例）
+  直接调用： The operator 'aten::_scaled_mm' is not currently implemented for the MPS device
+  打开 PYTORCH_ENABLE_MPS_FALLBACK=1 后，PyTorch 会把它悄悄搬到 CPU 上算完再搬回来，
+  正确性没问题，但一次调用要多两趟拷贝——第 140 讲量过这笔账。

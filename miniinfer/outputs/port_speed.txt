@@ -1,0 +1,10 @@
+decode 一步要读的权重：596 M 个参数，FP32 2.38 GB，FP16/BF16 1.19 GB
+版本    设备   精度         prefill(199)   decode 每步    64 步合计   生成的前 8 个 token 和 CPU FP32 一致吗
+v1    cpu  float32          355 ms     64.9 ms    4.44 s   一致
+v1    mps  float32          170 ms     55.5 ms    3.67 s   一致
+port  mps  float32          141 ms     49.3 ms    3.25 s   一致
+port  mps  float16          130 ms     32.9 ms    2.20 s   一致
+port  mps  bfloat16         196 ms     33.1 ms    2.28 s   一致
+port  cpu  bfloat16        3683 ms     50.6 ms    6.87 s   一致
+MPS 上下发一个很小的 add：平均 5.2 μs
+MPS 上int(张量)：等设备算完再拷回一个数：平均 139.9 μs

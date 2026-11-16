@@ -1,0 +1,70 @@
+---
+// 硬件 × 精度的支持矩阵（第 145 讲）：某种精度在某类硬件上是原生支持、只能存不能算、还是完全不支持；
+// 并给出没有原生 kernel 时的替代办法和它能省下什么（省显存容量 / 省带宽 / 省时间）。
+// 三列硬件是“按路线设的参数”，不是某款具体型号：读者应按手上卡的官方文档改这张表（海光 DCU 的实际情况见第 152 讲）。
+// 读者可以：点任意格子看这种组合怎么办；切换“看能不能用 / 看能省什么”。
+interface Props { title?: string; caption?: string }
+const { title = '这块卡上，这种精度能不能换来速度', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ps" data-precsupport>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="v"><button data-v="use">能不能用</button><button data-v="gain">能省下什么</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  // 状态：2 原生（矩阵单元直接吃）、1 能存不能算（要反量化）、0 完全不支持（连类型都没有）
+  const HW = ['成熟 GPGPU', '较新的国产 GPGPU', 'NPU / DSA'];
+  const DT = ['FP32', 'TF32 一类', 'BF16', 'FP16', 'FP8', 'INT8', 'FP4 / INT4'];
+  const S: number[][] = [
+    [2, 2, 2, 2, 2, 2, 2],
+    [2, 1, 2, 2, 2, 2, 1],
+    [1, 0, 2, 2, 1, 2, 1],
+  ];
+  const NOTE: Record<string, string> = {
+    'FP32': '推理里只用来做累加和数值敏感的那几步（RMSNorm 的平方和、softmax 的分母，第 139 讲）。权重用 FP32 存是纯浪费：带宽翻倍。',
+    'TF32 一类': '把 FP32 的尾数截短、让矩阵单元能吃的折中格式。有的硬件没有对应物，这时 FP32 的矩阵乘会掉到很低的算力，训练受影响大、推理影响小。',
+    'BF16': '推理的默认选择：指数位和 FP32 一样多，不会像 FP16 那样在平方时溢出（第 139 讲）。几乎所有加速器都原生支持。',
+    'FP16': '尾数比 BF16 多 3 位，数值更准，但指数只有 5 位。本机实测 FP16 的矩阵乘比 BF16 略快，说明同为 16 位在同一块卡上也不等价（第 141 讲）。',
+    'FP8': '权重和 KV 减半的主力（第 93 讲）。关键问题是有没有原生的 FP8 矩阵乘：没有的话只能反量化成 BF16 再算，省显存但不省带宽也不省时间。',
+    'INT8': '最老牌的量化类型，几乎所有硬件都有整数矩阵乘。要注意的是缩放的粒度（按张量、按通道、按分组）和反量化放在哪里（第 90、91 讲）。',
+    'FP4 / INT4': '权重压到四分之一（第 93 讲）。原生 4 位矩阵乘还少见，常见做法是 4 位存储 + 8 位或 16 位计算，收益主要在显存容量和权重读取量。',
+  };
+  const PLAN: Record<number, string> = {
+    2: '原生支持：矩阵单元直接吃这种类型，省下的字节同时变成省下的时间。按官方文档确认峰值算力和支持的缩放粒度。',
+    1: '能存不能算：kernel 里要先反量化成硬件能算的类型。省显存容量，不省带宽（反量化之后仍按高精度乘），而且多一次转换。只有把反量化融进矩阵乘 kernel 内部，才能把“少读的字节”真正变成少花的时间。',
+    0: '完全不支持：连这种数据类型都没有。只能换类型（FP8 换成 INT8）或者把这一段放到支持的精度上算。',
+  };
+  function init(fig: HTMLElement) {
+    let view = 'use', pi = 0, pj = 4;
+    function draw() {
+      const W = 520, cw = 56, x0 = 150;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 ${W} ${HW.length * 34 + 40}">`;
+      DT.forEach((t, j) => { s += `<text class="ai-al-gl" x="${x0 + j * cw + cw / 2}" y="12" text-anchor="middle">${t}</text>`; });
+      HW.forEach((h, i) => {
+        const y = 20 + i * 34;
+        s += `<text class="ai-al-gl" x="${x0 - 6}" y="${y + 18}" text-anchor="end">${h}</text>`;
+        DT.forEach((t, j) => {
+          const v = S[i][j], on = i === pi && j === pj;
+          const cls = v === 2 ? 'ai-ps-2' : v === 1 ? 'ai-ps-1' : 'ai-ps-0';
+          const lab = view === 'use' ? ['不支持', '只能存', '原生'][v] : ['换类型', '省显存', '省时间'][v];
+          s += `<g data-i="${i}" data-j="${j}" class="ai-ps-c${on ? ' is-pick' : ''}"><rect class="${cls}" x="${x0 + j * cw + 2}" y="${y}" width="${cw - 4}" height="26" rx="3"/>`;
+          s += `<text x="${x0 + j * cw + cw / 2}" y="${y + 17}" text-anchor="middle">${lab}</text></g>`;
+        });
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `<b>${HW[pi]} × ${DT[pj]}</b>：${PLAN[S[pi][pj]]}<br><span class="ai-faint">${DT[pj]}：${NOTE[DT[pj]]}</span>`;
+      fig.querySelectorAll('[data-v]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.v === view)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bv = t.closest<HTMLElement>('[data-v]'); if (bv) { view = bv.dataset.v!; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-i]'); if (g) { pi = +g.dataset.i!; pj = +g.dataset.j!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-precsupport]').forEach(init);
+</script>

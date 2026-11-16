@@ -293,7 +293,7 @@
 | [115 · 超节点上的推理](./src/content/lectures/115-supernode-inference.mdx) ⭐ | 高带宽域对哪类负载收益最大 | 基于公开资料的场景对比 |
 | [116 · SLO 与容量规划](./src/content/lectures/116-slo-capacity-planning.mdx) | 给定流量和延迟要求，需要多少卡 | 容量计算器 |
 
-#### 第五章 综合项目：推理引擎
+#### 第五章 推理引擎实践
 
 > 先手写一个迷你推理引擎（每讲一个能跑的版本），再读 nano-vllm，最后读 vLLM、SGLang 等主流引擎。
 

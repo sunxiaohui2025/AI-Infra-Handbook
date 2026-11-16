@@ -1,0 +1,107 @@
+---
+id: 149
+slug: cuda-to-dcu
+title: 从 CUDA 到 DCU：迁移与版本矩阵
+chapter: 6
+part: 20
+problem: HIP、PyTorch DCU 版和版本对应
+prereqs: [136, 137, 147, 148]
+level: 主线
+demos: [VersionMatrix, HipTranslate, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import VersionMatrix from '../../components/VersionMatrix.astro';
+import HipTranslate from '../../components/HipTranslate.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[136, 137, 147, 148]} />
+
+接着上一讲往下一层。手上有一份 CUDA 代码，或者一个装满 `torch.cuda` 调用的推理引擎，怎么搬到 DCU 上？搬完之后为什么 `torch.cuda.is_available()` 还返回真？以及一个更现实的问题：驱动、DTK、PyTorch、引擎、插件、算子库这六层的版本，怎么才能对上。
+
+## 代码迁移：对应第 136 讲的三类
+
+DCU 走的是兼容路线，所以第 136 讲那张逐行表直接适用：
+
+<HipTranslate caption="图 149-1　CUDA 代码迁到 HIP 的三类处理（第 136 讲的表）。对 DCU 来说，第 5、6、7 行尤其要注意——它的波前是 64 条通道，而不是 32。" />
+
+对 DCU 这块卡，三类里各挑最该留意的：
+
+**自动替换**的部分就是运行时 API 和库名。实践中跑一遍 hipify 类工具，九成的行就过去了（第 136 讲在插件源码里数过：`hip` 前缀的运行时调用 36 处，而沿用 CUDA 名字的 47 处）。
+
+**要人工确认**的头号项是**波前 64**。第 148 讲从源码里确认了这个常数。所有 `% 32`、`0xffffffff` 的掩码、从 16 开始折半的归约循环都要改。这类错误不报错、不崩溃，只是结果偏小（第 139 讲的那类静默错误）。
+
+**必须重写**的是内联汇编和矩阵核心指令。DCU 的矩阵指令是 MMAC，而且**同一个形状在不同代上的内建函数名不同**：`gfx928` / `gfx936` 用 `__builtin_amdgcn_mmac_f32_16x16x16bf16`，`gfx938` 用 `__builtin_hcu_mmac_f32_16x16x16_bf16_lit_lts`（第 148 讲引过这段）。所以“迁到 DCU”这件事，在 kernel 层面还要再按代分支一次。
+
+构建这一侧也有对应关系：`nvcc -arch=sm_90` 变成 DCU 编译器加 `--offload-arch=gfx938` 这样的参数；`CUDA_HOME` 的角色由 `ROCM_PATH` 承担，默认指向 `/opt/dtk`。插件的 `setup.py` 里能看到这套东西的真实样子：注册扩展用的仍是 PyTorch 的 `CUDAExtension`，而编译时 PyTorch 会把 HIP 平台的宏塞进每条编译命令（源码注释里专门提到它会把这些宏从构建日志里隐去）。
+
+## 为什么 torch.cuda 照样能用
+
+这是 DCU 适配里最省事的一环，也最容易让人困惑：机器里没有 NVIDIA 的卡，但 `torch.cuda.is_available()` 返回真，`tensor.cuda()` 能用，`torch.cuda.synchronize()` 能用。
+
+原因在第 137 讲讲过：PyTorch 的 DCU 版沿用 ROCm 的做法，把整个后端用 HIP 重新编译，**注册到 CUDA 这个分发键上**。于是：
+
+- 分发器查表时，设备类型是 `cuda`，查的是 CUDA 那一行，而那一行里注册的是为 DCU 编译出的实现；
+- Python 侧的 `torch.cuda` 命名空间照旧；
+- C++ 侧 `at::cuda::getCurrentCUDAStream()` 这类接口照旧；
+- 环境变量用 `CUDA_VISIBLE_DEVICES`。
+
+插件的平台类把这些事实写成了六行声明（`vllm_hcu/platforms/hcu.py`，提交 81cbe8f）：
+
+```text
+_enum = PlatformEnum.ROCM
+device_name: str = "hip"
+device_type: str = "cuda"
+dispatch_key: str = "CUDA"
+ray_device_key: str = "GPU"
+dist_backend: str = "nccl"
+device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+```
+
+这段声明的每一行都在替引擎回答一个问题：PyTorch 侧的设备名用什么（`cuda`）、算子分发走哪个键（`CUDA`）、日志里怎么称呼这块卡（`hip`）、Ray 调度时资源叫什么（`GPU`）、分布式后端名字写什么（`nccl`，底下是 RCCL）、限制可见设备用哪个环境变量。`_enum` 取 `PlatformEnum.ROCM` 还有一个额外效果：引擎里凡是“如果是 ROCm 平台就……”的既有分支自动生效，插件白拿这些处理。
+
+<Note kind="point">这套做法的收益用第 134 讲的话说就是：**上面四层几乎不改**。模型文件不改，引擎的 Python 代码不改，PyTorch 的接口不改，第三方库里写死 `torch.cuda` 的地方也能用。代价是名字和实际硬件不符——报错信息里写着 CUDA，环境变量叫 `CUDA_VISIBLE_DEVICES`，新人上手时要先接受这件事。</Note>
+
+还有一处要留意：`device_count` 不能直接用 `torch.cuda.device_count()`。插件自己实现了一个无状态的版本（`_rocm_device_count_stateless`），因为它要在 `CUDA_VISIBLE_DEVICES` 被改写之后仍然给出正确的卡数——这类“看起来一样、细节不一样”的地方，正是插件存在的理由。
+
+## 版本矩阵：六层都要对
+
+迁移之外，DCU 适配中最耗时间的其实是版本。六层各有自己的节奏，而它们必须成套。
+
+<VersionMatrix caption="图 149-2　六层版本的检查规则（按插件源码里的检查逻辑整理）。逐层换版本，看哪一层先被拒绝、报什么问题。版本号是示例，实际以官方文档和仓库里的声明为准。" />
+
+从源码里能读到的真实规则（提交 81cbe8f）：
+
+**插件 ↔ 引擎**。`vllm_hcu/compatibility.py` 在任何补丁注册之前检查已安装的 vLLM：读发行包的元数据（**不导入 vLLM**，避免副作用），用 PEP 440 的规则解析版本号，要求 epoch 和 `(major, minor, patch)` 与 `__vllm_target_version__` 完全一致，允许预发布、开发版、后发布和本地构建后缀不同。不通过就抛错，而且这个失败会被**锁存**——第二次调用插件入口时直接把同一个错误再抛一遍，不会让一部分补丁打上、另一部分没打。
+
+**版本号里带着来源**。`vllm_hcu/version.py` 里的目标版本串是 `0.28.1rc1.dev491+g462fdb097.das.462fdb0.dtk2604`，另外两个常量分别记着上游 vLLM 的提交和 DAS 分支的提交。这种写法把“这份插件是对着哪一次上游提交审过的”固定在了代码里，比写在文档里可靠。
+
+**环境检查分三种严格程度**。CI 的环境配置（`.github/workflows/configs/hcu-runner-environment.json`）里，Python 版本用 `exact`（只接受 3.10.12 或 3.12.12），`torch` 和 `torch.hip` 用 `prefix`（`2.11.0+`、`6.3.` 或 `7.2.`），DTK 用 `release_line`（26.04、26.10 两条线，线内的补丁号和 `-` / `+` 后缀都接受）。**不同层的容忍度不同**，这是做版本检查时值得抄的设计。
+
+**算子库按标签从厂商归档装**。容器脚本里每个组件都用 `das-install <包名> torch<版本标签>` 装（第 148 讲列过那张清单），注释里说明了为什么不硬编码完整包名：换 DTK 或 torch 版本时不用改构建脚本。还有一句很具体的提醒——`tilelang` 要放在最后装，因为安装真包会替换掉前面为了满足依赖写进去的占位包。
+
+**自检工具**。插件带一个 `vllm-hcu-doctor` 命令，只读元数据和源码、做只读诊断；加 `--no-arm --json` 时连补丁都不注册。文档里同时写着：两种模式都**不能代替**模型精度或设备执行的验证。
+
+<Note kind="warn">版本检查通过不等于能跑对。插件的 README 里把这件事说得很直接：通过版本关卡不代表 PyTorch、DTK 和算子的二进制接口已经验证兼容，也不保证任意上游 vLLM 的 wheel 都能用；模型已注册或存在配置，不代表精度验证已经通过。换句话说，**版本矩阵挡掉的是“肯定不行”的组合，而不是保证“一定行”**。第 153 讲的清单里，精度和性能的验收是单独的两关。</Note>
+
+## 从零到跑起来的顺序
+
+把这一讲和上一讲的内容拼成一条实际路径：
+
+| 步 | 做什么 | 怎么确认这一步过了 |
+| --- | --- | --- |
+| 1 | 装驱动，`hy-smi` 能看到所有卡 | 卡数、显存、温度正常 |
+| 2 | 装与驱动配套的 DTK，设 `ROCM_PATH` | 编译器能编一个最小 kernel；`.info/rocm_version` 的值在支持的发布线上 |
+| 3 | 装 PyTorch 的 DCU 版 | `torch.cuda.is_available()` 为真，`torch.version.hip` 的前缀对；跑一次矩阵乘 |
+| 4 | 装引擎和算子库（用厂商归档的版本） | import 不报符号错误 |
+| 5 | 装插件，跑自检 | `vllm-hcu-doctor` 全绿；版本检查通过 |
+| 6 | 起一个小模型的服务 | 能生成 token（第 153 讲起才是精度和性能的验收） |
+
+第 2 步和第 3 步的配对关系最容易出错：PyTorch 的构建里写着它编译时用的 HIP 版本，和 DTK 必须成套。症状是 import torch 就报符号找不到，或者能 import 但一调 kernel 就崩。
+
+## 回顾
+
+迁到 DCU 的代码工作就是第 136 讲那三类：运行时 API 和库名机械替换；波前 64 相关的写法要人工确认（掩码、归约步数、块内分组）；内联汇编和矩阵指令必须重写，而且 MMAC 的内建函数名按 `gfx928` / `gfx936` / `gfx938` 还要再分支。构建侧 `ROCM_PATH` 取代 `CUDA_HOME`、架构代号从 `sm_90` 变成 `gfx938` 这类串。PyTorch 的 DCU 版把实现注册在 CUDA 分发键上，所以 `torch.cuda` 整套接口照样能用；插件的平台类用六行声明把这件事告诉引擎（`device_type="cuda"`、`dispatch_key="CUDA"`、`dist_backend="nccl"`、`_enum=PlatformEnum.ROCM` 等）。版本上六层要成套，插件在打任何补丁之前先只读元数据检查引擎版本（主次补丁号一致、预发布后缀放宽），CI 对 Python 用精确匹配、对 torch 用前缀、对 DTK 用发布线匹配，算子库一律从厂商归档按标签安装。
+
+版本对上、服务起来之后，就该看插件内部了。下一讲打开 `vllm-plugin-das`：平台类怎么声明自己、运行时补丁怎么做到不改上游一行代码、以及那道版本关卡在代码里长什么样。

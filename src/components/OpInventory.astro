@@ -1,0 +1,64 @@
+---
+// 模型算子清单（第 140 讲）：一个模型用到的算子按“已支持 / 可组合 / 需自写”分类，并按它在一步里占的时间排序。
+// 调用次数来自 bench/port_ops.py 在本机 MPS 上的真实统计（Qwen3-0.6B 一步 decode）；
+// 每类算子的处理方式和“占一步多少时间”按文中给出的口径填（矩阵乘的时间按权重读取量估，其余按调用次数估），
+// 所以这张表是“怎么排优先级”的工具，不是精确的性能剖析——真正的占比要用 profiler 量（第 142 讲）。
+// 读者可以：切换“按时间占比 / 按调用次数”排序，点一行看这个算子缺了怎么办；勾选只看要动手的算子。
+interface Props { title?: string; caption?: string }
+const { title = '一个模型要用哪些算子，缺了怎么办', caption } = Astro.props;
+---
+<figure class="ai-gt ai-oi" data-opinv>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="s"><button data-s="time">按时间占比排</button><button data-s="calls">按调用次数排</button><button data-s="todo">只看要动手的</button></div>
+  <div data-rows></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  // [算子, 一步 decode 的调用次数, 估计的时间占比 %, 状态, 说明]
+  type St = 'ok' | 'compose' | 'write';
+  const OPS: [string, number, number, St, string][] = [
+    ['mm（矩阵乘）', 197, 62, 'ok', '一步要读一遍除嵌入表以外的全部权重，时间几乎都在这里。任何平台都会优先把它做好；要关心的是它在小 M 时选的分块对不对（第 143、151 讲）。'],
+    ['bmm（批矩阵乘，注意力打分与加权）', 56, 9, 'ok', '每层两次。decode 时 M = 1，属于典型的小矩阵乘；厂商库的默认分块常常不适合，这里是 FlashAttention 类算子要替换掉的地方（第 143 讲）。'],
+    ['index_put_（写 KV Cache）', 56, 5, 'ok', '把新 token 的 K、V 写进缓存。分页 KV 下这一步要按块表散写，通常由一个自写的 kernel 完成（第 127 讲的 Triton kernel）。'],
+    ['mul / add / sub / div（逐元素）', 955, 8, 'ok', '最基础的算子，任何后端都有。它们受带宽限制，是算子融合的主要对象（第 83 讲）。'],
+    ['pow + mean + rsqrt（RMSNorm 拆开）', 395, 6, 'compose', 'PyTorch 的 rms_norm 是复合算子，会被拆成这几个基础算子，所以“缺 RMSNorm”从来不是问题；但拆开意味着多读写几遍张量，有融合算子时要换上去（第 83、144 讲）。'],
+    ['cos / sin / cat（RoPE）', 168, 2, 'compose', 'RoPE 由基础算子组合而成（第 37 讲）。能跑，但一步里多出上百次下发；厂商通常提供融合的 RoPE 算子。'],
+    ['_softmax', 28, 3, 'ok', '注意力的归一化。数值上要先减最大值（第 6 讲），这一步在低精度下容易出问题，是第 139 讲要盯的位置。'],
+    ['silu（SwiGLU 的激活）', 28, 2, 'ok', '逐元素算子。和前后的乘法融合起来能省两趟显存往返（第 83 讲）。'],
+    ['masked_fill / le / bitwise_not（因果掩码）', 84, 1, 'compose', '掩码由基础算子拼出来。用 FlashAttention 类算子时整段都不需要了，掩码变成 kernel 的一个参数。'],
+    ['_scaled_mm（FP8 矩阵乘）', 0, 0, 'write', '本机 MPS 上没有这个算子。量化路径要用它；替代办法是反量化成 BF16 再乘（省不下带宽），或者自己写 kernel。第 145 讲专门讲这类取舍。'],
+    ['_scaled_dot_product_flash_attention', 0, 0, 'write', '融合的注意力 kernel。缺了可以用 bmm + softmax 组合（就是 miniinfer 的做法），代价是注意力矩阵要落地，长上下文下显存和带宽都吃不消（第 84 讲）。'],
+    ['分组矩阵乘（MoE 专家）', 0, 0, 'write', '稠密模型用不到；跑 MoE 时它是热点，而且和 All-to-All 的数据排布绑在一起（第 108、111 讲）。'],
+  ];
+  const LAB: Record<St, string> = { ok: '已支持', compose: '可组合', write: '需自写' };
+  function init(fig: HTMLElement) {
+    let sort: 'time' | 'calls' | 'todo' = 'time', pick = 0;
+    function draw() {
+      let list = OPS.map((o, i) => ({ o, i }));
+      if (sort === 'calls') list.sort((a, b) => b.o[1] - a.o[1]);
+      else if (sort === 'todo') list = list.filter((x) => x.o[3] !== 'ok');
+      else list.sort((a, b) => b.o[2] - a.o[2]);
+      const mx = Math.max(...OPS.map((o) => o[2]));
+      fig.querySelector<HTMLElement>('[data-rows]')!.innerHTML = list.map(({ o, i }) =>
+        `<button class="ai-oi-row${i === pick ? ' is-pick' : ''}" data-i="${i}"><span class="ai-oi-n">${o[0]}</span>`
+        + `<span class="ai-oi-bar"><i style="width:${(o[2] / mx) * 100}%"></i></span>`
+        + `<span class="ai-oi-v">${o[2] ? o[2] + '%' : '—'}</span><span class="ai-oi-v">${o[1] || '—'} 次</span>`
+        + `<span class="ai-oi-k is-${o[3]}">${LAB[o[3]]}</span></button>`).join('');
+      const o = OPS[pick];
+      const n = { ok: 0, compose: 0, write: 0 };
+      OPS.forEach((x) => n[x[3]]++);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${o[0]}</b>（${LAB[o[3]]}）：${o[4]}`
+        + `<br><span class="ai-faint">清单里已支持 ${n.ok} 类、可用现有算子组合 ${n.compose} 类、需要自写或替代 ${n.write} 类。调用次数是本机 MPS 上一步 decode 的真实统计，时间占比是按口径估的，用来排优先级。</span>`;
+      fig.querySelectorAll('[data-s]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.s === sort)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bs = t.closest<HTMLElement>('[data-s]'); if (bs) { sort = bs.dataset.s as typeof sort; draw(); return; }
+      const br = t.closest<HTMLElement>('[data-i]'); if (br) { pick = +br.dataset.i!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-opinv]').forEach(init);
+</script>

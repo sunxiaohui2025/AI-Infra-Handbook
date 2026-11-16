@@ -1,0 +1,35 @@
+vllm-plugin-das（提交 81cbe8f）：818 个源文件（.py .cu .cuh .cpp .h），255134 行（不算空行）
+   115629  tests
+    41325  vllm_hcu/model_executor
+    36330  vllm_hcu/patch
+    23517  vllm_hcu/v1
+    15804  vllm_hcu/models
+     7580  vllm_hcu/distributed
+     3037  vllm_hcu/ops
+     3013  tools
+     2371  vllm_hcu/csrc
+     1684  vllm_hcu/platforms
+     1553  vllm_hcu/runtime_compat
+      944  vllm_hcu
+      891  examples
+      634  vllm_hcu/utils
+setup.py 里登记的入口：
+  vllm.platform_plugins   hcu = vllm_hcu:hcu_platform_plugin
+  vllm.general_plugins    hcu_model = vllm_hcu:hcu_platform_register_model
+  vllm.general_plugins    hcu_ops = vllm_hcu:hcu_platform_register_ops
+运行时补丁文件（vllm_hcu/patch/ 下以 patch_ 开头的文件）：platform/core_fix 24 个，platform/framework_opt 21 个，worker/core_fix 42 个，worker/framework_opt 35 个，worker/op_opt 73 个，共 195 个
+整模块替换（module_exchange.py）：16 对，例如
+  vllm.model_executor.layers.fused_moe.modular_kernel
+    → vllm_hcu.model_executor.layers.fused_moe.modular_kernel
+  vllm.model_executor.layers.linear
+    → vllm_hcu.model_executor.layers.linear
+  vllm.v1.attention.backends.mla.sparse_swa
+    → vllm_hcu.v1.attention.backends.mla.sparse_swa
+HCUPlatform.device_name = "hip"
+HCUPlatform.device_type = "cuda"
+HCUPlatform.dispatch_key = "CUDA"
+HCUPlatform.dist_backend = "nccl"
+HCUPlatform.device_control_env_var = "CUDA_VISIBLE_DEVICES"
+supported_quantization：启用 23 种，注释掉 4 种（mxfp4、bitsandbytes、modelopt_fp4、gpt_oss_mxfp4）
+源码里出现的架构代号：gfx928（2 处）、gfx936（10 处）、gfx938（87 处）、gfx950（6 处）
+把线程组宽度写成 64 的地方：3 处

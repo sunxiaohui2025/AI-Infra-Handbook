@@ -1,0 +1,93 @@
+---
+// 一个模型上线国产卡的清单（第 153 讲）：六个阶段、每项一条验收标准，可勾选，进度存在浏览器本地。
+// 内容是前 19 讲的做法汇总；“怎么验”一列写的是能机械判断的标准，而不是“确认一下”。
+// 读者可以：勾选完成项看进度；点一项看它为什么在这个阶段、不做会怎样；按钮切换只看未完成的。
+interface Props { title?: string; caption?: string }
+const { title = '从拿到卡到上线：可勾选清单', caption } = Astro.props;
+---
+<figure class="ai-gt ai-ck" data-checklist>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="f"><button data-f="all">全部</button><button data-f="todo">只看未完成</button><button data-f="reset">清空勾选</button></div>
+  <div data-rows></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Item = { s: string; t: string; how: string; why: string; l: string };
+  const ITEMS: Item[] = [
+    { s: '一 环境', t: '驱动装好，管理工具能看到所有卡', how: '卡数、显存、温度正常；连续跑一小时无掉卡', why: '掉卡、显存读数异常这类问题要在最前面排掉，否则后面每个结论都不可信。', l: '148' },
+    { s: '一 环境', t: '工具包版本在支持的发布线上', how: '读版本文件，和插件/引擎声明的发布线比对', why: '工具包和驱动、PyTorch 必须成套，错配的症状是 import 就报符号找不到。', l: '149' },
+    { s: '一 环境', t: '框架能看见卡，能跑一次矩阵乘', how: '设备数正确；一次 BF16 矩阵乘结果正确', why: '这是“框架认识这块卡”的最小验证（分发表里有这一列）。', l: '137' },
+    { s: '一 环境', t: '算子库按厂商归档的版本安装', how: '每个库能 import，且版本与目标组合匹配', why: '通用源上的同名包不是为这块卡编的，运行时才报符号错误。', l: '149' },
+    { s: '一 环境', t: '插件自检通过', how: '诊断命令全绿；版本关卡通过', why: '版本关卡挡掉的是“肯定不行”的组合，不代表能跑对。', l: '150' },
+    { s: '二 跑通', t: '单卡单请求能生成 token', how: '给一个短提示，生成 32 个 token 不报错', why: '最小闭环。到这里只证明路径是通的，不证明对。', l: '141' },
+    { s: '二 跑通', t: '算子清单里没有回退到 CPU 的算子', how: '在分发器层记账跑一次前向，回退计数为 0', why: '一个悄悄回退的算子既毁性能，也会掩盖精度问题。', l: '140' },
+    { s: '二 跑通', t: '缺失算子都有明确去处', how: '每个缺口标注：组合 / 自写 / 等厂商，并记进待办', why: '“先跑起来”的临时办法必须登记成技术债，否则会留在生产里。', l: '140' },
+    { s: '二 跑通', t: '每种要用的精度各跑通一次', how: 'FP32 / BF16 / FP16（以及量化）各生成一次', why: '跑通一种精度不代表别的精度能跑：溢出类问题只在特定精度出现。', l: '139' },
+    { s: '三 精度', t: '逐层误差在阈值内', how: '以同精度的参考平台为基准，按位置取最差值，每层都在阈值内', why: '按整张量平均会漏掉局部失效（本站实测：整体 4e-3，最差位置 1.0）。', l: '139' },
+    { s: '三 精度', t: '贪心生成逐 token 一致', how: '固定几个提示（短/长/中文/代码），和参考逐 token 比对', why: 'token 级能发现误差的累积效应，是最便宜的回归测试。', l: '139' },
+    { s: '三 精度', t: '任务级评测分数不低于参考', how: '几个数据集上的分数记录在案，和参考平台比', why: '最接近用户感受；也是唯一能证明量化可用的那一关。', l: '139' },
+    { s: '三 精度', t: '量化模型和“同一套量化方法的参考输出”比', how: '不和 FP32 原模型比，和参考平台的同方法输出比', why: '量化本身会改变数值，拿 FP32 当基准会把方法的代价算成适配的 bug。', l: '145' },
+    { s: '三 精度', t: '每改一个 kernel 就重跑比对', how: '把比对做成脚本，阈值写进脚本，越界即失败', why: '自写 kernel 是精度问题的主要来源；靠人眼看输出一定会漏。', l: '144' },
+    { s: '四 性能', t: '算出每一项的理论下限', how: '每步要读的字节 ÷ 带宽；矩阵乘的 2MNK ÷ 峰值', why: '没有下限就无法判断“慢”是慢在哪里，也无法知道还有多少空间。', l: '142' },
+    { s: '四 性能', t: '热路径上没有多余的主机同步', how: '数一遍每步的同步次数；对比去掉前后的耗时', why: '本站实测一次主机同步是一次小 kernel 下发的 44 倍，一行代码值 13% 的吞吐。', l: '141' },
+    { s: '四 性能', t: '按形状矩阵测过矩阵乘', how: 'decode 的 M=1…64 和 prefill 的几个长度各测一遍，记实际带宽占比', why: '库默认的大分块在小 M 上会退化（引用的源码注释：不管 N 多大都约 135 μs）。', l: '143' },
+    { s: '四 性能', t: '注意力按 prefill / decode 分别验过', how: '两种负载各量一次；长上下文单独测', why: '两种负载要的是两种 kernel，平均值既不解释 TTFT 也不解释 TPOT。', l: '143' },
+    { s: '四 性能', t: '图模式的收益和风险都量过', how: '数图中断；开图捕获前后比对数值和耗时', why: '图模式会改变执行顺序；原地写 KV 的算子声明错了只在图模式下炸。', l: '138' },
+    { s: '四 性能', t: '放弃的优化记下了理由', how: '每条写明占比、预期收益、为什么不做', why: '否则三个月后会有人重复做一次同样的判断。', l: '142' },
+    { s: '五 多卡', t: '量过 α、β、是否全连接、P2P 是否可用', how: '小消息和大消息各测一次，拓扑逐对查', why: '这四个数决定所有通信算法的选择，不能照抄别的平台。', l: '146' },
+    { s: '五 多卡', t: '两卡结果和单卡比对过', how: '逐 token 一致（允许累加顺序带来的小差异）', why: '切分和归约位置写错的症状和精度 bug 很像，要先把切分验对。', l: '146' },
+    { s: '五 多卡', t: '扩到目标卡数，曲线能解释', how: 'TPOT 和吞吐随卡数的变化与 α-β 模型的预测对得上', why: '对不上说明有一项没算进去（拓扑、跳数、重叠失效）。', l: '110' },
+    { s: '五 多卡', t: '自定义通信的两条路都压测过', how: '适用区间内更快；区间外自动退回库且不死锁', why: '所有卡必须对每次调用走相同路径，否则会死锁。', l: '152' },
+    { s: '六 服务化', t: '预热覆盖了即时编译和图捕获', how: '首个真实请求的延迟和稳态接近', why: '即时编译一次要几十秒，落在用户请求上就是超时。', l: '151' },
+    { s: '六 服务化', t: '在线压测扫过一遍区间', how: '按到达率扫，记 TTFT、TPOT 分布和 goodput', why: '离线吞吐和在线延迟是两件事，SLO 只能用后者验。', l: '82' },
+    { s: '六 服务化', t: '容量按 SLO 算过', how: '给定流量和延迟要求，算出实例数并留余量', why: '适配的终点是“多少卡能承接多少流量”，不是单卡峰值。', l: '116' },
+    { s: '六 服务化', t: '版本组合和配置冻结并记录', how: '驱动/工具包/框架/引擎/插件/算子库版本 + 完整启动参数存档', why: '换任何一层都要重走精度和性能两关；没有记录就无法复现。', l: '149' },
+    { s: '六 服务化', t: '回滚方案和降级路径准备好', how: '上一组可用版本可一键切回；关掉自定义算子仍能跑', why: '新卡上的问题多半出现在上线后，降级路径比修复更快。', l: '150' },
+  ];
+  const KEY = 'ai-infra-ck-153';
+  function init(fig: HTMLElement) {
+    let done = new Set<number>();
+    try { done = new Set(JSON.parse(localStorage.getItem(KEY) || '[]')); } catch { /* 忽略 */ }
+    let only = false, pick = 0;
+    const save = () => { try { localStorage.setItem(KEY, JSON.stringify([...done])); } catch { /* 忽略 */ } };
+    function draw() {
+      const stages = [...new Set(ITEMS.map((i) => i.s))];
+      let html = '';
+      for (const st of stages) {
+        const list = ITEMS.map((it, i) => ({ it, i })).filter((x) => x.it.s === st && (!only || !done.has(x.i)));
+        if (!list.length) continue;
+        const n = ITEMS.filter((it) => it.s === st).length;
+        const d = ITEMS.filter((it, i) => it.s === st && done.has(i)).length;
+        html += `<div class="ai-ck-h">${st}　<span class="ai-faint">${d} / ${n}</span></div>`;
+        html += list.map(({ it, i }) => `<button class="ai-ck-row${i === pick ? ' is-pick' : ''}${done.has(i) ? ' is-done' : ''}" data-i="${i}">`
+          + `<span class="ai-ck-box">${done.has(i) ? '✓' : ''}</span><span class="ai-ck-t">${it.t}</span>`
+          + `<span class="ai-ck-how">${it.how}</span><span class="ai-ck-l">第 ${it.l} 讲</span></button>`).join('');
+      }
+      fig.querySelector<HTMLElement>('[data-rows]')!.innerHTML = html || '<div class="ai-faint">全部完成。</div>';
+      const it = ITEMS[pick];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `<b>${it.t}</b><br>怎么验：${it.how}<br>为什么在这一步：${it.why}<span class="ai-faint">　（第 ${it.l} 讲）</span>`
+        + `<br><span class="ai-faint">已完成 ${done.size} / ${ITEMS.length}；勾选只存在你自己的浏览器里。</span>`;
+      fig.querySelectorAll('[data-f]').forEach((b) => b.setAttribute('aria-pressed', String(((b as HTMLElement).dataset.f === 'todo') === only)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bf = t.closest<HTMLElement>('[data-f]');
+      if (bf) {
+        if (bf.dataset.f === 'reset') { done.clear(); save(); }
+        else only = bf.dataset.f === 'todo';
+        draw(); return;
+      }
+      const r = t.closest<HTMLElement>('[data-i]');
+      if (r) {
+        const i = +r.dataset.i!;
+        if (pick === i || t.closest('.ai-ck-box')) { done.has(i) ? done.delete(i) : done.add(i); save(); }
+        pick = i; draw();
+      }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-checklist]').forEach(init);
+</script>

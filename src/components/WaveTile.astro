@@ -1,0 +1,81 @@
+---
+// 线程组宽度、矩阵指令形状和片上存储怎么改变一个矩阵乘 kernel（第 135 讲，第 143 讲再用一次）。
+// 算的是 C[M, N] = A[M, K] · B[K, N]（BF16 输入、FP32 累加）里一个线程块的账：
+//   一个线程块负责 Mt × Nt 的输出块，块里有 nw 个线程组，每组 w 条通道；
+//   矩阵指令一次算 im × in 的输出、沿 K 走 ik 步，所以一个线程组每拍要持有 im × in ÷ w 个累加器（寄存器数）；
+//   输出块必须是指令形状的整数倍：Mt 向上取整到 im 的倍数就是补零的来源，有效行占比 = M ÷ 补齐后的行数；
+//   片上存储需求 = (Mt + Nt) × Kstep × 2 字节（双缓冲时乘 2），和容量相比就知道能驻留几块、能不能开双缓冲。
+// 读者可以：切线程组宽度（32 / 64）、指令形状、输出块、M、K 步长、片上容量，看补零浪费、每通道累加器数、缓冲占用和驻留块数。
+interface Props { title?: string; caption?: string }
+const { title = '线程组宽度和片上缓冲怎么限制分块', caption } = Astro.props;
+---
+<figure class="ai-gt ai-wt" data-wavetile>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="w"><span class="ai-tl-k">线程组宽度 w：</span><button data-w="32">32（warp）</button><button data-w="64">64（波前）</button></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="i"><span class="ai-tl-k">矩阵指令：</span><button data-i="16,8,16">16×8×16</button><button data-i="16,16,16">16×16×16</button><button data-i="32,32,16">32×32×16</button></div>
+    <label class="ai-tl-lr"><span>M（这一步的 token 数）= <b data-mv></b></span><input type="range" min="1" max="256" step="1" value="16" data-m /></label>
+    <label class="ai-tl-lr"><span>输出块 Mt × Nt = <b data-tv></b></span><input type="range" min="0" max="5" step="1" value="1" data-t /></label>
+    <label class="ai-tl-lr"><span>K 步长 = <b data-kv></b></span><input type="range" min="16" max="256" step="16" value="64" data-k /></label>
+    <label class="ai-tl-lr"><span>片上存储 = <b data-cv></b> KB</span><input type="range" min="32" max="512" step="32" value="160" data-c /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const TILES: [number, number][] = [[16, 64], [32, 128], [64, 128], [64, 256], [128, 128], [256, 256]];
+  function init(fig: HTMLElement) {
+    const q = (k: string) => fig.querySelector<HTMLInputElement>(`[data-${k}]`)!;
+    let w = 32, ins: [number, number, number] = [16, 8, 16];
+    function draw() {
+      const M = +q('m').value, [Mt, Nt] = TILES[+q('t').value], K = +q('k').value, cap = +q('c').value * 1024;
+      const [im, inn, ik] = ins;
+      const rows = Math.ceil(Math.max(M, 1) / im) * im;                 // 补齐到指令行数的倍数
+      const mUse = Math.min(M, Mt) / Math.min(Math.ceil(Math.min(M, Mt) / im) * im, Mt);
+      const accPerLane = (im * inn) / w;                                 // 每条通道持有的累加器个数
+      const perTile = (Mt + Nt) * K * 2;                                 // 一块的 A、B 分块字节数
+      const resident = Math.floor(cap / perTile), db = Math.floor(cap / (perTile * 2));
+      const groups = Math.ceil(Mt / im) * Math.ceil(Nt / inn);           // 一个输出块要多少条指令覆盖
+      const perGroup = Math.max(1, Math.round(groups / Math.max(1, Math.ceil(Mt / im))));
+      fig.querySelector('[data-mv]')!.textContent = String(M);
+      fig.querySelector('[data-tv]')!.textContent = `${Mt} × ${Nt}`;
+      fig.querySelector('[data-kv]')!.textContent = String(K);
+      fig.querySelector('[data-cv]')!.textContent = String(+q('c').value);
+      // 画出输出块：有效行（M 占的部分）、补零行、以及指令格子的划分
+      const cell = Math.min(10, 320 / Nt * 8), H = 150;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 520 ${H}">`;
+      const bw = 300, bh = 110, rh = bh / Math.max(1, Mt / im), cw = bw / Math.max(1, Nt / inn);
+      for (let i = 0; i < Mt / im; i++) {
+        for (let j = 0; j < Nt / inn; j++) {
+          const top = i * im, live = top < M;
+          s += `<rect class="${live ? 'ai-wt-on' : 'ai-wt-off'}" x="${8 + j * cw}" y="${12 + i * rh}" width="${cw - 1}" height="${rh - 1}"/>`;
+        }
+      }
+      s += `<text class="ai-al-gl" x="8" y="8">输出块 ${Mt} × ${Nt}，每格是一条 ${im}×${inn} 的矩阵指令（深色 = 这一步真的有 token，浅色 = 补零）</text>`;
+      s += `<text class="ai-al-gl" x="320" y="30">一条指令 ${im}×${inn}×${ik}</text>`;
+      s += `<text class="ai-al-gl" x="320" y="48">一个线程组 ${w} 条通道</text>`;
+      s += `<text class="ai-al-gl" x="320" y="66">每通道 ${accPerLane} 个累加器（FP32）</text>`;
+      s += `<text class="ai-al-gl" x="320" y="84">一块要 ${groups} 条指令覆盖</text>`;
+      s += `<text class="ai-al-gl" x="320" y="102">一块的 A+B 分块 ${(perTile / 1024).toFixed(0)} KB</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const waste = 1 - Math.min(M, Mt) / Mt;
+      const align = M % im === 0 ? '正好对齐' : `要补到 ${rows} 行`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `M = ${M}，输出块 ${Mt} 行：这一步<b>只有 ${Math.min(M, Mt)} 行是真的</b>，块里 ${(waste * 100).toFixed(0)}% 的行在算补的零（M = ${M} 对指令行数 ${im} 来说${align}）。`
+        + `<br>每条通道持有 ${accPerLane} 个 FP32 累加器：指令形状不变、通道数从 32 变 64，每通道的累加器就少一半，寄存器压力减半，但要凑满一条指令需要的数据翻倍。`
+        + `<br>片上存储 ${+q('c').value} KB ÷ 一块 ${(perTile / 1024).toFixed(0)} KB：单缓冲能放 <b>${resident}</b> 块，双缓冲（一边搬一边算）能放 <b>${db}</b> 块${db === 0 ? '——容量不够，必须减小分块或 K 步长' : ''}。`;
+      fig.querySelectorAll('[data-w]').forEach((b) => b.setAttribute('aria-pressed', String(+(b as HTMLElement).dataset.w! === w)));
+      fig.querySelectorAll('[data-i]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.i === ins.join(','))));
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bw = t.closest<HTMLElement>('[data-w]'); if (bw) { w = +bw.dataset.w!; draw(); return; }
+      const bi = t.closest<HTMLElement>('[data-i]'); if (bi) { ins = bi.dataset.i!.split(',').map(Number) as [number, number, number]; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-wavetile]').forEach(init);
+</script>

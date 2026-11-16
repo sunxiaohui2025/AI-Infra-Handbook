@@ -1,0 +1,67 @@
+---
+// 逐层误差曲线（第 139 讲）：读 miniinfer/outputs/port_align.json，画每一层输出相对 CPU FP32 参考的相对误差。
+// 数据由 bench/port_align.py 在本机真实跑出：同一个提示在 CPU FP32（参考）、MPS FP32 / BF16 / FP16、CPU BF16 上各走一遍前向，
+//   每层记下 ‖a − b‖ ÷ ‖b‖；worst = 按位置分别算再取最差的那个位置，whole = 整个张量一起算。
+// 读者可以：勾选要对比的几种组合，切换“最差位置 / 整个张量”，调阈值，看第一个越过阈值的层是哪一层。
+import { readMini } from './_mini';
+interface Props { file?: string; title?: string; caption?: string }
+const { file = 'outputs/port_align.json', title = '哪一层开始偏离', caption } = Astro.props;
+const data = JSON.parse(readMini(file));
+---
+<figure class="ai-gt ai-ld" data-layerdrift data-d={JSON.stringify(data)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="c"></div>
+    <div class="ai-gt-pre ai-pc-sets" data-group="m"><button data-m="worst">最差位置</button><button data-m="whole">整个张量</button></div>
+    <label class="ai-tl-lr"><span>阈值 = <b data-tv></b></span><input type="range" min="-6" max="0" step="1" value="-2" data-t /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Case = { name: string; worst: number[]; whole: number[]; top1: boolean; agree: number; text: string };
+  function init(fig: HTMLElement) {
+    const d = JSON.parse(fig.dataset.d!) as { prompt: string; absmax: number[]; cases: Case[] };
+    const on = d.cases.map((_, i) => i < 2 || i === 3);
+    let mode: 'worst' | 'whole' = 'worst';
+    const sets = fig.querySelector<HTMLElement>('[data-group="c"]')!;
+    sets.innerHTML = '<span class="ai-tl-k">对比：</span>' + d.cases.map((c, i) => `<button data-c="${i}">${c.name}</button>`).join('');
+    function draw() {
+      const th = 10 ** +fig.querySelector<HTMLInputElement>('[data-t]')!.value;
+      fig.querySelector('[data-tv]')!.textContent = th.toExponential(0);
+      const L = d.cases[0].worst.length;
+      const W = 560, H = 180, x0 = 44, y0 = 16, pw = W - x0 - 10, ph = H - y0 - 26;
+      const Y = (v: number) => y0 + ph * (1 - (Math.log10(Math.max(v, 1e-8)) + 8) / 8);
+      const X = (i: number) => x0 + (pw * i) / Math.max(1, L - 1);
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 ${W} ${H}">`;
+      for (let e = -8; e <= 0; e += 2) s += `<line class="ai-bc-grid" x1="${x0}" x2="${W - 10}" y1="${Y(10 ** e)}" y2="${Y(10 ** e)}"/><text class="ai-al-gl" x="${x0 - 4}" y="${Y(10 ** e) + 3}" text-anchor="end">1e${e}</text>`;
+      s += `<line class="ai-bc-slo c-key" x1="${x0}" x2="${W - 10}" y1="${Y(th)}" y2="${Y(th)}" stroke-dasharray="4 3"/>`;
+      const cls = ['c-acc', 'c-key', '', 'c-acc', 'c-key'];
+      let legend = '', firstTxt = '';
+      d.cases.forEach((c, i) => {
+        if (!on[i]) return;
+        const v = mode === 'worst' ? c.worst : c.whole;
+        s += `<polyline class="ai-bc-line ${cls[i % cls.length]}" style="${i >= 2 ? 'stroke-dasharray:4 3' : ''}" points="${v.map((x, k) => `${X(k)},${Y(x)}`).join(' ')}"/>`;
+        const bad = v.findIndex((x) => x > th);
+        if (bad >= 0) s += `<circle class="ai-bc-dot" cx="${X(bad)}" cy="${Y(v[bad])}" r="4"/>`;
+        legend += `<span class="ai-ld-lg"><i class="${cls[i % cls.length]}"></i>${c.name}</span>`;
+        firstTxt += `<br><b>${c.name}</b>：${bad < 0 ? '每一层都在阈值内' : `第 <b>${bad + 1}</b> 层第一次越过阈值（${v[bad].toExponential(1)}）`}，贪心生成的前 ${c.agree} 个 token 和参考一致，下一个 token 的 top-1 ${c.top1 ? '相同' : '<b>不同</b>'}`;
+      });
+      s += `<text class="ai-al-gl" x="${x0}" y="${H - 8}">第 1 层</text><text class="ai-al-gl" x="${W - 10}" y="${H - 8}" text-anchor="end">第 ${L} 层</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `提示 ${JSON.stringify(d.prompt)}，参考是 CPU FP32。${legend}${firstTxt}`;
+      fig.querySelectorAll('[data-c]').forEach((b, i) => b.setAttribute('aria-pressed', String(on[i])));
+      fig.querySelectorAll('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.m === mode)));
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bc = t.closest<HTMLElement>('[data-c]'); if (bc) { const i = +bc.dataset.c!; on[i] = !on[i]; draw(); return; }
+      const bm = t.closest<HTMLElement>('[data-m]'); if (bm) { mode = bm.dataset.m as 'worst' | 'whole'; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-layerdrift]').forEach(init);
+</script>

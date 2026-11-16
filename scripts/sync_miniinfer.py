@@ -9,7 +9,7 @@ SRC, DST = os.path.join(SITE, "..", "miniinfer"), os.path.join(SITE, "miniinfer"
 refs = set()
 for p in glob.glob(os.path.join(SITE, "src", "content", "lectures", "*.mdx")):
     s = open(p, encoding="utf-8").read()
-    refs |= set(re.findall(r'<(?:CodeWalk|RunOutput|StepTrace|DecodeView)[^>]*?\bfile="([^"]+)"', s, re.S))
+    refs |= set(re.findall(r'<(?:CodeWalk|RunOutput|StepTrace|DecodeView|LayerDrift)[^>]*?\bfile="([^"]+)"', s, re.S))
     refs |= set(re.findall(r"\bfile:\s*'(minigpt/[^']+)'", s))          # TrainCurve 的 runs
     for a, b in re.findall(r'<CodeDiff\s+a=(?:"([^"]+)"|\{null\})\s+b="([^"]+)"', s):
         refs |= {x for x in (a, b) if x}

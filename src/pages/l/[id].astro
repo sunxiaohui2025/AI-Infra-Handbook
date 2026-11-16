@@ -20,7 +20,7 @@ const ls = partLs(l.part);
 const idx = ls.findIndex((x) => x.id === l.id) + 1;
 const prev = LECTURES[l.id - 2];
 const next = LECTURES[l.id];
-const proj = l.part >= 15 || l.part === 7;           // 第五章（项目篇）：代码多，用宽版式
+const proj = l.part >= 15 || l.part === 7;      // 第五、六章和第 7 篇：代码多，用宽版式
 ---
 <Base title={`${pad(l.id)} ${l.title}`} view="lec">
   <main class={`ai-scroll ai-read${proj ? ' ai-proj' : ''}`} id="main">

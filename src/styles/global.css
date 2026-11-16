@@ -337,7 +337,7 @@ html[data-route="fast"] .route-note-fast { display: block; }
 .ai-wf-legend .ai-dot { margin: 0; }
 /* five chapter columns, side by side; each chapter's parts stack down its column */
 .ai-home:has(.ai-wf) { max-width: 1480px; }
-.ai-wf { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-4); align-items: start; }
+.ai-wf { display: grid; grid-template-columns: minmax(0, 0.9fr) repeat(5, minmax(0, 1fr)); gap: var(--space-4); align-items: start; }
 .ai-wf-chsec { min-width: 0; }
 .ai-wf-chsec[hidden], .ai-wf-part[hidden], .ai-wf .ai-lk[hidden] { display: none; }
 .ai-wf-ch { padding: 0 4px var(--space-3); }
@@ -346,15 +346,15 @@ html[data-route="fast"] .route-note-fast { display: block; }
 .ai-wf-parts { display: flex; flex-direction: column; gap: var(--space-3); }
 .ai-wf-part { margin: 0; padding: var(--space-3) var(--space-2) var(--space-2); border-radius: var(--radius-lg); background: var(--surface); }
 .ai-wf-ph { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--space-2); padding: 0 8px var(--space-2); text-decoration: none; }
-.ai-wf-ph small { display: block; font-size: 12px; line-height: 16px; color: var(--ink-3); }
-.ai-wf-ph b { display: block; font-size: 16px; line-height: 24px; font-weight: 600; }
+.ai-wf-ph .ai-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); margin-right: 8px; vertical-align: middle; }
+.ai-wf-ph b { display: inline; font-size: 16px; line-height: 24px; font-weight: 600; }
 .ai-wf-ph .ai-num { font-size: 12px; white-space: nowrap; }
 .ai-wf-ph:hover b, .ai-wf-ph:hover .ai-num { color: var(--accent); }
 .ai-wf .ai-lk { padding: 4px 8px; color: var(--ink); }
 .ai-wf .ai-lk:hover { color: var(--accent); }
 /* narrower screens: keep the five columns and scroll sideways; phones stack chapters */
 @media (max-width: 1180px) { .ai-wf { gap: var(--space-3); } .ai-wf .ai-lk { padding: 4px 6px; gap: 6px; } .ai-wf-ch small { margin-left: 0; } }
-@media (max-width: 900px) { .ai-wf { grid-template-columns: repeat(5, 220px); overflow-x: auto; padding-bottom: var(--space-3); } }
+@media (max-width: 900px) { .ai-wf { grid-template-columns: minmax(0, 180px) repeat(5, minmax(0, 200px)); overflow-x: auto; padding-bottom: var(--space-3); } }
 @media (max-width: 640px) { .ai-wf { grid-template-columns: 1fr; overflow-x: visible; } .ai-wf-chsec + .ai-wf-chsec { margin-top: var(--space-6); } }
 
 /* ---------- Top bar: same tone as the page, search in the middle ---------- */
@@ -1413,7 +1413,7 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 /* ===== 第五章（项目篇）版式：正文列保持易读的宽度，代码、架构图、运行结果用满整个宽度 ===== */
 .ai-proj .ai-shell { max-width: 1480px; grid-template-columns: 220px minmax(0, 1fr); }
 .ai-proj .ai-doc { max-width: 1160px; }
-.ai-proj .ai-article { font-family: var(--font-sans); font-size: 16px; line-height: 28px; }
+.ai-proj .ai-article { font-family: var(--font-serif); font-size: 17px; line-height: 30px; }
 .ai-proj .ai-article > :is(p, ul, ol, h2, h3, blockquote, .ai-formula, .ai-note, table) { max-width: 780px; }
 .ai-proj .ai-article > h2 { margin-top: var(--space-12); padding-top: var(--space-4); border-top: 1px solid var(--line); }
 .ai-proj .ai-article > pre.astro-code { max-width: 920px; }
@@ -1562,3 +1562,84 @@ td.ai-ls-name { font-family: var(--font-sans); font-weight: 600; }
 .ai-act-on { fill: var(--key); }
 .ai-act-off { fill: var(--key-soft); stroke: var(--key); stroke-width: .6; }
 .ai-act-cap { stroke: var(--ink-3); stroke-dasharray: 4 3; }
+
+/* Checklist（第 153 讲）：上线清单 */
+.ai-ck-h { margin: var(--space-3) 0 4px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.ai-ck-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1.1fr) 62px; gap: var(--space-2); align-items: center; width: 100%; padding: 4px 7px; margin-bottom: 3px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
+.ai-ck-row.is-pick { border-color: var(--ink); }
+.ai-ck-row.is-done .ai-ck-t { color: var(--ink-3); text-decoration: line-through; }
+.ai-ck-box { width: 16px; height: 16px; border: 1px solid var(--line-strong); border-radius: 3px; text-align: center; line-height: 15px; font-size: 11px; color: var(--accent); }
+.ai-ck-row.is-done .ai-ck-box { background: var(--accent-soft); border-color: var(--accent); }
+.ai-ck-t { font-size: 12.5px; color: var(--ink); }
+.ai-ck-how { font-size: 11.5px; color: var(--ink-3); }
+.ai-ck-l { font-size: 11px; color: var(--ink-3); text-align: right; }
+@media (max-width: 640px) { .ai-ck-row { grid-template-columns: 22px minmax(0, 1fr) 56px; } .ai-ck-how { display: none; } }
+
+/* VersionMatrix（第 149 讲）：版本矩阵检查 */
+.ai-vm-rows { display: flex; flex-direction: column; gap: 4px; }
+.ai-vm-row { display: grid; grid-template-columns: 180px minmax(0, 1fr) 54px; gap: var(--space-2); align-items: center; padding: 4px 7px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
+.ai-vm-row.is-pick { border-color: var(--ink); }
+.ai-vm-t { font-size: 12.5px; color: var(--ink); }
+.ai-vm-opts { margin: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.ai-vm-opts button { font-size: 11.5px; padding: 1px 7px; }
+.ai-vm-k { font-size: 11px; text-align: center; border-radius: var(--radius-pill); padding: 1px 0; }
+.ai-vm-k.is-ok { background: var(--accent-soft); color: var(--accent); }
+.ai-vm-k.is-bad { background: var(--key-soft); color: var(--key); }
+@media (max-width: 640px) { .ai-vm-row { grid-template-columns: 1fr 54px; } .ai-vm-opts { grid-column: 1 / -1; } }
+
+/* PrecisionSupport（第 145 讲）：硬件 × 精度矩阵 */
+.ai-ps-c { cursor: pointer; }
+.ai-ps-c text { font-size: 11px; fill: var(--ink); pointer-events: none; }
+.ai-ps-2 { fill: var(--accent-soft); stroke: var(--accent); }
+.ai-ps-1 { fill: var(--surface-sunk); stroke: var(--line-strong); }
+.ai-ps-0 { fill: var(--key-soft); stroke: var(--key); }
+.ai-ps-c.is-pick rect { stroke: var(--ink); stroke-width: 2; }
+
+/* KernelCompare（第 144 讲）：几种 kernel 写法并排 */
+.ai-kc-code { font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6; background: var(--surface-sunk); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: var(--space-3); overflow-x: auto; white-space: pre; color: var(--ink); }
+
+/* OpInventory（第 140 讲）：模型算子清单 */
+.ai-oi-row { display: grid; grid-template-columns: minmax(0, 1fr) 90px 44px 56px 56px; gap: var(--space-2); align-items: center; width: 100%; padding: 4px 7px; margin-bottom: 3px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; font-size: 12.5px; }
+.ai-oi-row.is-pick { border-color: var(--ink); }
+.ai-oi-n { color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-oi-bar { display: block; height: 8px; background: var(--surface-sunk); border-radius: var(--radius-pill); }
+.ai-oi-bar i { display: block; height: 8px; background: var(--accent); border-radius: var(--radius-pill); }
+.ai-oi-v { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-2); text-align: right; }
+.ai-oi-k { font-size: 11px; text-align: center; border-radius: var(--radius-pill); padding: 1px 0; }
+.ai-oi-k.is-ok { background: var(--accent-soft); color: var(--accent); }
+.ai-oi-k.is-compose { background: var(--surface-sunk); color: var(--ink-2); }
+.ai-oi-k.is-write { background: var(--key-soft); color: var(--key); }
+@media (max-width: 640px) { .ai-oi-row { grid-template-columns: minmax(0, 1fr) 44px 56px; } .ai-oi-bar { display: none; } }
+
+/* LayerDrift（第 139 讲）：逐层误差曲线的图例 */
+.ai-ld-lg { display: inline-flex; align-items: center; gap: 5px; margin-right: var(--space-3); font-size: 12px; }
+.ai-ld-lg i { width: 14px; height: 2px; background: var(--ink-3); }
+.ai-ld-lg i.c-acc { background: var(--accent); }
+.ai-ld-lg i.c-key { background: var(--key); }
+
+/* HipTranslate（第 136 讲）：CUDA / HIP 逐行对照 */
+.ai-hp-grid { display: flex; flex-direction: column; gap: 3px; }
+.ai-hp-row { display: grid; grid-template-columns: 1fr 1fr 64px; gap: var(--space-2); align-items: start; width: 100%; padding: 5px 7px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-sm); cursor: pointer; }
+.ai-hp-row code { font-family: var(--font-mono); font-size: 11.5px; line-height: 1.5; color: var(--ink); white-space: normal; word-break: break-word; }
+.ai-hp-row.is-pick { border-color: var(--ink); }
+.ai-hp-k { font-size: 11px; text-align: center; padding: 1px 0; border-radius: var(--radius-pill); }
+.ai-hp-k.is-auto { background: var(--accent-soft); color: var(--accent); }
+.ai-hp-k.is-manual { background: var(--surface-sunk); color: var(--ink-2); }
+.ai-hp-k.is-rewrite { background: var(--key-soft); color: var(--key); }
+@media (max-width: 640px) { .ai-hp-row { grid-template-columns: 1fr 56px; } .ai-hp-row code:nth-of-type(2) { grid-column: 1; } }
+
+/* WaveTile（第 135、143 讲）：输出块里有效的行与补零的行 */
+.ai-wt-on { fill: var(--accent); }
+.ai-wt-off { fill: var(--surface-sunk); stroke: var(--line); stroke-width: .5; }
+
+/* StackMap（第六章）：软件栈分层对照 */
+.ai-stk-row rect:first-child { fill: var(--surface); stroke: var(--line); }
+.ai-stk-row { cursor: pointer; }
+.ai-stk-row text { font-size: 12.5px; fill: var(--ink); pointer-events: none; }
+.ai-stk-row .ai-stk-l { font-weight: 600; fill: var(--ink-2); }
+.ai-stk-row.is-focus rect:first-child { fill: var(--key-soft); stroke: var(--key); }
+.ai-stk-row.is-pick rect:first-child { stroke: var(--ink); stroke-width: 2; }
+.ai-stk-w0 { fill: var(--accent-soft); stroke: var(--accent); }
+.ai-stk-w1 { fill: var(--surface-sunk); stroke: var(--line-strong); }
+.ai-stk-w2 { fill: var(--key-soft); stroke: var(--key); }
+.ai-stk-row .ai-stk-wt { font-size: 11.5px; }

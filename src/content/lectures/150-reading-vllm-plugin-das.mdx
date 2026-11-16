@@ -1,0 +1,131 @@
+---
+id: 150
+slug: reading-vllm-plugin-das
+title: 读 vllm-plugin-das：平台类与运行时补丁
+chapter: 6
+part: 20
+problem: 海光的 vLLM 插件是怎么组织的
+prereqs: [129, 147, 148, 149]
+level: 主线
+demos: [CodeWalk, RunOutput, PluginIface]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import PluginIface from '../../components/PluginIface.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[129, 147, 148, 149]} />
+
+第 147 讲讲了插件机制该长什么样，这一讲读一份真的。
+
+<Note kind="warn">读的是 `miniinfer/third_party/vllm-plugin-das`，提交 `81cbe8f`，Apache-2.0 许可，**只读不运行**。行号按这个提交。这个项目跟着 vLLM 的版本走，几个月后函数名和行号都可能变，但下面讲的几个结构变得很慢。</Note>
+
+取下同样的代码：
+
+```bash
+cd miniinfer/third_party
+git clone https://github.com/HYGON-AI/vllm-plugin-das && cd vllm-plugin-das && git checkout 81cbe8f
+```
+
+先看规模和结构：
+
+<RunOutput cmd=".venv/bin/python bench/das_loc.py" file="outputs/das_loc.txt" caption="图 150-1　插件的规模、入口、补丁清单和平台声明（只读源码文本统计，提交 81cbe8f）。" />
+
+25 万行里，和“怎么接进引擎”直接相关的只有三处：三个 entry point（`vllm_hcu/__init__.py`，138 行）、平台类（`platforms/hcu.py`，1033 行）、补丁机制（`patch/`，195 个补丁文件加几个基础模块）。这一讲读这三处，第 151、152 讲读算子和后端。
+
+## 三个入口，一条纪律：轻
+
+`setup.py` 里登记的三个入口（上面统计的第二段）对应第 147 讲说的两类：一个平台插件（`hcu = vllm_hcu:hcu_platform_plugin`）、两个通用插件（注册模型、注册算子）。
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/__init__.py" from={14} to={61} steps={[
+  { lines: [14, 26], title: '导入要足够轻', body: '<p>模块顶层只做两件事：配置算子库的环境变量，导入兼容性检查。注意这里<b>没有 import torch，也没有 import vllm</b>。</p><p>原因在文件开头的说明里：插件发现阶段只能“布置好回调”，不能把实现拽进来。如果这时候把 torch 和 vLLM 都导入了，后面的“整模块替换”就来不及安排——目标模块已经先被加载了（第 147 讲说的那条纪律）。</p>' },
+  { lines: [41, 54], title: '保住进程角色', body: '<p>补丁要按进程角色区分：引擎核心进程和 worker 进程需要的补丁不同。平台阶段的角色检测是“尽力而为”的，而真正权威的信息来自 worker 自己。所以这里的做法是：先记下已知的角色，打完补丁再把它写回去，避免被探测结果覆盖。</p><p>这类细节在单进程的小引擎里不存在，但 vLLM 是多进程的（第 129 讲：API 服务器、引擎核心、worker 各一类进程），每个进程都要独立加载插件。</p>' },
+  { lines: [57, 61], title: '两个阶段', body: '<p>插件把补丁分成两个阶段：平台阶段（<code>apply_platform_patches</code>）和 worker 阶段（<code>prepare_worker_patches</code> / <code>apply_worker_patches</code>）。平台阶段在插件发现时做，worker 阶段在 worker 拿到反序列化后的配置时做——因为有些补丁要看配置才知道该不该打（开了哪个特性、用哪个后端）。</p>' },
+]} />
+
+入口函数本身只有十几行，但处理了一个很具体的现实问题：
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/__init__.py" from={64} to={98} steps={[
+  { lines: [64, 78], title: '失败要锁存', body: '<p>如果平台初始化失败过一次，后面任何一次调用都直接把同一个错误抛出来，而不是重试。理由是补丁可能只打了一半——重试会在一个半残的注册表上继续操作，产生更难查的问题。第 147 讲说的“失败锁存”在代码里就是这几行。</p>' },
+  { lines: [81, 98], title: '为什么失败时还返回类路径', body: '<p>这段注释值得读两遍：被审计的那个 vLLM 版本会<b>调用每个平台插件两次</b>——第一次在一个会吞掉异常的探测里（用来决定选哪个平台），第二次在探测之外。</p><p>于是插件的策略是：第一次即使检查失败也把类路径返回去，保证自己被选中；把错误锁存起来，等第二次调用（或者有人直接 import 这个类）时再抛出来。如果第一次就抛错，引擎会认为“这个平台不可用”，转而去用通用路径——那样问题会以一种更难理解的方式出现（模型跑在错误的后端上）。</p><p>这是读插件代码最有价值的一类收获：<b>它暴露了上游的真实行为</b>，而这些行为在文档里通常没写。</p>' },
+]} />
+
+## 平台类：七行声明替引擎回答七个问题
+
+<PluginIface caption="图 150-2　插件要实现的接口清单（第 147 讲的图）。海光的实现里，绿底那些在 platforms/hcu.py 里；点任意一项看它的职责。" />
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/platforms/hcu.py" from={231} to={244} steps={[
+  { lines: [231, 239], title: '设备身份', body: '<p>七行声明，第 149 讲逐行解释过：平台枚举取 ROCM（白拿引擎里所有 ROCm 分支）、PyTorch 侧设备类型是 <code>cuda</code>、分发键是 <code>CUDA</code>、日志里叫 <code>hip</code>、Ray 的资源名是 <code>GPU</code>、分布式后端写 <code>nccl</code>（底下是 RCCL）、限制可见设备用 <code>CUDA_VISIBLE_DEVICES</code>。</p><p>第 232 行还留着一句中文注释（“这个地方会管理 custom_ops”）——真实项目的代码不会处处精致，读源码时要习惯这种痕迹。</p>' },
+  { lines: [240, 244], title: 'Ray 的三个环境变量', body: '<p>用 Ray 做分布式调度时，它会按自己的规则设置设备可见性环境变量。这里列出三个要让 Ray 不要动的变量名——HIP、CUDA、ROCR 三套命名都在，因为栈里不同层用的名字不同。这类“三套名字并存”是兼容路线的典型痕迹。</p>' },
+]} />
+
+平台类的其余部分回答的是第 147 讲清单里的问题，挑几个和前面讲过的内容对得上的：
+
+| 方法 | 它回答什么 | 对应的讲 |
+| --- | --- | --- |
+| `get_attn_backend_cls` / `get_valid_backends` | 用哪个注意力后端（一组候选 + 逐个校验 + 回退） | 143、152 |
+| `get_device_communicator_cls` | 用哪个通信器 | 146、152 |
+| `use_custom_allreduce` / `is_fully_connected` | 要不要开自定义 All-Reduce，拓扑是不是全连接 | 146 |
+| `supported_quantization` / `verify_quantization` | 支持哪些量化方法，启动时怎么校验和改写 | 145、152 |
+| `check_and_update_config` / `apply_config_platform_defaults` | 按硬件改配置，指定 worker 类，调自定义算子开关 | 147 |
+| `update_block_size_for_backend` | 把 KV 块大小调到注意力后端支持的值 | 143 |
+| `supports_fp8` | 这一代卡支不支持 FP8（实现里是“是不是 gfx938”） | 145、152 |
+| `get_static_graph_wrapper_cls` | 图捕获用哪个包装器（直接复用 vLLM 的 CUDA Graph 包装器） | 138 |
+| `get_current_memory_usage` / `get_device_total_memory` | 量显存，决定 KV 块数 | 129 |
+
+`supports_fp8` 的实现只有一行：返回这块卡是不是 `gfx938`。这是第 145 讲那张“硬件 × 精度”表在代码里的样子——**精度支持是按架构代号判断的，不是按型号名字**。
+
+## 运行时补丁：精确、幂等、失败锁存
+
+插件的难点不在平台类，而在“怎么改上游的行为而不改上游的代码”。`patch/` 这 3.6 万行就是干这件事的。机制分三样。
+
+**整模块替换**。当上游的某个模块被导入时，用插件里的同名实现替换它。统计里有 16 对，例如上游的 `vllm.model_executor.layers.linear` 换成 `vllm_hcu.model_executor.layers.linear`。文档里还给了使用约定：**调用方应该照常写 `vllm.*` 的导入路径**，由协调器在上游模块加载前解析到插件的实现——这样插件代码和上游代码长得一样，升级时好比对。
+
+**导入后回调**。模块正常加载，加载完成后立刻调用插件的一个函数，由它替换模块里的某个函数或类方法。195 个补丁文件大多是这一类。
+
+**配置改写**。平台类的 `check_and_update_config` 里直接改配置，不碰代码（第 147 讲说的第一选择）。
+
+替换的入口是一个装在 `sys.meta_path` 上的查找器：
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/patch/import_coordinator.py" from={334} to={416} steps={[
+  { lines: [340, 345], title: '只拦精确的模块名', body: '<p>第一件事就是精确查表：注册的是完整模块名，祖先和子孙模块一律不管。开头的文件说明里强调了这一点——旧的做法会替换 <code>builtins.__import__</code> 并扫描祖先名字，这个版本不这么干。</p><p>为什么重要？按前缀匹配会误伤无关模块，而且会在一个还没完成初始化的模块上触发回调，产生极难复现的问题。</p>' },
+  { lines: [347, 365], title: '已经打过补丁的模块禁止重载', body: '<p>如果有人对一个已打补丁的模块调 <code>importlib.reload</code>，这里直接返回一个“专门用来抛错”的加载器。注释解释了原因：重放一个包装器通常不是幂等的，而重放一个注册自定义算子的模块可能是致命的（同一个算子注册两次）。</p><p>正确的恢复方式是重启进程——这是明确的设计取舍，写在了模块开头。</p>' },
+  { lines: [367, 381], title: '正在打补丁时禁止重入导入', body: '<p>最常见的一种事故：替换模块的工厂函数在执行过程中又去导入了被替换的那个模块，于是两份实现同时被加载，两套自定义算子都注册上了。这里用“正在应用”这个状态把它挡住。</p>' },
+  { lines: [383, 396], title: '失败过的补丁：拒绝导入，不悄悄回退', body: '<p>如果某个补丁失败过，之后任何对这个模块的导入都被拒绝，而不是放行上游的原始实现。注释写得很直白：不要静默回退到官方实现，也不要重跑失败的回调。</p><p>这是整套机制里最重要的一条设计。静默回退意味着服务会以“一半打了补丁、一半没打”的状态跑起来——而这种状态下的错误（算错、慢得莫名、偶发崩溃）比启动失败难查十倍。</p>' },
+  { lines: [398, 416], title: '最后才是真正的替换或挂回调', body: '<p>前面所有守卫都通过，才走到正常路径：有整模块替换就返回替换加载器；只有回调就借用上游的加载器，在它后面包一层，模块加载完成后触发回调。</p>' },
+]} />
+
+补丁的**顺序**也是显式写出来的。平台阶段的分发器里有一个按顺序排列的适配器清单，注释解释了为什么顺序重要：如果某些目标模块在插件发现之前就被导入了，协调器会**按清单顺序立即应用**这些回调；而 KV 相关的适配必须排在 MoE 协调器包装之前，否则基类构造链看到的缓存尺寸就不对（`vllm_hcu/patch/platform/__init__.py` 的 `_ORDERED_FRAMEWORK_ADAPTERS`）。
+
+这段代码还有一处值得学的做法：注册这一批替换时用了一个“注册批次”的上下文（`registration_batch`），注释说明了意图——第三方的导入只能发生在这一批开始之前或完整可见之后，**不能观察到中间状态**。
+
+## 版本关卡在代码里的样子
+
+第 149 讲讲过规则，这里看实现：
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/compatibility.py" from={74} to={158} steps={[
+  { lines: [74, 83], title: '只读元数据，不导入 vLLM', body: '<p>函数的文档字符串就说明了意图：检查已安装的 vLLM 元数据，而不导入它。导入会触发一长串副作用（注册算子、初始化平台），而这些副作用恰恰是我们想在检查通过之后才允许发生的。</p><p>PEP 440 的解析器在函数内部才导入，注释给的理由是让插件发现阶段在 <code>python -S</code> 这类受限环境下也能 import。</p>' },
+  { lines: [90, 102], title: 'vLLM 没装：返回“不兼容”而不是抛错', body: '<p>这一层只做观察，把结论（兼容与否、原因、双方的版本和安装位置）打包成一个只读的数据类返回。抛错的决定留给调用方。这种“观察和决策分开”的写法让同一套检查既能用在启动关卡，也能用在诊断工具里（<code>vllm-hcu-doctor</code>）。</p>' },
+  { lines: [123, 136], title: '匹配到主次补丁这一级', body: '<p>核心规则就两行：epoch 相同、release 元组（主、次、补丁）相同。注释说明了为什么放宽后缀：厂商分支是滚动的，预发布、开发版、本地构建后缀保留了来源信息，但不应该把插件钉在某一个 wheel 构建上。</p>' },
+  { lines: [150, 158], title: '关卡：不兼容就抛错', body: '<p>这就是“在任何补丁注册之前”的那道关卡。消息里带上完整的细节（期望版本、实际版本、上游提交、DAS 提交、两边的安装位置、原因），因为这类问题多半要靠日志远程排查。</p>' },
+]} />
+
+## 这份代码里可以带走的四条
+
+**一、入口要轻**。插件发现阶段不 import torch、不 import 引擎，否则后面的替换来不及安排。
+
+**二、失败要响**。版本不符、补丁失败，都要明确失败并保留诊断状态，绝不静默回退到上游实现。半打补丁的状态比起不来更糟。
+
+**三、替换要精确、幂等、可报告**。精确匹配模块名，每个补丁只应用一次并记录状态，提供一个报告接口（这个项目里是 `patch_report()`，能列出进程角色、目标符号、补丁状态、失败详情和特性开关）。
+
+**四、把上游的真实行为写进注释**。那段“平台插件会被调用两次”的注释，价值比代码本身还高——它是别人调试了很久才得到的知识。
+
+<Note kind="column">对比一下第 16 篇的 nano-vllm：1195 行，没有任何这类机制，因为它只在一种硬件上跑、也不需要跟着别人的版本走。这套补丁机制的全部复杂度，都来自两个约束：**不能改上游**，和**上游在动**。做任何长期维护的适配层，这两条都会出现。</Note>
+
+## 回顾
+
+海光插件的接入面很小：三个 entry point、一个平台类、一套补丁机制。入口模块只有 138 行，顶层不导入 torch 和 vLLM，先布置好替换再让实现加载；入口函数会把失败锁存，而且在第一次调用时即使检查失败也返回类路径——因为被审计的那版 vLLM 会把平台插件调用两次，第一次在一个吞异常的探测里。平台类用七行声明回答设备身份（ROCM 枚举、`cuda` 设备、`CUDA` 分发键、`nccl` 后端），其余方法回答注意力后端、通信器、量化名单、显存、块大小、图包装器等问题，`supports_fp8` 的实现就是判断架构代号是不是 `gfx938`。补丁机制的四道守卫是这一讲的重点：只拦精确模块名、已打补丁的模块禁止重载、正在打补丁时禁止重入导入、失败过的补丁拒绝导入而不是静默回退；顺序和注册批次都显式写出来。版本关卡只读元数据、不导入 vLLM，匹配到主次补丁这一级，放宽预发布和本地构建后缀。
+
+下一讲钻进算子：这块卡上 decode 的矩阵乘为什么要自己写 kernel，那个 M ≤ 64 的 kernel 是怎么写的。

@@ -1,0 +1,15 @@
+扫了 11 个文件、4250 行（不算空行）：vllm_hcu/csrc、vllm_hcu/utils、vllm_hcu/model_executor/layers/mhc.py
+   47 处  沿用 CUDA 的名字（torch 的 CUDA 接口、at::cuda::、CUDACheck）
+         例 vllm_hcu/csrc/hcu_cache_kernel.cu:1033  const hipStream_t stream = at::cuda::getCurrentCUDAStream();
+   36 处  换成 hip 前缀的运行时 API
+         例 vllm_hcu/csrc/hcu_cache_kernel.cu:887  hipStream_t stream = at::hip::getCurrentHIPStream();
+    3 处  HIP 的发射宏 hipLaunchKernelGGL
+         例 vllm_hcu/utils/bf16_fp32_mmac.py:278  hipLaunchKernelGGL((gemm_nt_bf16_fp32_splitk<4, 64, 64, 8>), grid,
+   11 处  架构内建函数 __builtin_amdgcn_* / __builtin_hcu_*
+         例 vllm_hcu/utils/bf16_fp32_mmac.py:45  reg_c = __builtin_amdgcn_mmac_f32_16x16x16bf16(
+    2 处  矩阵核心指令 mmac
+         例 vllm_hcu/utils/bf16_fp32_mmac.py:45  reg_c = __builtin_amdgcn_mmac_f32_16x16x16bf16(
+    4 处  按架构分支的宏（__gfx…__、HIP_DEVICE_COMPILE）
+         例 vllm_hcu/utils/bf16_fp32_mmac.py:44  #if defined(__gfx936__) || defined(__gfx928__)
+    3 处  写死 64 的线程组宽度
+         例 vllm_hcu/utils/bf16_fp32_mmac.py:87  constexpr std::int32_t kWaveSize = 64;

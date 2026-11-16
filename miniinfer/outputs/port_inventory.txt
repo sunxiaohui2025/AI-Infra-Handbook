@@ -1,0 +1,28 @@
+nano-vllm（bb823b3）共 1195 行代码（不含空行和注释）
+和 NVIDIA 绑定的写法，按层分类（一行只算进第一个匹配的类）：
+
+【设备与运行时】23 行，分布在 1 个文件：model_runner.py
+    换卡后：换成新设备的接口；ROCm 式的后端沿用 torch.cuda，PrivateUse1 式的要改成新设备名
+    例 nanovllm/engine/model_runner.py:27  torch.cuda.set_device(rank)
+    例 nanovllm/engine/model_runner.py:30  torch.set_default_device("cuda")
+【通信】6 行，分布在 3 个文件：model_runner.py、embed_head.py、linear.py
+    换卡后：通信后端换成厂商的集合通信库
+    例 nanovllm/layers/embed_head.py:41  dist.all_reduce(y)
+    例 nanovllm/layers/linear.py:155  dist.all_reduce(y)
+【第三方 CUDA 算子库】3 行，分布在 1 个文件：attention.py
+    换卡后：找厂商移植版；没有就得自己实现
+    例 nanovllm/layers/attention.py:6  from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+    例 nanovllm/layers/attention.py:67  o = flash_attn_varlen_func(q, k, v,
+【自写的 GPU kernel】13 行，分布在 1 个文件：attention.py
+    换卡后：要有能用的 Triton 后端；没有就改写成厂商的 kernel 语言
+    例 nanovllm/layers/attention.py:3  import triton
+    例 nanovllm/layers/attention.py:4  import triton.language as tl
+【图捕获】7 行，分布在 1 个文件：model_runner.py
+    换卡后：换成厂商的图捕获接口，或者干脆先关掉
+    例 nanovllm/engine/model_runner.py:37  self.capture_cudagraph()
+    例 nanovllm/engine/model_runner.py:57  del self.graphs, self.graph_pool
+【精度与数据类型】0 行，分布在 0 个文件：
+    换卡后：确认硬件原生支持；不支持的要换类型或换算子
+    （代码里一处也没有：数据类型来自模型的 config.json，问题藏在运行时）
+
+合计 52 行，占全部代码的 4.4%

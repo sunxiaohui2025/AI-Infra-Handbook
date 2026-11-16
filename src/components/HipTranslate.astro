@@ -1,0 +1,61 @@
+---
+// CUDA → HIP 逐行对照（第 136 讲）：左边是 CUDA 原文，右边是 hipify 翻译后的结果，
+// 每行标出三种处理：auto（工具自动换名字）、manual（工具能换名字，但语义要人工确认）、rewrite（工具无能为力，必须重写）。
+// 代码是按两边公开的接口对应关系写的一段 RMSNorm kernel 的缩影，用来说明哪几类写法会出问题，不是某个真实项目里的代码。
+// 读者可以：点任意一行看它属于哪一类、为什么；按钮可以只看要人工处理的行。
+interface Props { title?: string; caption?: string }
+const { title = '一段 CUDA kernel 逐行翻译', caption } = Astro.props;
+---
+<figure class="ai-gt ai-hp" data-hiptrans>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="f"><button data-f="all">全部 16 行</button><button data-f="hand">只看要人工处理的</button></div>
+  <div class="ai-hp-grid" data-rows></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Row = { a: string; b: string; k: 'auto' | 'manual' | 'rewrite'; d: string };
+  const ROWS: Row[] = [
+    { a: '#include <cuda_runtime.h>', b: '#include <hip/hip_runtime.h>', k: 'auto', d: '头文件一一对应，工具直接替换。' },
+    { a: '#include <cub/cub.cuh>', b: '#include <hipcub/hipcub.hpp>', k: 'auto', d: 'CUB 有对应的 hipCUB；但模板参数里若写了线程组宽度，仍要按下面第 6 行处理。' },
+    { a: 'cudaMalloc(&buf, n * 4);', b: 'hipMalloc(&buf, n * 4);', k: 'auto', d: '运行时 API 的名字是机械替换，参数和语义相同。绝大多数迁移工作量都是这一类，所以“兼容路线”才成立。' },
+    { a: 'cudaMemcpyAsync(d, h, n, cudaMemcpyHostToDevice, s);', b: 'hipMemcpyAsync(d, h, n, hipMemcpyHostToDevice, s);', k: 'auto', d: '包括枚举常量也一一对应。' },
+    { a: 'int lane = threadIdx.x % 32;', b: 'int lane = threadIdx.x % 32;', k: 'manual', d: '工具不会改这个 32，因为它只是个整数。但这块卡的波前是 64 条通道，写死 32 会把一个波前当成两个 warp 用：同步的粒度、归约的范围全错。应改成 warpSize 或按架构的常量。' },
+    { a: 'for (int i = 16; i > 0; i >>= 1)\n  v += __shfl_xor_sync(0xffffffff, v, i);', b: 'for (int i = 32; i > 0; i >>= 1)\n  v += __shfl_xor(v, i);', k: 'manual', d: '跨通道归约的步数是 log₂(宽度)：32 条通道从 16 开始折半（5 步），64 条要从 32 开始（6 步）。少一步的后果是只归约了半个波前，结果偏小且不报错——这是最常见也最难查的一类错误。' },
+    { a: 'unsigned mask = __ballot_sync(0xffffffff, pred);', b: 'uint64_t mask = __ballot(pred);', k: 'manual', d: '表决指令每条通道返回一位：32 位放得下 warp，64 条通道必须用 64 位整数。沿用 unsigned 会丢掉一半通道的信息。' },
+    { a: '__syncwarp();', b: '// 波前内天然同步，按架构决定是否需要', k: 'manual', d: 'warp 级同步在不同架构上的语义不同，不能机械替换；要按目标架构的执行模型重新判断哪里需要同步。' },
+    { a: 'asm volatile("mov.u32 %0, %%laneid;" : "=r"(id));', b: '// PTX 内联汇编：整段重写', k: 'rewrite', d: 'PTX 是 NVIDIA 的中间指令集，在别的架构上不存在。这类代码要换成目标架构的内建函数或汇编，是迁移里真正要动脑的部分。' },
+    { a: 'wmma::fragment<...> a_frag;\nwmma::mma_sync(c, a, b, c);', b: '__builtin_amdgcn_mmac_f32_16x16x16bf16(...)', k: 'rewrite', d: '矩阵核心的指令形状不同（例如 16×8×16 对 16×16×16），寄存器里数据的排布也不同。能翻译的只有名字，分块和数据排布要重新设计（第 143 讲）。' },
+    { a: 'kernel<<<grid, 256, smem, stream>>>(p);', b: 'hipLaunchKernelGGL(kernel, grid, 256, smem, stream, p);', k: 'auto', d: '发射语法有对应形式（新版 HIP 也支持三尖括号）。但块里 256 个线程在 32 宽度下是 8 个线程组、在 64 宽度下是 4 个，块内分工要重算。' },
+    { a: 'cublasGemmEx(h, ..., CUDA_R_16BF, ...);', b: 'hipblasGemmEx(h, ..., HIPBLAS_R_16B, ...);', k: 'manual', d: '矩阵乘库有对应物，接口能换；但库内部为哪一代硬件调过、默认选什么分块完全不同，性能要重新量（第 143、151 讲）。' },
+    { a: 'cudnnConvolutionForward(...);', b: '// 查目标平台有没有对应算子，或改用其他实现', k: 'rewrite', d: '专有库里的算子不保证有一一对应的实现。这类调用要么换库，要么用别的算子组合出来（第 140 讲）。' },
+    { a: 'ncclAllReduce(sb, rb, n, ncclBfloat16, ncclSum, comm, s);', b: 'rcclAllReduce(sb, rb, n, rcclBfloat16, rcclSum, comm, s);', k: 'auto', d: '集合通信库的接口照抄 NCCL，连函数名都对应；PyTorch 里后端名字甚至照旧写 nccl（第 146、150 讲）。' },
+    { a: 'cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 128*1024);', b: 'hipFuncSetAttribute(...)  // 上限按本卡容量改', k: 'manual', d: '接口能换，但 128 KB 这个数字是 H100 的容量。片上存储更小的卡上，这一行会直接失败或静默降级（第 135 讲）。' },
+    { a: 'nvcc -arch=sm_90 ...', b: '编译器 --offload-arch=gfx938 ...', k: 'manual', d: '架构代号完全是另一套（第 148 讲会看到 gfx928、gfx936、gfx938）。构建脚本里凡是写了 sm_xx 的地方都要改，而且一份二进制能跑哪些架构也由这里决定。' },
+  ];
+  const LAB = { auto: ['自动', '工具换个名字就行'], manual: ['要确认', '名字能换，语义要人工核对'], rewrite: ['重写', '工具无能为力'] } as const;
+  function init(fig: HTMLElement) {
+    let only = false, pick = 4;
+    function draw() {
+      const box = fig.querySelector<HTMLElement>('[data-rows]')!;
+      box.innerHTML = ROWS.map((r, i) => (only && r.k === 'auto') ? '' :
+        `<button class="ai-hp-row${i === pick ? ' is-pick' : ''}" data-i="${i}"><code>${r.a.replace(/</g, '&lt;').replace(/\n/g, '<br>')}</code>`
+        + `<code>${r.b.replace(/</g, '&lt;').replace(/\n/g, '<br>')}</code>`
+        + `<span class="ai-hp-k is-${r.k}">${LAB[r.k][0]}</span></button>`).join('');
+      const n = { auto: 0, manual: 0, rewrite: 0 };
+      ROWS.forEach((r) => n[r.k]++);
+      const r = ROWS[pick];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${LAB[r.k][0]}（${LAB[r.k][1]}）</b>：${r.d}`
+        + `<br><span class="ai-faint">这 ${ROWS.length} 行里：自动 ${n.auto} 行、要人工确认 ${n.manual} 行、必须重写 ${n.rewrite} 行。真实项目里自动的比例高得多，但剩下那些行往往集中在最关键的 kernel 里。</span>`;
+      fig.querySelectorAll('[data-f]').forEach((b) => b.setAttribute('aria-pressed', String(((b as HTMLElement).dataset.f === 'hand') === only)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bf = t.closest<HTMLElement>('[data-f]'); if (bf) { only = bf.dataset.f === 'hand'; draw(); return; }
+      const br = t.closest<HTMLElement>('[data-i]'); if (br) { pick = +br.dataset.i!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-hiptrans]').forEach(init);
+</script>

@@ -1,0 +1,27 @@
+提示 'The capital of France is'，5 个位置；参考：CPU FP32。每层的误差 = 最差位置的相对误差
+各层输出的最大绝对值（CPU FP32）：7 8 6544 6543 6542 6542 6540 6539 6535 6529 6528 6524 6522 6520 6516 6514 6513 6514 6519 6528 6534 6542 6547 6553 6558 6560 6320 1451
+
+mps float32 fixed：逐 token 生成 32 个，前 32 个和参考一致；下一个 token 的 top-1 相同
+  最差位置：2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 3e-06 3e-06 3e-06 3e-06 2e-06 3e-06 3e-06 3e-06 3e-06 2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 2e-06 9e-06
+  整个张量：1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 1e-06 8e-06
+  生成：' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital'
+
+mps bfloat16 fixed：逐 token 生成 32 个，前 32 个和参考一致；下一个 token 的 top-1 相同
+  最差位置：2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02
+  整个张量：9e-03 1e-02 2e-03 2e-03 2e-03 2e-03 2e-03 2e-03 1e-03 5e-04 5e-04 8e-04 1e-03 1e-03 2e-03 2e-03 2e-03 2e-03 2e-03 1e-03 2e-03 3e-03 3e-03 4e-03 5e-03 5e-03 3e-03 2e-02
+  生成：' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital'
+
+cpu bfloat16 fixed：逐 token 生成 32 个，前 5 个和参考一致；下一个 token 的 top-1 相同
+  最差位置：2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 1e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02 2e-02
+  整个张量：9e-03 1e-02 2e-03 2e-03 2e-03 2e-03 2e-03 2e-03 1e-03 5e-04 5e-04 8e-04 1e-03 1e-03 2e-03 2e-03 2e-03 2e-03 2e-03 1e-03 2e-03 2e-03 3e-03 4e-03 5e-03 5e-03 3e-03 2e-02
+  生成：' Paris. The capital of France is also the capital of the Republic of France. The capital of France is also the capital of the European Union. The capital of'
+
+mps float16 naive：逐 token 生成 32 个，前 0 个和参考一致；下一个 token 的 top-1 不同
+  最差位置：4e-03 3e-03 4e-03 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 1e+00 3e+00
+  整个张量：2e-03 2e-03 6e-04 4e-03 5e-03 7e-03 7e-03 9e-03 1e-02 1e-02 1e-02 1e-02 2e-02 2e-02 2e-02 3e-02 3e-02 4e-02 5e-02 6e-02 7e-02 9e-02 1e-01 1e-01 2e-01 2e-01 2e-01 3e+00
+  生成：'.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n\n\n\n\n\n\n\n\n\n\n\n\n\n'
+
+mps float16 fixed：逐 token 生成 32 个，前 32 个和参考一致；下一个 token 的 top-1 相同
+  最差位置：3e-03 2e-03 2e-03 2e-03 2e-03 2e-03 3e-03 2e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 3e-03 2e-03 2e-03 2e-03 2e-03 7e-03
+  整个张量：1e-03 1e-03 8e-05 2e-04 2e-04 3e-04 5e-04 8e-04 8e-04 1e-03 1e-03 1e-03 9e-04 6e-04 7e-04 9e-04 1e-03 9e-04 8e-04 1e-03 9e-04 9e-04 8e-04 1e-03 9e-04 1e-03 1e-03 7e-03
+  生成：' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital'

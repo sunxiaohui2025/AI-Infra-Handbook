@@ -1,0 +1,76 @@
+---
+// 一次 x @ w 从 Python 调用落到硬件的路径（第 137 讲）：
+//   reuse：ROCm 式接法，沿用 CUDA 的分发键，torch.cuda 的接口照样能用（海光 DCU 走这条路，第 149 讲）。
+//   new：PrivateUse1 式接法，注册一个新设备名，算子逐个注册到新键上，缺的回退到 CPU 或报错。
+//   missing：同一条路上缺了一个算子时会发生什么。
+// 读者可以：切换接法，按“下一步”逐站走，点任意一站看它做了什么、这一站在换卡时谁负责。
+interface Props { route?: 'reuse' | 'new' | 'missing'; title?: string; caption?: string }
+const { route = 'reuse', title = '一次 x @ w 走过哪些站', caption } = Astro.props;
+---
+<figure class="ai-gt ai-dp" data-dispatchpath data-route={route}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="r"><button data-r="reuse">沿用 CUDA 键（ROCm 式）</button><button data-r="new">注册新设备（PrivateUse1）</button><button data-r="missing">缺一个算子</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  <div class="ai-gt-play"><button type="button" data-prev>← 上一站</button><button type="button" data-next>下一站 →</button></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Stop = { t: string; who: string; d: string; bad?: boolean };
+  const ROUTES: Record<string, Stop[]> = {
+    reuse: [
+      { t: 'x @ w（Python）', who: '模型代码', d: '模型里就这一句。张量 x 的 device 是 cuda:0——在这条路线上，一块非 NVIDIA 的卡也报告自己是 cuda（第 150 讲会看到插件里写着 device_type="cuda"）。' },
+      { t: 'torch.matmul → aten::mm', who: 'PyTorch 前端', d: '一个 Python 运算符落到一个 aten 算子上。aten 是 PyTorch 的算子集合，几千个算子的签名都在这里定义。' },
+      { t: '分发器查表：键 = CUDA', who: 'PyTorch 分发器', d: '分发器按张量的设备类型算出分发键（dispatch key），再在这个算子的表里查这个键有没有注册实现。键是 CUDA，所以查的是 CUDA 那一行。' },
+      { t: 'CUDA 键上的 mm 实现', who: '厂商编译的 PyTorch', d: '这份 PyTorch 是用 HIP 重新编译的：注册在 CUDA 键上的代码，里面调的是厂商的矩阵乘库。源码里的名字还是 at::cuda::，编译出来的是本架构的机器码（第 136 讲的统计）。' },
+      { t: '厂商矩阵乘库', who: '算子库', d: 'hipBLASLt 一类的库按形状选一个 kernel。选得好不好，是第 143、151 讲的主题。' },
+      { t: '运行时发射 kernel', who: '运行时与驱动', d: '把 kernel 和参数交给驱动，排进当前流。上层看到的仍然是 CUDA 的流语义。' },
+    ],
+    new: [
+      { t: 'x @ w（Python）', who: '模型代码', d: '张量 x 的 device 是 npu:0 这样的新名字。模型代码里凡是写了 .cuda() 或 device="cuda" 的地方都要改——这是这条路线的第一笔成本。' },
+      { t: 'torch.matmul → aten::mm', who: 'PyTorch 前端', d: '这一站和另一条路线完全一样：aten 的算子签名与硬件无关。' },
+      { t: '分发器查表：键 = PrivateUse1', who: 'PyTorch 分发器', d: 'PyTorch 预留了 PrivateUse1 这个键给第三方后端；rename_privateuse1_backend("npu") 把它改成一个好记的名字，再生成 Tensor.npu()、is_npu 这些接口。' },
+      { t: 'PrivateUse1 键上的 mm 实现', who: '厂商的设备扩展包', d: '厂商用 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) 把自己的实现逐个挂上去。除了算子，还要实现显存分配器、流、事件、设备间拷贝。' },
+      { t: '厂商算子库', who: '算子库', d: '调用方式和 cuBLAS 不同：有的库吃的是“算子描述 + 工作空间”，而不是一次函数调用。' },
+      { t: '厂商运行时发射任务', who: '运行时与驱动', d: '接口全是厂商自己的一套；PyTorch 侧要把流、事件、同步的语义对应过去。' },
+    ],
+    missing: [
+      { t: 'torch._scaled_mm（FP8 矩阵乘）', who: '模型代码', d: '量化路径上的一个算子。模型代码没变，只是数据类型换了。' },
+      { t: '分发器查表：这个键上没有', who: 'PyTorch 分发器', d: '表里这一格是空的。接下来看有没有兜底：先看这个算子是不是复合算子（能拆成别的算子），再看这个后端有没有注册回退。' },
+      { t: '岔路一：报错', who: '默认行为', d: 'NotImplementedError：“这个算子在这个设备上还没有实现”。好处是问题立刻暴露；坏处是模型跑不起来。' , bad: true },
+      { t: '岔路二：回退到 CPU', who: '注册了 fallback 的后端', d: '把输入拷回主机、在 CPU 上算、再拷回设备。功能正常，但每次调用多两趟拷贝，而且打断了设备上的流水；第 140 讲量到这一下是 22 ms 对 1.5 ms。', bad: true },
+      { t: '岔路三：用现有算子组合', who: '适配者自己写', d: '把 FP8 反量化成 BF16，用已有的 BF16 矩阵乘算，再乘回缩放。留在设备上，精度和原生 FP8 kernel 相当，但省不下显存带宽。' },
+      { t: '岔路四：自己写 kernel', who: '适配者自己写', d: '工作量最大、上限最高。什么时候值得写，取决于这个算子在整个前向里占多少时间（第 140、144 讲）。' },
+    ],
+  };
+  function init(fig: HTMLElement) {
+    let r = fig.dataset.route || 'reuse', i = 0;
+    function draw() {
+      const stops = ROUTES[r];
+      i = Math.max(0, Math.min(i, stops.length - 1));
+      const H = stops.length * 30 + 14;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 520 ${H}">`;
+      stops.forEach((st, k) => {
+        const y = k * 30 + 4, on = k === i, done = k < i;
+        s += `<g class="ai-sa-b ${st.bad ? 'sw' : done ? 'gpu' : 'b'}${on ? ' is-pick' : ''}" data-i="${k}">`;
+        s += `<rect x="96" y="${y}" width="300" height="24" rx="3"/><text x="246" y="${y + 16}" text-anchor="middle">${st.t}</text></g>`;
+        s += `<text class="ai-al-gl" x="92" y="${y + 16}" text-anchor="end">${st.who}</text>`;
+        if (k < stops.length - 1) s += `<path class="ai-sa-ln" d="M 246 ${y + 24} L 246 ${y + 30}"/>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const st = stops[i];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>第 ${i + 1} 站 ${st.t}</b>（${st.who}）：${st.d}`;
+      fig.querySelectorAll('[data-r]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.r === r)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const b = t.closest<HTMLElement>('[data-r]'); if (b) { r = b.dataset.r!; i = 0; draw(); return; }
+      if (t.closest('[data-next]')) { i++; draw(); return; }
+      if (t.closest('[data-prev]')) { i--; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-i]'); if (g) { i = +g.dataset.i!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-dispatchpath]').forEach(init);
+</script>

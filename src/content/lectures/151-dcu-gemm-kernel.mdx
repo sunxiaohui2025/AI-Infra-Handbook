@@ -1,0 +1,119 @@
+---
+id: 151
+slug: dcu-gemm-kernel
+title: DCU 上的矩阵乘：hipBLASLt、MMAC 与小 M kernel
+chapter: 6
+part: 20
+problem: 为什么库选的分块不适合 decode，专用 kernel 怎么写
+prereqs: [87, 135, 143, 150]
+level: 主线
+demos: [CodeWalk, WaveTile]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import WaveTile from '../../components/WaveTile.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[87, 135, 143, 150]} />
+
+第 143 讲用海光插件注释里的数字算过一笔账：decode 时 M ≤ 64，`hipBLASLt` 选 256 × 256 的宏块，lm_head 那个形状上实际带宽只有 0.93 TB/s，而只沿 N 分块的专用 kernel 能跑到 1.73 TB/s。这一讲把那个专用 kernel 打开，逐行看它是怎么写的。
+
+这是全篇最硬的一讲，但它值得读完：一个真实的、为具体硬件写的矩阵乘 kernel，把前面讲过的所有硬件常数（波前 64、MMAC 的 16×16×16、片上存储、对齐要求、架构分支）全用上了。
+
+<Note kind="warn">读的是 `third_party/vllm-plugin-das/vllm_hcu/utils/bf16_fp32_mmac.py`，提交 `81cbe8f`，**只读不运行**。性能数字只引用文件开头的注释。</Note>
+
+## 这个 kernel 解决什么形状
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/utils/bf16_fp32_mmac.py" from={1} to={23} steps={[
+  { lines: [3, 9], title: '问题陈述', body: '<p>注释写得像一份工单：这段代码从 SGLang 的 DCU 分支移植过来；DeepSeek V4 的压缩投影在 decode 时每卡 M ≤ 64；在这个区间 <code>hipBLASLt</code> 选 256×256 的分块，<b>不管 N 多大都要约 135 μs</b>；所以这些 kernel 覆盖 M ∈ [1, 64]、N ∈ {256, 512, 1024, 2048}、K 是 128 的倍数。</p><p>“不管 N 多大”这半句是整件事的关键（第 143 讲算过）：时间和工作量脱钩了，说明代价全在分块的固定开销上。一个为大矩阵调好的库，在小 M 上会退化成这样。</p>' },
+  { lines: [18, 23], title: '把约束写成常量', body: '<p>支持的 N 做成一个集合，支持的架构做成一个元组（<code>gfx928</code>、<code>gfx936</code>、<code>gfx938</code>），M 的上限 64，BF16 两字节，还有一个 0x80000000 —— 注释说明它必须和下面手工拼的那个“缓冲描述符”里编码的字节范围一致。</p><p>这几行是第 143 讲说的“把假设写成检查”：不满足就不走这条路，而不是算错。</p>' },
+]} />
+
+## 架构分支：同一个形状，三种写法
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/utils/bf16_fp32_mmac.py" from={31} to={80} steps={[
+  { lines: [31, 40], title: '向量类型', body: '<p>先定义几个向量类型：4 个半精度打包成一个 8 字节的向量、8 个 BF16 作为矩阵指令的输入、4 个 FP32 作为累加器、4 个 32 位整数作为缓冲描述符。</p><p>为什么累加器正好是 4 个 FP32？第 135 讲算过：16×16 的输出有 256 个元素，摊到 64 条通道上，每条通道 4 个。这个数字不是选的，是硬件定的。</p>' },
+  { lines: [42, 57], title: 'MMAC：按架构选内建函数', body: '<p>同一个 16×16×16 的 BF16 矩阵乘累加，三种情况：<code>gfx936</code> 和 <code>gfx928</code> 用一个内建函数，<code>gfx938</code> 用另一个（名字里多了两个布尔参数），其他架构直接 <code>__builtin_trap()</code>。</p><p>最后那个分支的注释解释了它的必要性：PyTorch 会为 <code>PYTORCH_ROCM_ARCH</code> 里列出的每个架构都编一份代码，所以这段源码会被不支持 MMAC 的架构编译到；真正的保险是上层的 <code>supported()</code> 不会把这些设备路由到这里。<b>“能编译”和“该执行”是两回事</b>，这是多架构构建里很容易翻车的地方（第 149 讲）。</p>' },
+  { lines: [59, 70], title: '手工拼一个缓冲描述符', body: '<p>这是第 136 讲说的“必须重写”的那类代码：手工拼出一个四元组，描述“一段显存”——低 32 位地址、高 32 位地址、字节范围（0x80000000，就是上面那个常量）、以及一个控制字。</p><p><code>__builtin_amdgcn_readfirstlane</code> 的作用是告诉编译器“这个值在整个波前里是一样的”，于是它可以放进标量寄存器，省下向量寄存器。这类指令在 C++ 里没有对应物，只能用内建函数。</p>' },
+  { lines: [72, 80], title: '异步搬运：显存直接进片上存储', body: '<p>用一条内建指令把 16 字节从显存直接搬进共享内存（地址空间 3 就是共享内存），不经过寄存器。这就是第 135 讲说的“搬运和计算重叠”的硬件基础：发出这条指令后不用等，可以接着算上一块。</p><p>注意这个函数在当前版本里只被那个被关掉的 split-K 变体用到（下面会讲为什么关掉）。</p>' },
+]} />
+
+## 主 kernel：一块 16 行，波前沿 K 切
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/utils/bf16_fp32_mmac.py" from={82} to={141} steps={[
+  { lines: [82, 87], title: '分块策略：一句话', body: '<p>注释把策略说完了：<b>一个线程块负责 16 行 × kNPerBlock 列的一块，块里的几个波前沿 K 方向分工，最后在共享内存里归约</b>。</p><p>对照第 143 讲的结论：M 方向不补零（16 行正好是矩阵指令的行数），并行度靠 N 方向的块数和 K 方向的波前数凑出来。这正是“只沿 N 分块 + 沿 K 切波前”的实现。</p>' },
+  { lines: [88, 97], title: '每条通道负责什么', body: '<p>线程号拆成波前号和通道号（<code>kWaveSize = 64</code>，第 148 讲引过这一行）。通道号再拆成两段：<code>lane % 16</code> 是这条通道在 16×16 块里的行，<code>lane / 16</code> 是四个“行组”之一。</p><p>最后一行 <code>k_offset</code> 把两件事叠在一起：第几个波前（沿 K 偏移 32 个元素）和第几个行组（再偏移 8 个）。一条通道一次读 8 个 BF16（16 字节，正好一次向量加载）。</p>' },
+  { lines: [99, 112], title: '主循环：读 8 个、算两条 MMAC', body: '<p>A 的一行和 B 的一列各读 8 个 BF16，拆成两个 4 元素向量，连发两条 MMAC 指令累加到同一个累加器上。循环的步长是 <code>16 × 2 × kWarps</code>——几个波前把 K 分段，各自跳着走。</p><p>第 102 行有一处细节：<code>row &lt; m</code> 不成立时让指针退回到 <code>a</code> 的开头。越界的行不参与计算，但指针必须是合法的，否则向量加载会越界读显存。小 M 的 kernel 里这类边界处理很多，因为 M 几乎总是不能整除 16。</p>' },
+  { lines: [114, 132], title: '波前之间折半归约', body: '<p>各波前算的是 K 的不同段，所以要把它们的部分和加起来。做法是在共享内存里折半归约：一半的波前把自己的累加器写进去，同步，另一半读出来累加，再同步；每轮波前数减半。</p><p>第 135、136 讲说的“归约步数由线程组宽度决定”在这里是另一种形式：这里归约的是<b>波前之间</b>，步数由波前个数（<code>kWarps</code>）决定，所以写成了循环而不是写死的次数。</p>' },
+  { lines: [134, 140], title: '写回：一条通道写 4 个数', body: '<p>只有 0 号波前写结果，每条通道按行组的偏移写 4 个 FP32，间隔 4 列——这个布局正是 MMAC 指令把输出摊在通道里的方式。</p><p>输出是 FP32 而不是 BF16：这个 kernel 的用途是压缩投影，后面还要接别的运算，保留 FP32 可以少一次精度损失（文件名里的 <code>bf16_fp32</code> 就是这个意思）。</p>' },
+]} />
+
+<WaveTile caption="图 151-1　把演示的参数调成这个 kernel 的设定：线程组宽度 64、矩阵指令 16×16×16、M 拖到 16 或 64、输出块选 16 × 64，再对比 256 × 256 时的补零比例（第 135、143 讲）。" />
+
+## 一个被关掉的优化，和它的注释
+
+源码里还有一个 split-K 的变体（第 87 讲的 split-K：沿 K 切开凑并行度），用双缓冲、异步搬运、原子加归约。但它被一个宏关掉了，注释写明了原因：
+
+```text
+// The current DTK toolchain emits an empty gfx938 code object when the split-K raw
+// LDS load path is present in this JIT translation unit. Keep it out of device
+// compilation until it can be built as an independent extension.
+#define VLLM_HCU_ENABLE_MMAC_SPLITK 0
+```
+
+翻译过来：当前的 DTK 工具链在这个即时编译单元里遇到 split-K 那条“直接搬进共享内存”的路径时，会给 `gfx938` 生成一个空的代码对象；所以先把它从设备编译里排除，等能作为独立扩展构建时再说。
+
+这条注释值得单独说，因为它展示了适配工作里最真实的一面：**一个写好的优化，因为工具链的一个问题而暂时关掉**。处理方式有三点可取——用宏整段关闭而不是删掉代码；注释里写清症状（空的代码对象）、条件（在这个即时编译单元里）和重新启用的条件（作为独立扩展构建）；以及关掉之后主路径仍然完整可用。第 142 讲说过“把判断过程写下来”，这就是一个范例。
+
+## 入口：检查、路由、即时编译
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/utils/bf16_fp32_mmac.py" from={242} to={300} steps={[
+  { lines: [243, 257], title: 'C++ 侧的检查', body: '<p>进 kernel 之前把所有假设检查一遍：两个张量都是二维、都在设备上、同一个设备、都是 BF16、都连续、K 维对得上、M 在 [1, 64]、N 是那四个值之一、K 是 128 的倍数。</p><p>这些检查不是防御性编程的样板，而是<b>契约</b>：下面的 kernel 完全按这些前提写的（一次读 8 个元素、按 16 行分块、不处理非连续布局）。任何一条不满足，结果就是错的而不是慢的。</p>' },
+  { lines: [258, 273], title: '准备输出和网格', body: '<p>设备守卫（保证后续操作在正确的设备上）、输出张量（split-K 关掉时用 <code>empty</code>，开启时要用 <code>zeros</code>，因为那条路径用原子加累加部分和）、拿当前流、算网格的 Y 方向块数（<code>(m + 15) / 16</code>，就是 M 补齐到 16 的倍数）。</p>' },
+  { lines: [285, 294], title: '发射', body: '<p>网格的 X 方向是 <code>n / 16</code>，每块 256 个线程（4 个波前），动态共享内存 <code>2 × 16 × 16 × sizeof(float)</code> —— 正好是折半归约第一轮要用的空间。模板参数 <code>&lt;4, 16&gt;</code> 就是“4 个波前、每块 16 列”。</p><p>发射用的是 <code>hipLaunchKernelGGL</code> 宏（第 136 讲的对照表里有它），后面紧跟一次错误检查。</p>' },
+]} />
+
+Python 侧的两层把它接进引擎：
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/utils/bf16_fp32_mmac.py" from={303} to={354} steps={[
+  { lines: [303, 314], title: '即时编译，只编一次', body: '<p>用 PyTorch 的 <code>load_inline</code> 在运行时编译这段源码，外面套一个只缓存一个结果的装饰器，所以一个进程里只编一次。</p><p>第 136 讲提过这种做法的取舍：不用预编译所有架构，代价是第一次调用要等几十秒——在服务里必须放进预热阶段（第 153 讲的清单里有这一项）。</p>' },
+  { lines: [317, 321], title: '问硬件要架构代号', body: '<p>从设备属性里读 <code>gcnArchName</code>，取冒号前面的部分，看在不在支持的三个代号里。注意这里用的是 <code>torch.cuda.get_device_properties</code>——第 149 讲说的“<code>torch.cuda</code> 照样能用”在这里又出现了一次。</p>' },
+  { lines: [323, 347], title: 'Python 侧的 supported()', body: '<p>和 C++ 侧那组检查重复了一遍，但多了三条只有 Python 侧方便查的：张量总字节数不超过缓冲描述符里编码的范围（那个 0x80000000）、两个张量的数据指针都是 16 字节对齐（向量加载的要求）、以及设备确实有 MMAC。</p><p>为什么要两层检查？因为上层的调用方用它来<b>决定走哪条路</b>（不满足就回退到库），而 C++ 侧那组是<b>最后的保险</b>。第 143 讲说的“把对齐要求写成入口检查”就���这个意思。</p>' },
+  { lines: [350, 354], title: '对外的函数', body: '<p>十行不到：不满足契约就抛错，满足就调编译好的扩展。真正的路由逻辑在它的调用方——下面讲。</p>' },
+]} />
+
+## 调用方：三层回退
+
+这个 kernel 不是直接被模型调用的，而是放在一个三层回退的链条里（`vllm_hcu/utils/bf16_fp32_gemm.py`）。顺序是：
+
+1. **布局不对就走原生 torch**。如果权重按 `[in_features, out_features]` 存（插件的一个选项），直接用 `torch.mm` 并要求 FP32 输出。
+2. **一长串前置条件**：环境变量没关、`torch.version.hip` 不是 None、两个张量都是 BF16、都在设备上、都是二维。任何一条不满足，记下原因、退回 `torch.mm`。
+3. **小 M 走 MMAC kernel**：开关打开且 `supported()` 通过时调上面那个 kernel。注释里就写着 `Decode-sized M: hipBLASLt picks a 256x256 tile here (~135us/call)`。调用失败就把这条路**永久关掉**（一个进程内的标志位），记一条警告，退到 hipBLASLt。
+4. **再失败退到 `torch.mm`**，同样是永久关掉加一条警告。
+
+最后，整个函数通过 `direct_register_custom_op` 注册成一个自定义算子（`hcu_linear_bf16_fp32`），还配了一个只按形状返回空张量的假实现——第 137 讲讲过这个假实现是给图编译用的。
+
+<Note kind="point">这条链条的设计值得抄：**每一层都有明确的前置条件和失败处理，失败只警告一次（而不是每步刷日志），失败之后永久降级（而不是每次都重试一个已知坏掉的路径）**。适配代码的质量，很大程度上就体现在这种“出错之后怎么办”的处理上。</Note>
+
+## 另一个专用 kernel：lm_head
+
+同一个思路还用在 lm_head 上（`vllm_hcu/model_executor/layers/skinny_lm_head.py`），但实现换成了 Triton。文件开头的注释给了第 143 讲算过的那组数：`M ≤ 64 时这个投影是纯粹的权重流；hipBLASLt 在这里选 256×256 的宏块、在 gfx938 上达到约 0.93 TB/s；这个 kernel 只沿 N 分块、M 方向一个块吃完，达到 1.4–1.7 TB/s（Step5 的 lm_head 分片 32224 × 4096：M=16 时 285 → 153 μs，M=64 时 190 μs）`。
+
+两个 kernel 的对比正好印证第 144 讲的选择逻辑：
+
+| | 压缩投影的 kernel | lm_head 的 kernel |
+| --- | --- | --- |
+| 语言 | HIP C++（手写，带架构分支和内建指令） | Triton |
+| 形状约束 | M ≤ 64，N 取 256 / 512 / 1024 / 2048，K % 128 = 0 | M ≤ 64，K % 128 = 0，N 任意 |
+| 分块 | 16 行 × 16 列，波前沿 K 切 | 按 M 分三档选 BM、BN 和 warp 数 |
+| 开关 | 环境变量 + `supported()` | 环境变量 `STEP5_SKINNY_LM_HEAD` |
+| 为什么这样选 | 要控制矩阵指令、搬运和归约的每一步 | 逻辑简单（纯流式读权重），Triton 够用且好维护 |
+
+**同一个问题（小 M 矩阵乘），两种语言，按复杂度分工**——这比“全部手写”或“全部 Triton”都更实际。
+
+## 回顾
+
+这个 kernel 是前面所有硬件知识的落点。它解决的形状是 decode 的小 M（M ≤ 64），而库在这个区间退化成“不管 N 多大都要约 135 μs”。它的策略是一个块吃 16 行（不补零）、沿 N 分块、块里的波前沿 K 分工最后在共享内存里折半归约。实现里用到的每一个常数都来自硬件：波前 64、MMAC 的 16×16×16、每条通道 4 个 FP32 累加器、一次读 8 个 BF16（16 字节对齐）、按 `gfx928` / `gfx936` / `gfx938` 分支选内建函数、不支持的架构编译出一条陷阱指令。工程上有三处可以直接抄：把假设写成两层检查（Python 侧用来路由、C++ 侧作为保险）、三层回退且失败后永久降级只警告一次、以及用宏关掉一个因工具链问题暂时不能用的优化并把症状和重启条件写进注释。另一个专用 kernel（lm_head）用 Triton 写，说明语言选择要按算子的复杂度分工。
+
+矩阵乘讲完了。下一讲把注意力、量化和通信这三块在 DCU 上的选择一起看：后端按什么顺序挑、支持哪些量化方法、自定义 All-Reduce 在什么条件下才用，以及 PD 分离怎么搭。

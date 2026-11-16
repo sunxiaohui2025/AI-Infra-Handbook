@@ -1,0 +1,107 @@
+---
+// 同一个 RMSNorm 的几种写法并排对照（第 144 讲）。
+// 四种写法：框架基础算子组合、Triton、厂商 kernel 语言（这里是本机能真实运行的 Metal，写法与 HIP/CUDA 同构）、块级 DSL（TileLang 风格的示意）。
+// 每种给出代码、能跑在哪些后端、工作量、典型性能，以及这种写法要自己操心什么。
+// Triton 与块级 DSL 的片段没有在本机运行（本机没有这两个后端），代码按各自文档的常见形式写，API 以官方文档为准；
+// Metal 那一份是 bench/port_kernel.py 里真实编译运行的 kernel。
+// 读者可以：切换写法看代码和说明。
+interface Props { title?: string; caption?: string }
+const { title = '同一个 RMSNorm，四种写法', caption } = Astro.props;
+---
+<figure class="ai-gt ai-kc" data-kernelcompare>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="k"><button data-k="torch">框架算子组合</button><button data-k="triton">Triton</button><button data-k="metal">厂商 kernel 语言</button><button data-k="dsl">块级 DSL</button></div>
+  <pre class="ai-kc-code" data-code></pre>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type K = { code: string; back: string; cost: string; perf: string; note: string };
+  const KS: Record<string, K> = {
+    torch: {
+      code: `def rms_norm(x, w, eps):
+    var = x.pow(2).mean(-1, keepdim=True)     # 两个 kernel：pow、mean
+    return x * torch.rsqrt(var + eps) * w     # 再三个：rsqrt、两次乘`,
+      back: '所有后端（只要基础算子齐，第 137 讲）',
+      cost: '几分钟',
+      perf: '本机 decode 形状 25.9 μs，有效带宽 0.3 GB/s',
+      note: '要自己操心的：没有。代价是这一个数学操作被摊成五个 kernel，张量被读写五遍，而且下发五次。带宽受限的算子这样写等于白扔几倍的时间。',
+    },
+    triton: {
+      code: `@triton.jit
+def rms_norm_kernel(x_ptr, w_ptr, o_ptr, d, eps, BLOCK: tl.constexpr):
+    row = tl.program_id(0)                      # 一个程序处理一行
+    offs = tl.arange(0, BLOCK)
+    mask = offs < d
+    x = tl.load(x_ptr + row * d + offs, mask=mask, other=0.0).to(tl.float32)
+    var = tl.sum(x * x, axis=0) / d             # 归约由编译器安排
+    scale = 1.0 / tl.sqrt(var + eps)
+    w = tl.load(w_ptr + offs, mask=mask, other=0.0)
+    tl.store(o_ptr + row * d + offs, (x * scale) * w, mask=mask)
+
+# 调用：rms_norm_kernel[(rows,)](x, w, out, d, eps, BLOCK=1024, num_warps=4)`,
+      back: 'Triton 有后端的平台（NVIDIA、AMD，以及接了 Triton 的厂商，第 136 讲）',
+      cost: '半小时到几小时',
+      perf: '和手写接近；但为一种硬件调好的 BLOCK、num_warps 换卡要重调',
+      note: '要自己操心的：块大小、每个程序处理多少行、num_warps 和流水级数。不用操心的：线程编号、线程组宽度、共享内存的分配与同步——这些由编译器按目标后端决定，所以同一份代码能跨后端（第 88 讲）。',
+    },
+    metal: {
+      code: `kernel void rms_norm_f32(device const float* x, device const float* w,
+                         device float* out, constant uint& d, constant float& eps,
+                         uint row [[threadgroup_position_in_grid]],
+                         uint lane [[thread_position_in_threadgroup]],
+                         uint nthreads [[threads_per_threadgroup]]) {
+  threadgroup float partial[32];
+  float acc = 0.0f;
+  for (uint i = lane; i < d; i += nthreads) { float v = x[row*d+i]; acc += v*v; }
+  acc = simd_sum(acc);                       // 组内归约：宽度由硬件定（这里 32，海光是 64）
+  if (lane % 32 == 0) partial[lane / 32] = acc;
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  if (lane == 0) { float s = 0; for (uint k = 0; k < nthreads/32; ++k) s += partial[k];
+                   partial[0] = rsqrt(s / float(d) + eps); }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+  float scale = partial[0];
+  for (uint i = lane; i < d; i += nthreads) out[row*d+i] = x[row*d+i] * scale * w[i];
+}`,
+      back: '只有这一种架构（CUDA / HIP / Metal / 厂商语言各写一份）',
+      cost: '半天到几天（含调试和对齐检查）',
+      perf: '本机 decode 形状 5.6 μs，prefill 形状 11.5 μs——比组合写法快 4.6 到 10 倍',
+      note: '要自己操心的：线程组宽度、归约的步数与同步、共享内存的大小和冲突、边界处理、对齐。换架构时这些几乎都要重写（第 136 讲）。换来的是上限最高——这份代码在本机真实跑出了上面的数字。',
+    },
+    dsl: {
+      code: `# TileLang 这类块级语言的形状（示意，API 以官方文档为准）
+@tilelang.jit
+def rms_norm(rows, d, block):
+    @T.prim_func
+    def main(X: T.Tensor((rows, d)), W: T.Tensor((d,)), O: T.Tensor((rows, d))):
+        with T.Kernel(rows, threads=256) as row:      # 一个块一行
+            xs = T.alloc_shared((block,), "float32")  # 显式声明片上缓冲
+            acc = T.alloc_fragment((1,), "float32")
+            T.copy(X[row, :], xs)                     # 显式搬运：显存 → 片上
+            T.reduce_sum(xs * xs, acc)                # 归约写成一条语句
+            for i in T.Parallel(block):
+                O[row, i] = xs[i] * T.rsqrt(acc[0] / d + 1e-6) * W[i]
+    return main`,
+      back: '语言支持的后端（这类项目通常同时覆盖几家硬件）',
+      cost: '和 Triton 相近',
+      perf: '目标是接近手写；复杂算子（矩阵乘、注意力）上的差距随版本变化很快',
+      note: '要自己操心的：片上缓冲的分配、搬运的时机、分块与流水的级数——比 Triton 更显式。好处正是这一点：显式搬运的硬件（第 135 讲的 NPU 路线）能表达出它们需要的调度，而这类调度在 Triton 的抽象里不好写。海光的 OpenDAS 里就带了 tilelang 这一类工具（第 148 讲）。',
+    },
+  };
+  function init(fig: HTMLElement) {
+    let k = 'torch';
+    function draw() {
+      const v = KS[k];
+      fig.querySelector<HTMLElement>('[data-code]')!.textContent = v.code;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `<b>能跑在哪</b>：${v.back}　<b>工作量</b>：${v.cost}<br><b>性能</b>：${v.perf}<br>${v.note}`;
+      fig.querySelectorAll('[data-k]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.k === k)));
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as Element).closest<HTMLElement>('[data-k]'); if (b) { k = b.dataset.k!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-kernelcompare]').forEach(init);
+</script>

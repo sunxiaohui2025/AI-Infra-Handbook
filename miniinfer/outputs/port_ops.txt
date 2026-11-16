@@ -1,0 +1,18 @@
+一、Qwen3-0.6B 在 MPS 上用到 31 种 aten 算子；一步 decode 调用 3932 次，其中视图类 1711 次，要在设备上算的 2221 次（23 种）
+   要算的：mul×590、add×225、mm×197、pow×169、mean×113、rsqrt×113、arange×85、div×84、reciprocal×56、_to_copy×56、cos×56、sin×56、sub×56、cat×56、index_put_×56、clone×56、bmm×56、le×28、bitwise_not×28、masked_fill×28、_softmax×28、silu×28、index×1
+   视图类：permute×477、view×448、unsqueeze×448、slice×169、select×112、expand×56、lift_fresh×1
+   回退到 CPU 的算子：0 个
+二、推理引擎常用的几个算子在 MPS 上（torch 2.15.0）：
+   支持    bf16 矩阵乘
+   支持    FP8 类型转换
+   不支持  FP8 矩阵乘 _scaled_mm：NotImplementedError
+   支持    INT8 矩阵乘 _int_mm
+   支持    MoE 分组矩阵乘 _grouped_mm
+   支持    注意力 scaled_dot_product_attention
+   不支持  FlashAttention 内核 _scaled_dot_product_flash_attention：NotImplementedError
+   不支持  FP64：TypeError
+三、补上 FP8 矩阵乘（M=16, K=N=4096，模拟 decode 时的一个线性层）：
+     22273 μs   相对误差 3.78e-02   回退到 CPU
+      1459 μs   相对误差 3.78e-02   组合：反量化 + BF16 矩阵乘
+       526 μs   相对误差 2.88e-03   对照：不量化，BF16 矩阵乘
+   （相对误差 = ‖结果 − FP32 精确值‖ ÷ ‖FP32 精确值‖；前两种的误差来自 FP8 量化本身，两者应当接近）

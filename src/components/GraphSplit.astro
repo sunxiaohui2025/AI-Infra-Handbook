@@ -1,0 +1,67 @@
+---
+// 逐算子下发、整图下发、图被中断切成几段：一步 decode 的 CPU 开销怎么变（第 138 讲）。
+// 模型（简化）：一步 decode 要执行 层数 × 每层算子数 个算子；
+//   逐算子：CPU 每个算子都要做一次分发和一次下发，开销 = 算子数 × 每次下发的 CPU 时间；
+//   整图：整张图提前编译并下发一次，CPU 只付 一次下发 + 每段入口的固定开销；
+//   图被中断成 n 段时，CPU 要付 n 次入口开销，中断处的算子还要退回逐算子执行；
+//   GPU 侧的时间按 算子数 × 每个算子的 GPU 时间 估，CPU 比 GPU 慢时 GPU 就在等（第 89 讲）。
+// 读者可以：调层数、每层算子数、图中断处数、每次下发的 CPU 时间、每个算子的 GPU 时间，看三种模式下一步的耗时和谁在等谁。
+interface Props { title?: string; caption?: string }
+const { title = '一步 decode：逐算子下发和整图下发', caption } = Astro.props;
+---
+<figure class="ai-gt ai-gs" data-graphsplit>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>层数 = <b data-lv></b></span><input type="range" min="2" max="80" step="1" value="28" data-l /></label>
+    <label class="ai-tl-lr"><span>每层算子数 = <b data-ov></b></span><input type="range" min="5" max="120" step="1" value="79" data-o /></label>
+    <label class="ai-tl-lr"><span>图被切成 <b data-sv></b> 段</span><input type="range" min="1" max="30" step="1" value="1" data-s /></label>
+    <label class="ai-tl-lr"><span>每次下发 CPU <b data-cv></b> μs</span><input type="range" min="2" max="30" step="1" value="8" data-c /></label>
+    <label class="ai-tl-lr"><span>每个算子 GPU <b data-gv></b> μs</span><input type="range" min="1" max="40" step="1" value="6" data-g /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmt = (t: number) => (t >= 1000 ? `${(t / 1000).toFixed(2)} ms` : `${t.toFixed(0)} μs`);
+  function init(fig: HTMLElement) {
+    const q = (k: string) => fig.querySelector<HTMLInputElement>(`[data-${k}]`)!;
+    function draw() {
+      const L = +q('l').value, O = +q('o').value, seg = +q('s').value, cpu = +q('c').value, gpu = +q('g').value;
+      const ops = L * O;
+      const gpuTime = ops * gpu;                       // GPU 侧的活，三种模式都一样
+      const eagerCpu = ops * cpu;                      // 每个算子一次分发 + 一次下发
+      const entry = 20;                                // 一段图的入口开销（下发 + 对输入做检查）
+      const graphCpu = entry;                          // 整图：只付一次
+      const splitOps = Math.min(ops, (seg - 1) * 3);   // 中断处退回逐算子执行的算子数（估）
+      const splitCpu = seg * entry + splitOps * cpu;
+      const rows: [string, number, number][] = [
+        ['逐算子下发', eagerCpu, gpuTime],
+        [`图切成 ${seg} 段`, splitCpu, gpuTime],
+        ['整图下发一次', graphCpu, gpuTime],
+      ];
+      ['l', 'o', 's', 'c', 'g'].forEach((k) => (fig.querySelector(`[data-${k}v]`)!.textContent = q(k).value));
+      const mx = Math.max(...rows.map(([, c, g]) => Math.max(c, g)));
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 560 150">';
+      s += `<text class="ai-al-gl" x="100" y="10">灰 = CPU 做分发和下发　绿 = GPU 执行　一步的耗时 = 两者取大</text>`;
+      rows.forEach(([name, c, g], i) => {
+        const y = 20 + i * 42;
+        s += `<text class="ai-al-gl" x="96" y="${y + 12}" text-anchor="end">${name}</text>`;
+        s += `<rect class="ai-ab-lat" x="100" y="${y}" width="${(c / mx) * 400}" height="14"/>`;
+        s += `<rect class="ai-ab-bw" x="100" y="${y + 16}" width="${(g / mx) * 400}" height="14"/>`;
+        s += `<text class="ai-al-gl" x="${104 + (Math.max(c, g) / mx) * 400}" y="${y + 20}">${fmt(Math.max(c, g))}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const eager = Math.max(eagerCpu, gpuTime), graph = Math.max(graphCpu, gpuTime), split = Math.max(splitCpu, gpuTime);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `一步 ${L} 层 × ${O} 个算子 = <b>${ops}</b> 个算子。逐算子下发时 CPU 要花 ${ops} × ${cpu} μs = <b>${fmt(eagerCpu)}</b>，GPU 的活是 ${fmt(gpuTime)}：`
+        + `${eagerCpu > gpuTime ? '<b>GPU 在等 CPU</b>，这一步的时间由下发决定' : 'CPU 跟得上，下发被盖住了'}。`
+        + `<br>整图下发只付一次入口开销 ${entry} μs，一步 ${fmt(graph)}，相比逐算子快 <b>${(eager / graph).toFixed(2)} 倍</b>；`
+        + `切成 ${seg} 段时 ${fmt(split)}（段入口 ${seg} × ${entry} μs，中断处还有约 ${splitOps} 个算子退回逐算子）。`;
+    }
+    fig.addEventListener('input', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-graphsplit]').forEach(init);
+</script>

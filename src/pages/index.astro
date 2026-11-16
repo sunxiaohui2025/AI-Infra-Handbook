@@ -1,5 +1,6 @@
 ---
-// 首页：5 章横排成 5 列（第一章第一列 … 第五章第五列），每列自上而下是本章各篇，篇卡里列出全部讲。
+// 首页：各章横排成一列（第一章第一列 … 第六章第六列），每列自上而下是本章各篇，篇卡里列出全部讲。
+// 6 列用 repeat(6, minmax(0,1fr)) 自动均分；窄屏(<900px)改用固定 200px 列宽并横向滚动。
 // 查找用顶栏的搜索（⌘K），首页不再单独放筛选框。
 import Base from '../layouts/Base.astro';
 import WfPart from '../components/WfPart.astro';

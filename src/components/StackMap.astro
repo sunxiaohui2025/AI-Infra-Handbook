@@ -1,0 +1,92 @@
+---
+// 软件栈分层对照（第六章共用）：从模型代码到驱动的 9 层，三条路线各对应什么。
+// 三条路线：NVIDIA 的 CUDA；兼容 CUDA 生态的 GPGPU 路线（以 AMD 的 ROCm 为代表，海光 DCU 也走这条路，见第 148 讲）；自成体系的 NPU 路线（以华为昇腾的 CANN 为代表）。
+// 每格标出换卡时这一层的工作量：沿用（基本不改）、翻译（有对应物，改接口或自动转换）、重写（要重新实现）。只用公开资料。
+// 读者可以：切换路线，点任意一层看说明；route 指定默认路线（cuda / gpgpu / npu），focus 高亮某几层（层的编号，从 0 开始）。
+interface Props { route?: 'cuda' | 'gpgpu' | 'npu' | 'das'; focus?: number[]; title?: string; caption?: string }
+const { route = 'gpgpu', focus = [], title = '从模型到芯片：九层软件栈', caption } = Astro.props;
+---
+<figure class="ai-gt ai-stk" data-stackmap data-route={route} data-focus={JSON.stringify(focus)}>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="r"><button data-r="cuda">NVIDIA（CUDA）</button><button data-r="gpgpu">兼容 GPGPU（ROCm 等）</button><button data-r="npu">NPU（昇腾 CANN 等）</button><button data-r="das">海光 DCU（DTK + DAS）</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type Cell = { t: string; w: 0 | 1 | 2; d: string };   // w：0 沿用，1 翻译，2 重写
+  const LAYERS = ['模型代码', '推理引擎 / 训练框架', '深度学习框架', '图编译', '算子库', 'kernel 语言与编译器', '集合通信库', '运行时与驱动', '工具'];
+  const ROUTES: Record<string, Cell[]> = {
+    cuda: [
+      { t: 'HF / vLLM 的模型文件', w: 0, d: '模型结构用 PyTorch 写成，和硬件无关。' },
+      { t: 'vLLM、SGLang、Megatron', w: 0, d: '引擎内置 CUDA 平台，开箱即用。' },
+      { t: 'PyTorch（CUDA 版）', w: 0, d: 'PyTorch 的 CUDA 后端：几千个算子的 CUDA 实现、显存分配器、流和事件。' },
+      { t: 'torch.compile → Inductor → Triton', w: 0, d: 'Inductor 把图融合后生成 Triton kernel，Triton 编译成 PTX。' },
+      { t: 'cuBLAS、cuDNN、CUTLASS、FlashAttention', w: 0, d: '矩阵乘、卷积、注意力等高性能算子，多数针对 NVIDIA 的架构手工调过。' },
+      { t: 'CUDA C++ / PTX，nvcc', w: 0, d: 'kernel 用 CUDA C++ 写，nvcc 编译成 PTX 再到机器码；也有直接写 PTX 内联汇编的。' },
+      { t: 'NCCL', w: 0, d: '集合通信：All-Reduce、All-Gather、All-to-All，感知 NVLink、PCIe、InfiniBand 拓扑。' },
+      { t: 'CUDA Runtime / Driver', w: 0, d: '设备管理、显存、流、kernel 发射。' },
+      { t: 'nvidia-smi、Nsight Systems / Compute', w: 0, d: '看卡的状态、时间线、单个 kernel 的性能。' },
+    ],
+    gpgpu: [
+      { t: '同一份模型文件', w: 0, d: '基本不改。少数模型代码里写死了 "cuda" 或调用了 CUDA 专有的包，要顺手改掉。' },
+      { t: '引擎的 ROCm 平台或厂商插件', w: 1, d: 'vLLM 内置 ROCm 平台；厂商可以在它的基础上做插件，替换注意力后端、算子和部分模型实现（第 147、150 讲）。' },
+      { t: 'PyTorch（ROCm 式构建）', w: 1, d: 'PyTorch 用 HIP 重新编译，对外仍然叫 cuda 设备：torch.cuda 的接口照样能用，大多数 Python 代码不用改（第 137 讲）。' },
+      { t: 'Inductor → Triton（ROCm 后端）', w: 1, d: 'Triton 有 AMD 后端，生成的 kernel 编译成 AMDGCN 机器码。为 NVIDIA 调的配置（块大小、warp 数）要重新调。' },
+      { t: 'rocBLAS / hipBLASLt、MIOpen、CK、FlashAttention 移植版', w: 2, d: '有对应的库，但覆盖面和调优程度不同；性能关键的算子往往要厂商重写或专门调优（第 143 讲）。' },
+      { t: 'HIP C++，基于 Clang 的编译器', w: 1, d: 'HIP 的 API 和 CUDA 一一对应，hipify 能自动翻译大部分代码；PTX 内联汇编、假设 warp 是 32 的写法要手改（第 136 讲）。' },
+      { t: 'RCCL', w: 1, d: '接口和 NCCL 一样，PyTorch 里后端名字仍叫 nccl；拓扑和性能特性随互联不同而不同（第 146 讲）。' },
+      { t: 'HIP Runtime / 厂商驱动', w: 1, d: '对应 CUDA Runtime 的接口。' },
+      { t: 'rocm-smi、rocprof 等', w: 1, d: '功能对应，名字和输出格式不同（第 142 讲）。' },
+    ],
+    npu: [      { t: '同一份模型文件', w: 0, d: '基本不改；但凡写了 .cuda() 或 device="cuda" 的地方都要改成新设备名。' },
+      { t: '厂商插件（如 vllm-ascend）', w: 2, d: '引擎核心不变，平台层、注意力后端、KV Cache 管理、图模式都由插件重新实现。' },
+      { t: 'PyTorch + 设备插件（如 torch_npu）', w: 2, d: '通过 PrivateUse1 注册一个新设备（例如 npu），算子逐个注册到它上面；没注册的算子要回退或报错（第 137 讲）。' },
+      { t: '厂商的图模式（如 torchair、GE）', w: 2, d: '这类硬件更依赖整图下发，torch.compile 接厂商自己的后端，把图交给厂商的图引擎优化（第 138 讲）。' },
+      { t: '厂商算子库（如 CANN 的 aclnn）', w: 2, d: '算子按厂商的接口重新实现，调用方式和 cuBLAS 不同。' },
+      { t: '厂商 kernel 语言（如 Ascend C）', w: 2, d: '编程模型不是 SIMT，要显式安排数据在片上缓冲之间的搬运，CUDA kernel 不能翻译，只能重写（第 136、144 讲）。' },
+      { t: '厂商集合通信库（如 HCCL）', w: 1, d: 'PyTorch 里注册成新的分布式后端；拓扑是厂商自己的互联（第 146 讲）。' },
+      { t: '厂商运行时（如 AscendCL）', w: 2, d: '设备、内存、流的接口全部不同。' },
+      { t: 'npu-smi、msprof 等', w: 1, d: '功能对应，时间线的组织方式不同。' },
+    ],
+    das: [
+      { t: '同一份模型文件', w: 0, d: '模型代码不改。插件为少数模型（MLA 的吸收写法、某些 MoE）提供自己的实现类，通过 vLLM 的通用插件入口注册（第 150、152 讲）。' },
+      { t: 'vLLM / SGLang + 海光插件', w: 1, d: 'vllm-plugin-das 用 entry point 注册平台、模型和算子，再用运行时补丁替换上游的部分模块，不改 vLLM 的源码（第 147、150 讲）。' },
+      { t: 'PyTorch 的 DCU 版', w: 1, d: '按 ROCm 的做法用 HIP 重新编译：对外仍是 cuda 设备，torch.cuda 的接口照样能用，所以插件里写 device_type="cuda"、dispatch_key="CUDA"（第 149、150 讲）。' },
+      { t: 'torch.compile + 图捕获（复用 CUDA 路径）', w: 1, d: '插件的平台类声明支持静态图模式，图包装器直接复用 vLLM 的 CUDAGraphWrapper（第 150 讲）。' },
+      { t: 'hipBLASLt、FlashAttention / FlashMLA 移植版、LightOp 等', w: 2, d: '基础数学库随 DTK 提供；注意力、量化、MoE 等高性能算子由 DAS / OpenDAS 这一层的组件提供，decode 的小 M 矩阵乘还有插件自写的专用 kernel（第 151、152 讲）。' },
+      { t: 'HIP C++ 与 DCU 编译器，Triton、TileLang', w: 1, d: 'kernel 用 HIP 写，架构代号是 gfx928、gfx936、gfx938 这一类；容器里也装了 Triton 和 TileLang（第 144、148 讲）。' },
+      { t: 'RCCL + 插件的自定义 All-Reduce / IPC All-Gather', w: 1, d: '接口照抄 NCCL，PyTorch 里后端名仍写 nccl；小消息走插件自己的 kernel（第 146、152 讲）。' },
+      { t: 'DTK 运行时与 DCU 驱动', w: 2, d: 'DTK（深算工具包）对应 CUDA Toolkit，默认装在 /opt/dtk，里面带编译器、HIP 运行时和基础数学库；插件的构建脚本从 ROCM_PATH 读它的版本写进 wheel 名字（第 148、149 讲）。' },
+      { t: 'hy-smi 等厂商工具', w: 1, d: '看卡的状态；插件里查拓扑用的是 amdsmi 这一类管理接口（第 146、148 讲）。' },
+    ],
+  };
+  const WORK = ['沿用', '翻译', '重写'];
+  function init(fig: HTMLElement) {
+    let r = fig.dataset.route || 'gpgpu', pick = 2;
+    const focus: number[] = JSON.parse(fig.dataset.focus || '[]');
+    function draw() {
+      const W = 880, rowH = 30, x0 = 170;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 900 ${LAYERS.length * rowH + 30}">`;
+      s += `<text class="ai-al-gl" x="0" y="14">层</text><text class="ai-al-gl" x="${x0}" y="14">这条路线上对应的是什么</text><text class="ai-al-gl" x="${W}" y="14" text-anchor="end">换卡时的工作量</text>`;
+      ROUTES[r].forEach((c, i) => {
+        const y = 22 + i * rowH, on = focus.includes(i);
+        s += `<g class="ai-stk-row${pick === i ? ' is-pick' : ''}${on ? ' is-focus' : ''}" data-i="${i}"><rect x="0" y="${y}" width="${W}" height="${rowH - 4}" rx="4"/>`;
+        s += `<text x="8" y="${y + 17}" class="ai-stk-l">${LAYERS[i]}</text><text x="${x0}" y="${y + 17}">${c.t}</text>`;
+        s += `<rect x="${W - 64}" y="${y + 4}" width="56" height="${rowH - 12}" rx="9" class="ai-stk-w${c.w}"/><text x="${W - 36}" y="${y + 17}" text-anchor="middle" class="ai-stk-wt">${WORK[c.w]}</text></g>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const c = ROUTES[r][pick], n = [0, 1, 2].map((k) => ROUTES[r].filter((x) => x.w === k).length);
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${LAYERS[pick]}</b>：${c.t}。${c.d}<br><span class="ai-faint">这条路线上：沿用 ${n[0]} 层、翻译 ${n[1]} 层、重写 ${n[2]} 层。点任意一层看说明。</span>`;
+      fig.querySelectorAll('[data-r]').forEach((b) => b.setAttribute('aria-pressed', String((b as HTMLElement).dataset.r === r)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const b = t.closest<HTMLElement>('[data-r]'); if (b) { r = b.dataset.r!; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-i]'); if (g) { pick = +g.dataset.i!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-stackmap]').forEach(init);
+</script>

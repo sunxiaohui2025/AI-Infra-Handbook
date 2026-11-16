@@ -1,0 +1,54 @@
+---
+// 版本矩阵检查（第 149 讲）：驱动、DTK、PyTorch、引擎、插件、算子库六层，每层选一个版本，看这套组合能不能起来。
+// 规则按插件源码里的检查逻辑整理（vllm-plugin-das，提交 81cbe8f）：
+//   插件要求已安装的 vLLM 在 epoch 和 (major, minor, patch) 这一级与 __vllm_target_version__ 一致，
+//   允许 rc / dev / post / 本地构建后缀不同（compatibility.py）；
+//   CI 的环境配置用 exact 匹配 Python、prefix 匹配 torch 与 torch.hip、release_line 匹配 DTK（hcu-runner-environment.json）。
+// 版本号本身是示例（含仓库里出现的那几个），实际以官方文档和仓库里的声明为准。
+// 读者可以：逐层换版本，看哪一层先报错、报什么错。
+interface Props { title?: string; caption?: string }
+const { title = '这套版本组合能起来吗', caption } = Astro.props;
+---
+<figure class="ai-gt ai-vm" data-versionmatrix>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-vm-rows" data-rows></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type L = { k: string; t: string; opts: string[]; ok: number[]; how: string; bad: string };
+  const LAYERS: L[] = [
+    { k: 'drv', t: '驱动', opts: ['和 DTK 配套的版本', '比 DTK 旧一代'], ok: [0], how: '由厂商的安装包配套给出，没有通用的版本号规则', bad: '驱动比工具包旧时，运行时初始化就会失败或看不到卡——这类错误最靠前，也最容易被误判成“框架不支持”' },
+    { k: 'dtk', t: 'DTK（工具包）', opts: ['26.04', '26.10', '25.x'], ok: [0, 1], how: '插件的 CI 配置按发布线匹配（release_line）：允许同一发布线内的补丁号和构建后缀不同', bad: '不在支持的发布线上：编译器、HIP 运行时和数学库的二进制接口都可能不兼容' },
+    { k: 'torch', t: 'PyTorch（DCU 版）', opts: ['2.11.0+（HIP 6.3 / 7.2）', '更低的版本'], ok: [0], how: '配置里 torch 用前缀匹配 2.11.0+，torch.version.hip 用前缀匹配 6.3. / 7.2.', bad: 'PyTorch 和 DTK 必须成对：HIP 的版本写在 torch 的构建里，换一个就要换另一个' },
+    { k: 'vllm', t: 'vLLM（引擎）', opts: ['0.28.1 发布线（含 rc / dev / 本地后缀）', '0.27.x', '0.11.x'], ok: [0], how: '插件在注册任何补丁之前检查已安装 vLLM 的版本：epoch 和 (major, minor, patch) 必须一致', bad: '不同发布线直接拒绝启动——因为运行时补丁打在上游的具体函数上，签名或语义一变就会跑错而不是报错' },
+    { k: 'plugin', t: '插件（vllm_hcu）', opts: ['与引擎同一发布线', '更旧的插件'], ok: [0], how: '插件自己的版本号里带着目标引擎版本、上游提交和 DAS 提交（version.py）', bad: '插件旧于引擎时，补丁的目标函数可能已经被上游改名或删除' },
+    { k: 'ops', t: '算子库（flash_attn、aiter、lightop、tilelang 等）', opts: ['按 DTK 和 torch 标签筛出的那一批', '从通用 PyPI 装的同名包'], ok: [0], how: '容器构建脚本按 torch 标签从厂商归档里挑版本安装，不从通用源装', bad: '通用 PyPI 上的同名包不是为这块卡编的：要么装不上，要么运行时报符号找不到' },
+  ];
+  function init(fig: HTMLElement) {
+    const sel = LAYERS.map(() => 0);
+    let pick = 3;
+    function draw() {
+      fig.querySelector<HTMLElement>('[data-rows]')!.innerHTML = LAYERS.map((l, i) => {
+        const good = l.ok.includes(sel[i]);
+        return `<div class="ai-vm-row${i === pick ? ' is-pick' : ''}" data-i="${i}"><span class="ai-vm-t">${l.t}</span>`
+          + `<span class="ai-pc-sets ai-vm-opts">${l.opts.map((o, j) => `<button data-i="${i}" data-j="${j}" aria-pressed="${sel[i] === j}">${o}</button>`).join('')}</span>`
+          + `<span class="ai-vm-k is-${good ? 'ok' : 'bad'}">${good ? '通过' : '拒绝'}</span></div>`;
+      }).join('');
+      const firstBad = LAYERS.findIndex((l, i) => !l.ok.includes(sel[i]));
+      const l = LAYERS[pick];
+      const head = firstBad < 0
+        ? '<b>这套组合可以起来。</b>注意：版本检查只看元数据，通过检查不代表 PyTorch、DTK 和算子的二进制接口都验证过（插件自己的文档就这么写）。'
+        : `<b>第一个被拒绝的是「${LAYERS[firstBad].t}」。</b>${LAYERS[firstBad].bad}`;
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `${head}<br><span class="ai-faint"><b>${l.t}</b> 怎么检查：${l.how}</span>`;
+    }
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as Element).closest<HTMLElement>('button[data-j]');
+      if (b) { const i = +b.dataset.i!; sel[i] = +b.dataset.j!; pick = i; draw(); return; }
+      const r = (e.target as Element).closest<HTMLElement>('.ai-vm-row'); if (r) { pick = +r.dataset.i!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-versionmatrix]').forEach(init);
+</script>

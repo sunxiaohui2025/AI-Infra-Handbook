@@ -1,0 +1,56 @@
+---
+// 找瓶颈的顺序（第 142 讲）：四类瓶颈各自的症状、怎么确认、怎么改，按“先看哪个”排。
+// 每一类给出判据（可以用 profiler 或两三行计时验证的那种），不给具体数字——数字要在自己的卡上量。
+// 读者可以：点一类看它的症状、确认办法和常见改法；按钮切换 decode / prefill 两种负载下的推荐顺序。
+interface Props { title?: string; caption?: string }
+const { title = '按什么顺序找瓶颈', caption } = Astro.props;
+---
+<figure class="ai-gt ai-bo" data-bottleneck>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="w"><button data-w="decode">decode（小 batch）</button><button data-w="prefill">prefill / 大 batch</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type B = { k: string; t: string; sym: string; chk: string; fix: string };
+  const KINDS: Record<string, B> = {
+    launch: { k: 'launch', t: '下发与同步开销', sym: '设备上的 kernel 又短又密，时间线上一格一格之间有空隙；CPU 这一行满、设备那一行空。换成更小的模型时每步时间几乎不变。', chk: '把一步的 kernel 数乘以单次下发的耗时，和实测的一步时间比；再数一数每步有多少次把数据拷回主机的同步（第 141 讲量到一次约 150 μs）。', fix: '去掉热路径上的同步点；融合算子减少 kernel 数；开图模式或图捕获（第 138 讲）。' },
+    mem: { k: 'mem', t: '访存', sym: '耗时最长的 kernel 都是矩阵乘和逐元素运算，而它们的实际带宽接近这块卡的上限；换成低精度权重后时间按比例下降。', chk: '对每个 kernel 算“读写字节 ÷ 耗时”，和官方带宽比（第 67 讲）。decode 一步的下限 = 要读的权重字节 ÷ 带宽。', fix: '量化权重和 KV（第 145 讲）、融合算子减少往返（第 83 讲）、改数据排布提高访存连续性。' },
+    compute: { k: 'compute', t: '计算', sym: '矩阵乘的实际算力离峰值很远，但带宽也没跑满；形状稍微一变时间跳一大截。', chk: '对每个矩阵乘算 2MNK ÷ 耗时，和峰值比；再看 M、N、K 对矩阵指令形状的对齐情况和分块的补零比例（第 135、143 讲）。', fix: '换分块、换库、按小 M 写专用 kernel（第 151 讲）、split-K（第 87 讲）。' },
+    comm: { k: 'comm', t: '通信', sym: '多卡时单卡算得快、整体不快；时间线上每层都有一段等待，卡数越多越明显。', chk: '按 α-β 模型算每轮 All-Reduce 的理论耗时，和实测比（第 102 讲）；关掉张量并行跑单卡对照。', fix: '换通信算法或自定义 All-Reduce、调拓扑与分组、让通信和计算重叠（第 146 讲）。' },
+  };
+  const ORDER: Record<string, string[]> = { decode: ['launch', 'mem', 'comm', 'compute'], prefill: ['compute', 'mem', 'comm', 'launch'] };
+  const WHY: Record<string, string> = {
+    decode: 'decode 一步的计算量很小、kernel 很短，所以固定开销（下发、同步）最先成为瓶颈；接着是读权重的带宽；多卡时通信的每轮固定开销也属于这一类；纯算力几乎从来不是 decode 的瓶颈（第 68 讲）。',
+    prefill: 'prefill 一次算成百上千个 token，矩阵乘的算术强度高，先看算力有没有用上；其次是访存和通信；kernel 本身很长，下发开销可以忽略。',
+  };
+  function init(fig: HTMLElement) {
+    let w = 'decode', pick = 0;
+    function draw() {
+      const order = ORDER[w];
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 520 112">';
+      order.forEach((k, i) => {
+        const x = 8 + i * 128, on = i === pick;
+        s += `<g class="ai-sa-b ${i === 0 ? 'gpu' : 'b'}${on ? ' is-pick' : ''}" data-i="${i}"><rect x="${x}" y="30" width="112" height="34" rx="3"/>`;
+        s += `<text x="${x + 56}" y="51" text-anchor="middle">${KINDS[k].t}</text></g>`;
+        s += `<text class="ai-al-gl" x="${x + 56}" y="24" text-anchor="middle">第 ${i + 1} 步</text>`;
+        if (i < 3) s += `<path class="ai-sa-ln" d="M ${x + 112} 47 L ${x + 128} 47" marker-end="url(#bo-ar)"/>`;
+      });
+      s += '<defs><marker id="bo-ar" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto"><path class="ai-sa-ln" d="M 0 1 L 7 4 L 0 7 z"/></marker></defs>';
+      s += `<text class="ai-al-gl" x="8" y="84">${WHY[w]}</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const b = KINDS[order[pick]];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${b.t}</b><br>症状：${b.sym}<br>怎么确认：${b.chk}<br>常见改法：${b.fix}`;
+      fig.querySelectorAll('[data-w]').forEach((x) => x.setAttribute('aria-pressed', String((x as HTMLElement).dataset.w === w)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bw = t.closest<HTMLElement>('[data-w]'); if (bw) { w = bw.dataset.w!; pick = 0; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-i]'); if (g) { pick = +g.dataset.i!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-bottleneck]').forEach(init);
+</script>

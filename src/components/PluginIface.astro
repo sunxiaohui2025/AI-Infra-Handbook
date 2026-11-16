@@ -1,0 +1,71 @@
+---
+// 推理引擎的硬件插件接口图（第 147 讲，第 150 讲再用一次）：
+// 引擎核心（调度、KV 管理、请求生命周期）不变，插件通过几类入口替换掉与硬件相关的模块。
+// 分四层：入口（entry point）、平台类、Worker 与执行、算子与模型；每一项写明它替换了引擎里的什么、不实现会怎样。
+// 内容按 vLLM 公开文档的插件机制整理（平台插件、通用插件、Platform 子类要实现的方法、Worker 基类要实现的方法）。
+// 读者可以：点任意一项看它的职责；切换“必须实现 / 可选”只看一部分。
+interface Props { title?: string; caption?: string }
+const { title = '一个硬件插件要实现哪些接口', caption } = Astro.props;
+---
+<figure class="ai-gt ai-pi" data-pluginiface>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-gt-pre ai-pc-sets" data-group="f"><button data-f="all">全部</button><button data-f="must">只看必须实现的</button></div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  type I = { g: string; t: string; must: boolean; d: string };
+  const ITEMS: I[] = [
+    { g: '入口', t: 'vllm.platform_plugins', must: true, d: '一个函数，返回平台类的全限定名（这块卡不可用时返回 None）。引擎启动时按 entry point 发现它，所有进程都会加载一次。这是整个插件唯一的“注册”动作——不改引擎一行代码。' },
+    { g: '入口', t: 'vllm.general_plugins', must: false, d: '用来注册模型和自定义算子：调用 ModelRegistry.register_model 把厂商自己实现的模型类挂上去，或导入一个模块触发算子注册（第 137 讲）。' },
+    { g: '平台类', t: 'device_type / dispatch_key', must: true, d: 'PyTorch 侧用哪个设备名、算子分发走哪个键（第 137 讲）。沿用 CUDA 键的硬件这里就写 cuda / CUDA；注册了新设备的写自己的名字。' },
+    { g: '平台类', t: 'check_and_update_config', must: true, d: '引擎初始化很早就会调它，用来按硬件改配置：块大小、图模式策略、最重要的是指定 worker 类。厂商的所有默认值都在这里落地。' },
+    { g: '平台类', t: 'get_attn_backend_cls', must: true, d: '按模型配置（是不是 MLA、是不是稀疏、头数、块大小、数据类型）返回注意力后端类名。通常写成“一组候选 + 校验 + 回退”（第 143 讲）。' },
+    { g: '平台类', t: 'get_device_communicator_cls', must: true, d: '返回通信器类名，决定 All-Reduce 走库还是走自定义实现（第 146 讲）。' },
+    { g: '平台类', t: '显存与设备信息', must: true, d: 'device_count、get_device_name、get_device_capability、get_device_total_memory、当前显存占用。引擎用它们量显存、决定 KV 块数（第 129 讲）。' },
+    { g: '平台类', t: 'supported_quantization / verify_quantization', must: false, d: '这块卡支持哪些量化方法，以及启动时的校验与改写（第 145 讲）。不实现就沿用引擎的默认名单，可能启动到一半才失败。' },
+    { g: 'Worker 与执行', t: 'init_device / load_model', must: true, d: '设置设备、加载权重。沿用 CUDA 键的硬件可以直接继承引擎自带的 GPU worker，只改少数几处。' },
+    { g: 'Worker 与执行', t: 'determine_available_memory', must: true, d: '用最坏情况跑一次前向，量出激活峰值，算出能留给 KV 的字节数。这一步的实现决定了 KV 块数对不对（第 129 讲）。' },
+    { g: 'Worker 与执行', t: 'execute_model', must: true, d: '每一步被调用：拼输入、跑前向、采样。注意力元数据（块表、变长信息）在这里按后端的要求组织（第 127 讲）。' },
+    { g: 'Worker 与执行', t: 'compile_or_warm_up_model', must: false, d: '图编译、图捕获、autotune 的预热都放这里（第 138、144 讲）。不实现就只能 eager 跑。' },
+    { g: '算子与模型', t: '注意力后端类', must: true, d: '实现引擎的注意力后端接口：元数据构造、prefill 与 decode 两条路径、支持的块大小与布局校验（第 143 讲）。' },
+    { g: '算子与模型', t: '自定义算子', must: false, d: '融合的 RMSNorm、RoPE、量化矩阵乘、MoE 分组算子等，注册成自定义算子后引擎按名字调用（第 137、144 讲）。' },
+    { g: '算子与模型', t: '模型实现', must: false, d: '需要特殊处理的模型（MLA 的吸收写法、MoE 的分发方式）由插件提供自己的模型类，通过通用插件入口注册（第 152 讲）。' },
+    { g: '算子与模型', t: '通信器与 KV 搬运', must: false, d: '自定义 All-Reduce（第 146 讲）、PD 分离时的 KV connector（第 112、130 讲）。' },
+  ];
+  const GROUPS = ['入口', '平台类', 'Worker 与执行', '算子与模型'];
+  function init(fig: HTMLElement) {
+    let only = false, pick = 0;
+    function draw() {
+      const list = ITEMS.map((it, i) => ({ it, i })).filter((x) => !only || x.it.must);
+      const cols = GROUPS.map((g) => list.filter((x) => x.it.g === g));
+      const rows = Math.max(...cols.map((c) => c.length));
+      const W = 560, cw = 136, H = rows * 30 + 36;
+      let s = `<svg class="ai-tl-svg" viewBox="0 0 ${W} ${H}">`;
+      GROUPS.forEach((g, j) => {
+        s += `<text class="ai-al-gl" x="${8 + j * cw + cw / 2}" y="12" text-anchor="middle">${g}</text>`;
+        cols[j].forEach(({ it, i }, k) => {
+          const y = 20 + k * 30;
+          s += `<g class="ai-sa-b ${it.must ? 'gpu' : 'b'}${i === pick ? ' is-pick' : ''}" data-i="${i}">`;
+          s += `<rect x="${8 + j * cw}" y="${y}" width="${cw - 8}" height="26" rx="3"/>`;
+          const t = it.t.length > 16 ? it.t.slice(0, 15) + '…' : it.t;
+          s += `<text x="${8 + j * cw + (cw - 8) / 2}" y="${y + 17}" text-anchor="middle">${t}</text></g>`;
+        });
+      });
+      s += `<text class="ai-al-gl" x="8" y="${H - 6}">绿底 = 不实现引擎就起不来　白底 = 可选（不实现就退回引擎的通用路径，通常更慢）</text>`;
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const it = ITEMS[pick];
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML = `<b>${it.g} · ${it.t}</b>（${it.must ? '必须实现' : '可选'}）：${it.d}`;
+      fig.querySelectorAll('[data-f]').forEach((b) => b.setAttribute('aria-pressed', String(((b as HTMLElement).dataset.f === 'must') === only)));
+    }
+    fig.addEventListener('click', (e) => {
+      const t = e.target as Element;
+      const bf = t.closest<HTMLElement>('[data-f]'); if (bf) { only = bf.dataset.f === 'must'; draw(); return; }
+      const g = t.closest<SVGGElement>('[data-i]'); if (g) { pick = +g.dataset.i!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-pluginiface]').forEach(init);
+</script>

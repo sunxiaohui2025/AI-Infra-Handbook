@@ -1,0 +1,73 @@
+---
+// 换一家通信库、换一种拓扑之后，一次 All-Reduce 要多久（第 146 讲）。
+// 模型：T = 每轮固定开销 α + 这一轮搬的字节 / 有效带宽 β（第 102 讲的 α-β 模型）。
+//   Ring：2(p−1) 轮，每轮 m/p 字节；两阶段（先组内再组间）：组内 Ring + 组间 Ring；
+//   一步到位（每张卡直接读其余 p−1 张）：1 轮，(p−1)·m/p 字节经各自链路；
+//   自定义 kernel（一阶段 / 两阶段）：α 更小（不走库的下发路径），但受实现支持的卡数和消息上限约束。
+// 拓扑预设改变的是 α、β 和“是不是全连接”：全连接时一步到位可用，环形直连时跳数进 α。
+// 读者可以：切拓扑和卡数、拖消息大小，看四种做法的耗时和推荐做法；数字是模型估算，真实值要在自己的机器上量。
+interface Props { title?: string; caption?: string }
+const { title = '换一家通信库、换一种拓扑：All-Reduce 要多久', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cl" data-collcompare>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <div class="ai-gt-pre ai-pc-sets" data-group="t"><button data-t="full">机内全连接（交换芯片）</button><button data-t="ring">机内环形直连</button><button data-t="net">跨机（网卡）</button></div>
+    <label class="ai-tl-lr"><span>卡数 p = <b data-pv></b></span><input type="range" min="1" max="4" step="1" value="3" data-p /></label>
+    <label class="ai-tl-lr"><span>消息 m = <b data-mv></b></span><input type="range" min="0" max="16" step="1" value="8" data-m /></label>
+    <label class="ai-tl-lr"><span>库的每轮开销 α = <b data-av></b> μs</span><input type="range" min="1" max="30" step="1" value="6" data-a /></label>
+  </div>
+  <div data-svg></div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const fmtB = (m: number) => (m >= 1e6 ? `${(m / 1e6).toFixed(m >= 1e7 ? 0 : 1)} MB` : `${(m / 1e3).toFixed(0)} KB`);
+  const fmtT = (t: number) => (t >= 1e-3 ? `${(t * 1e3).toFixed(2)} ms` : `${(t * 1e6).toFixed(1)} μs`);
+  const TOPO: Record<string, { b: number; full: boolean; hop: number; d: string }> = {
+    full: { b: 200e9, full: true, hop: 1, d: '每张卡到每张卡都有直连（经交换芯片）：Ring 和一步到位都可用，自定义 kernel 也能直接读对端显存。' },
+    ring: { b: 120e9, full: false, hop: 2, d: '只有相邻卡直连：远端要多跳，跳数进每轮开销；一步到位用不了，自定义 kernel 通常只在相邻卡之间划算。' },
+    net: { b: 25e9, full: false, hop: 3, d: '跨机经网卡和交换机：α 大、β 小，轮数越少越好，所以倾向两阶段（先机内再机间）。' },
+  };
+  function init(fig: HTMLElement) {
+    const q = (k: string) => fig.querySelector<HTMLInputElement>(`[data-${k}]`)!;
+    let t = 'full';
+    function draw() {
+      const p = 2 ** +q('p').value, m = 64e3 * 2 ** +q('m').value, a0 = +q('a').value * 1e-6;
+      const topo = TOPO[t], b = topo.b, a = a0 * topo.hop;
+      fig.querySelector('[data-pv]')!.textContent = String(p);
+      fig.querySelector('[data-mv]')!.textContent = fmtB(m);
+      fig.querySelector('[data-av]')!.textContent = q('a').value;
+      const g = Math.min(p, 8);                                     // 两阶段：机内 8 张一组
+      const rows: [string, number, string][] = [
+        ['库的 Ring', p > 1 ? 2 * (p - 1) * (a + m / p / b) : 0, `2(p−1) = ${Math.max(0, 2 * (p - 1))} 轮，每轮 ${fmtB(m / p)}`],
+        ['库的两阶段（组内 + 组间）', p > 1 ? 2 * (g - 1) * (a + m / g / b) + (p > g ? 2 * (p / g - 1) * (a * 2 + m / (p / g) / (b / 4)) : 0) : 0, p > g ? '机内 Ring + 机间 Ring' : '和 Ring 相同（只有一组）'],
+        ['一步到位（全连接才行）', topo.full && p > 1 ? a + (p - 1) * m / p / b : NaN, topo.full ? `1 轮，每张卡读 ${fmtB((p - 1) * m / p)}` : '这种拓扑用不了'],
+        ['自定义 kernel（α 减半）', p > 1 && p <= 8 && m <= 8 * 1024 * 1024 ? (topo.full ? a / 2 + (p - 1) * m / p / b : 2 * (p - 1) * (a / 2 + m / p / b)) : NaN, p > 8 ? '实现只支持 ≤ 8 卡' : m > 8 * 1024 * 1024 ? '超过消息上限，退回库' : '省掉库的下发路径'],
+      ];
+      const ok = rows.filter((r) => !isNaN(r[1]) && r[1] > 0);
+      const mx = Math.max(...ok.map((r) => r[1]));
+      let s = '<svg class="ai-tl-svg" viewBox="0 0 560 140">';
+      rows.forEach(([name, v, note], i) => {
+        const y = 10 + i * 32;
+        s += `<text class="ai-al-gl" x="146" y="${y + 13}" text-anchor="end">${name}</text>`;
+        if (isNaN(v) || v <= 0) { s += `<text class="ai-al-gl" x="152" y="${y + 13}">—— ${note}</text>`; return; }
+        s += `<rect class="ai-ab-bw" x="150" y="${y}" width="${(v / mx) * 320}" height="16"/>`;
+        s += `<text class="ai-al-gl" x="${156 + (v / mx) * 320}" y="${y + 12}">${fmtT(v)}　${note}</text>`;
+      });
+      fig.querySelector<HTMLElement>('[data-svg]')!.innerHTML = s + '</svg>';
+      const best = ok.reduce((x, y) => (x[1] <= y[1] ? x : y));
+      fig.querySelector<HTMLElement>('[data-eq]')!.innerHTML =
+        `${topo.d}<br>有效带宽按 ${(b / 1e9).toFixed(0)} GB/s、每轮开销 ${fmtT(a)}（${topo.hop} 跳）算：${p} 张卡 All-Reduce ${fmtB(m)} 最快的是 <b>${best[0]}</b>，${fmtT(best[1])}。`
+        + `<span class="ai-faint">　数字是 α-β 模型的估算，真实值要在自己的机器上量（第 102、142 讲）。</span>`;
+      fig.querySelectorAll('[data-t]').forEach((b2) => b2.setAttribute('aria-pressed', String((b2 as HTMLElement).dataset.t === t)));
+    }
+    fig.addEventListener('input', draw);
+    fig.addEventListener('click', (e) => {
+      const b = (e.target as Element).closest<HTMLElement>('[data-t]'); if (b) { t = b.dataset.t!; draw(); }
+    });
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-collcompare]').forEach(init);
+</script>
