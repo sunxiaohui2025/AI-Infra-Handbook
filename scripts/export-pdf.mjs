@@ -66,12 +66,6 @@ figure, .ai-fig { break-inside: avoid; }
 /* ---------- 全书合订：封面 / 篇扉页 / 总目录 ---------- */
 function buildBookCoverHtml(count, range, chStats) {
   const today = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
-  // 视频号照片：base64 内嵌，确保任何机器渲染都能显示
-  let videoImg = '';
-  try {
-    const p = path.join(ROOT, 'public', '视频号.JPG');
-    videoImg = 'data:image/jpeg;base64,' + fs.readFileSync(p).toString('base64');
-  } catch (e) { videoImg = ''; }
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>AI Infra-HandBook · 全书</title>${FONTS_LINK}<style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { background: #f9f8f5; }
@@ -81,7 +75,7 @@ html, body { background: #f9f8f5; }
 .mid { margin-top: 22mm; text-align: center; }
 .rule { width: 54px; height: 3px; background: #1f6b5a; margin: 0 auto 22px; }
 .kicker { font-family: "Noto Sans SC", sans-serif; font-size: 13px; letter-spacing: .22em; color: #5c5b55; }
-h1.title { font-size: 44px; line-height: 1.22; font-weight: 700; color: #1d1d1b; margin: 14px 0 10px; letter-spacing: .01em; white-space: nowrap; }
+h1.title { font-size: 54px; line-height: 1.22; font-weight: 700; color: #1d1d1b; margin: 14px 0 10px; letter-spacing: .01em; white-space: nowrap; }
 .sub { font-family: "Noto Sans SC", sans-serif; font-size: 15px; color: #706e66; margin-top: 12px; letter-spacing: .08em; }
 .author { margin-top: 30mm; text-align: center; font-family: "Noto Sans SC", sans-serif; }
 .author .row { display: flex; align-items: baseline; justify-content: center; gap: 14px; margin: 7px 0; }
@@ -91,7 +85,6 @@ h1.title { font-size: 44px; line-height: 1.22; font-weight: 700; color: #1d1d1b;
 .version { font-family: "Noto Sans SC", sans-serif; font-size: 13px; color: #1f6b5a; letter-spacing: .14em; }
 .links { margin-top: 10px; font-family: "Noto Sans SC", sans-serif; font-size: 11px; color: #706e66; line-height: 19px; }
 .links a { color: #1f6b5a; text-decoration: none; }
-.qr { margin-top: 12px; width: 32mm; height: auto; display: block; }
 </style></head><body><div class="cover">
   <div class="brand">AI INFRA · HANDBOOK</div>
   <div class="mid">
@@ -110,7 +103,6 @@ h1.title { font-size: 44px; line-height: 1.22; font-weight: 700; color: #1d1d1b;
       <div>在线学习　<a href="https://ai-infra-handbook.sunxiaohui2022.workers.dev/">https://ai-infra-handbook.sunxiaohui2022.workers.dev/</a></div>
       <div>GitHub　<a href="https://github.com/sunxiaohui2025/AI-Infra-Handbook">https://github.com/sunxiaohui2025/AI-Infra-Handbook</a></div>
     </div>
-    ${videoImg ? `<img class="qr" src="${videoImg}" alt="视频号 · 扶摇Sun" />` : ''}
   </div>
 </div></body></html>`;
 }
