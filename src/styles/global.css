@@ -347,7 +347,7 @@ html[data-route="fast"] .route-note-fast { display: block; }
 .ai-wf-part { margin: 0; padding: var(--space-3) var(--space-2) var(--space-2); border-radius: var(--radius-lg); background: var(--surface); }
 .ai-wf-ph { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--space-2); padding: 0 8px var(--space-2); text-decoration: none; }
 .ai-wf-ph .ai-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ink-3); margin-right: 8px; vertical-align: middle; }
-.ai-wf-ph b { display: inline; font-size: 16px; line-height: 24px; font-weight: 600; }
+.ai-wf-ph b { display: inline; font-size: 15px; line-height: 24px; font-weight: 600; }
 .ai-wf-ph .ai-num { font-size: 12px; white-space: nowrap; }
 .ai-wf-ph:hover b, .ai-wf-ph:hover .ai-num { color: var(--accent); }
 .ai-wf .ai-lk { padding: 4px 8px; color: var(--ink); }
@@ -376,6 +376,11 @@ body.is-read .ai-top { background: var(--surface-glass); }
 .ai-top-contact, .ai-top-fb { display: inline-flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 10px; font-size: 12px; line-height: 18px; color: var(--ink-2); text-decoration: none; white-space: nowrap; cursor: pointer; border: 1px solid var(--line); border-radius: var(--radius-pill); background: var(--surface); }
 .ai-top-contact:hover, .ai-top-fb:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 .ai-top-x img { height: 14px; width: auto; display: block; }
+.ai-top-pdf { color: var(--accent); }
+.ai-top-pdf:hover { background: var(--accent-soft); }
+.ai-top-github svg { display: block; }
+.ai-top-pdf svg { display: block; flex: none; }
+.ai-top-pdf span { letter-spacing: .02em; }
 .ai-top-gzh { position: relative; }
 .ai-top-gzh-label { display: inline-flex; align-items: center; }
 .ai-top-gzh-pop { position: absolute; top: calc(100% + 12px); right: 0; display: none; z-index: 30; }
@@ -417,7 +422,7 @@ body.is-read .ai-searchbtn { background: var(--paper); }
 .ai-todo-hint { margin: var(--space-4) 0 0 !important; font-size: 13px; color: var(--ink-3); }
 
 /* ---------- Progress on home ---------- */
-.ai-wf .ai-lk.is-done > span:nth-child(2) { font-weight: 600; }
+.ai-wf .ai-lk.is-done > span:nth-child(2) { font-weight: 400; }
 
 /* ---------- Note: 要点 / 专栏 / 注意 ---------- */
 .ai-note { margin: var(--space-4) 0 var(--space-5, 20px); padding: var(--space-3) var(--space-4); border-radius: var(--radius-md); font-family: var(--font-sans); font-size: 15px; line-height: 26px; }

@@ -100,35 +100,33 @@ def main():
             add_link(hit[0], hit[1], p["page"], "part")
 
     # ---- 3) 每讲 -> 讲首页 ----
-    # 先建数据库：讲号（左列，x0<110）-> (页, 该页内该 span 的 y 中心)，用于消歧
-    num_positions = {}  # text -> list of (page_idx, y_center)
-    for idx, spans in enumerate(pages_spans):
-        for text, rect in spans:
-            t = text.strip()
-            if t.isdigit() and rect.x0 < 110:
-                num_positions.setdefault(t, []).append((lo + idx, (rect.y0 + rect.y1) / 2))
+    # 目录页每行是「讲号 + 讲名」，据此一次遍历定位全部讲，避免对每讲做全页 search_for。
+    # 建索引：讲号（左列 span，x0<110 的 2 位数字）-> [(页idx, 行rect, 行文本), ...]
+    lec_rows = {}  # numtext -> list of (page_idx, line_rect, line_text)
+    for idx, lines in enumerate(pages_lines):
+        pno = lo + idx
+        for text, rect in lines:
+            # 取本行最左侧的讲号 span
+            num = None
+            for stext, srect in pages_spans[idx]:
+                if srect.x0 < 110 and srect.y0 >= rect.y0 - 1 and srect.y1 <= rect.y1 + 1:
+                    t = stext.strip()
+                    if t.isdigit() and len(t) == 2:
+                        num = t
+                        break
+            if num is not None:
+                lec_rows.setdefault(num, []).append((pno, rect, text))
 
     for p in parts:
         for lec in p.get("lectures", []):
             title = str(lec["title"]).strip()
             numtext = f"{int(lec['id']):02d}"
-            # 该讲在目录里对应的讲号 span（y 中心）
-            ref_y = None
-            for t, pos in num_positions.items():
-                if t == numtext and pos:
-                    ref_y = pos[0][1]
-                    break
-            # 用 search_for 找讲名 bbox，若有多个（子串碰撞）按 y 中心最近取
             best = None
-            for idx in range(len(pages_spans)):
-                pno = lo + idx
-                hits = doc[pno].search_for(title)
-                for r in hits:
-                    if best is None:
-                        best = (pno, r)
-                    elif ref_y is not None:
-                        if abs((r.y0 + r.y1) / 2 - ref_y) < abs((best[1].y0 + best[1].y1) / 2 - ref_y):
-                            best = (pno, r)
+            for pno, rect, ltext in lec_rows.get(numtext, []):
+                # 行内包含讲名即可视为命中（讲号已唯一限定该行）
+                if title in ltext:
+                    best = (pno, rect)
+                    break
             if best:
                 add_link(best[0], best[1], lec["page"], f"lecture {lec['id']}")
 

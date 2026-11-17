@@ -10,7 +10,6 @@ const done = new Set((await getCollection('lectures')).map((e) => e.data.id));
 <section class="ai-wf-part" data-ch={ch} data-text={`第 ${p} 篇 ${PN[p]}`.toLowerCase()}>
   <a class="ai-wf-ph" href={`/p/${p}`}>
     <span><i class="ai-dot" aria-hidden="true"></i><b>{PN[p]}{p === 6 ? '（轻量线）' : ''}</b></span>
-    <span class="ai-num">→</span>
   </a>
   {ls.map((l) => (
     <a class={'ai-lk' + (l.opt ? ' is-opt' : '') + (done.has(l.id) ? ' is-done' : '')} href={`/l/${l.id}`} title={l.q} data-skip={l.fast ? undefined : '1'}

@@ -9,14 +9,14 @@
 
 [![框架](https://img.shields.io/badge/框架-Astro%205-blue)](https://astro.build)
 [![技术](https://img.shields.io/badge/技术-MDX%20·%20LaTeX-purple)](https://mdxjs.com)
-[![课程规模](https://img.shields.io/badge/课程-133%20讲-brightgreen)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
-[![篇章结构](https://img.shields.io/badge/结构-5%20章%20·%2017%20篇-9cf)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
-[![交互组件](https://img.shields.io/badge/交互组件-135%20个-orange)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
+[![课程规模](https://img.shields.io/badge/课程-153%20讲-brightgreen)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
+[![篇章结构](https://img.shields.io/badge/结构-6%20章%20·%2020%20篇-9cf)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
+[![交互组件](https://img.shields.io/badge/交互组件-150%20个-orange)](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
 [![语言](https://img.shields.io/badge/语言-简体中文-green)](#)
 [![GitHub Stars](https://img.shields.io/github/stars/sunxiaohui2025/AI-Infra-Handbook?style=social)](https://github.com/sunxiaohui2025/AI-Infra-Handbook)
 [![GitHub Forks](https://img.shields.io/github/forks/sunxiaohui2025/AI-Infra-Handbook?style=social)](https://github.com/sunxiaohui2025/AI-Infra-Handbook)
 
-> **在线阅读：** <https://ai-infra-handbook.sunxiaohui2022.workers.dev/> 　 | 　**PDF 下载：** <https://raw.githubusercontent.com/sunxiaohui2025/AI-Infra-Handbook/main/release/AI-Infra-HandBook.pdf> 　 | 　**源码仓库：** <https://github.com/sunxiaohui2025/AI-Infra-Handbook>
+> **在线阅读：** [在线阅读](https://ai-infra-handbook.sunxiaohui2022.workers.dev/) 　 | 　**下载 PDF：** [下载 PDF](https://raw.githubusercontent.com/sunxiaohui2025/AI-Infra-Handbook/main/release/AI-Infra-HandBook.pdf)
 
 </div>
 
@@ -24,44 +24,46 @@
 
 ## 目录
 
+- [下载与在线阅读](#下载与在线阅读)
 - [这是什么](#这是什么)
-- [在线阅读](#在线阅读)
 - [课程结构](#课程结构)
 - [全文用到的案例模型：数字从哪来](#全文用到的案例模型数字从哪来)
 - [学习路线](#学习路线)
 - [本地运行](#本地运行)
 - [参考与致谢](#参考与致谢)
+- [许可](#许可)
+
+---
+
+## 下载与在线阅读
+
+- [在线阅读](https://ai-infra-handbook.sunxiaohui2022.workers.dev/)
+- [下载 PDF](https://raw.githubusercontent.com/sunxiaohui2025/AI-Infra-Handbook/main/release/AI-Infra-HandBook.pdf)（单文件约 1342 页，含书封、目录与页码）
+
+在线阅读站点提供：
+
+- 首页 6 章横排成学习路线图，「完整路线 / Infra 快速路线」可切换，选择会记在浏览器里。
+- 顶栏 `⌘K` 或 `/` 全局搜索：按讲名 / 问题 / 编号 / 小节即时过滤。
+- 每篇、每讲都有自动生成的前置知识链接与上下讲导航。
 
 ---
 
 ## 这是什么
 
-这是一套**由大模型逐讲编写**的 AI 基础设施（LLM 推理）课程，共 **5 章、17 篇、133 讲**，
+这是一套**由大模型逐讲编写**的 AI 基础设施（LLM 推理）课程，共 **6 章、20 篇、153 讲**，
 用 **Astro 5 + MDX** 建成一个可交互的静态网站：公式用 LaTeX 渲染，交互做成一个个可复用组件直接嵌进文章。
 
 一条主线贯穿全站：用 **一个玩具模型** 理解原理（手算、交互看得见每一步），
 用 **真实模型** 算工程账（显存、速度、成本）。这是 infra 视角和普通科普的区别——
 每讲都会落到它对显存、速度、成本的影响。
 
-章节主线：**数学基础 → 大模型基础 → 单机推理 → 分布式推理 → 综合项目**。
-前两章打基础，后三章是推理优化的主体。
-
-## 在线阅读
-
-**网站：** **<https://ai-infra-handbook.sunxiaohui2022.workers.dev/>**
-
-**PDF 合订本下载：** **<https://raw.githubusercontent.com/sunxiaohui2025/AI-Infra-Handbook/main/release/AI-Infra-HandBook.pdf>**（单文件约 1162 页，含书封、目录与页码；同样放在仓库 `release/` 目录里）
-
-- 首页 5 章横排成学习路线图，「完整路线 / Infra 快速路线」可切换，选择会记在浏览器里。
-- 顶栏 `⌘K` 或 `/` 全局搜索：按讲名 / 问题 / 编号 / 小节即时过滤。
-- 每篇、每讲都有自动生成的前置知识链接与上下讲导航。
-
----
+章节主线：**数学基础 → 大模型基础 → 单机推理 → 分布式推理 → 推理引擎实践 → 芯模适配和调优**。
+前两章打基础，后四章是推理优化的主体。
 
 ## 课程结构
 
-共 **5 章、17 篇、133 讲**：**116 讲主线** + **17 讲选读**（其中第 6 篇「训练全流程」整篇为轻量线），
-**27 讲**被标为重点 ⭐；按「Infra 快速路线」阅读共 **107 讲**。
+共 **6 章、20 篇、153 讲**：**136 讲主线** + **17 讲选读**（其中第 6 篇「训练全流程」整篇为轻量线），
+**31 讲**被标为重点 ⭐；按「Infra 快速路线」阅读共 **127 讲**。
 
 ### 章节总览
 
@@ -81,9 +83,12 @@
 | 三 单机推理 | 12 模型压缩与加速 | 90–98 | 量化、GPTQ/AWQ、FP8/FP4、KV 量化、投机解码 |
 | 四 分布式推理 | 13 分布式与集合通信 | 99–109 | All-Reduce、张量并行、流水并行、MoE 专家并行、拓扑映射 |
 | 四 分布式推理 | 14 分布式推理与集群 | 110–116 | 张量并行推理、PD 分离、KV Cache 传输、SLO 容量规划 |
-| 五 综合项目 | 15 手写迷你推理引擎 | 117–125 | 从带 KV Cache 的生成到 vLLM 对比，逐版实现 |
-| 五 综合项目 | 16 解读 nano-vllm | 126–128 | 读一个千行级的引擎源码，并动手改造 |
-| 五 综合项目 | 17 主流推理引擎 | 129–133 | vLLM、SGLang 等架构与源码阅读方法 |
+| 五 推理引擎实践 | 15 手写迷你推理引擎 | 117–125 | 从带 KV Cache 的生成到 vLLM 对比，逐版实现 |
+| 五 推理引擎实践 | 16 解读 nano-vllm | 126–128 | 读一个千行级的引擎源码，并动手改造 |
+| 五 推理引擎实践 | 17 主流推理引擎 | 129–133 | vLLM、SGLang 等架构与源码阅读方法 |
+| 六 芯模适配和调优 | 18 适配原理 | 134–141 | 换一块卡要重做什么：软件栈、硬件差异、CUDA 迁移、精度对齐、算子缺口 |
+| 六 芯模适配和调优 | 19 调优原理 | 142–147 | 新硬件上的性能分析、矩阵与注意力适配、自定义 kernel、通信库、硬件插件 |
+| 六 芯模适配和调优 | 20 案例：海光 DCU | 148–153 | 用前两篇的框架拆开一块真实国产卡，并逐步读它的 vLLM 插件源码 |
 
 ### 全部课程（点击讲标题即可读对应 .mdx） 
 
@@ -330,6 +335,46 @@
 | [132 · 其他引擎与规模化部署](./src/content/lectures/132-other-engines-at-scale.mdx) | TensorRT-LLM、LMDeploy、llama.cpp，以及大规模 EP 的实现 | 对应原理讲 108–116 |
 | [133 · 怎么读大型引擎的源码](./src/content/lectures/133-reading-engine-source.mdx) | 从哪里读起、怎么定位、怎么压测和贡献 | 对应原理讲 66、82 |
 
+#### 第六章 芯模适配和调优
+
+> 把模型搬到一块新芯片上的通用原理：要重做哪几层、硬件路线有什么不同、代码和框架怎么迁、精度怎么对齐、性能怎么调；最后以海光 DCU 为案例逐条落地。
+
+
+**第 18 篇 · 适配原理：把模型跑通**
+
+| 讲 | 标题 | 解决什么问题 | 示例交互 |
+| --- | --- | --- | --- |
+| [134 · 总览：换一块卡要重做什么](./src/content/lectures/134-porting-overview.mdx) | 从模型到芯片中间有哪几层，哪些能复用、哪些要重写 | 软件栈分层图：切换 NVIDIA / 兼容 GPGPU / NPU，看每层对应什么 |
+| [135 · 国产与非 NVIDIA 加速器的硬件差异](./src/content/lectures/135-accelerator-differences.mdx) ⭐ | GPGPU 和 NPU 两条路线的计算单元、线程组、片上存储有什么不同 | 选一款卡的参数，看拐点和各类算子落在哪个区 |
+| [136 · 编程模型与 CUDA 迁移](./src/content/lectures/136-cuda-migration.mdx) | CUDA 代码哪些能自动迁、哪些必须手改 | CUDA 片段逐行翻译，标出要手改的地方 |
+| [137 · 框架怎么接入新硬件](./src/content/lectures/137-framework-backend.mdx) | PyTorch 怎么认识一块新卡，算子怎么分发、缺了怎么回退 | 一次 x @ w 的分发路径 |
+| [138 · 图模式与编译](./src/content/lectures/138-graph-mode-compile.mdx) | 为什么有的硬件更依赖整图下发，torch.compile 怎么接新后端 | 逐算子与整图两种模式的下发次数对比 |
+| [139 · 精度对齐](./src/content/lectures/139-precision-alignment.mdx) ⭐ | 换卡后输出不一致怎么查 | 逐层误差曲线：从哪一层开始偏离 |
+| [140 · 算子缺口：盘点、组合、自写](./src/content/lectures/140-operator-gap.mdx) | 一个模型要用哪些算子，缺了怎么办 | 模型算子清单：已支持、可组合、需自写 |
+| [141 · 实操：把 miniinfer 移植到非 CUDA 后端](./src/content/lectures/141-port-miniinfer.mdx) | 在 Apple MPS 上真实走一遍移植 | 真实运行结果与 CPU 版逐 token 比对 |
+
+**第 19 篇 · 调优原理：把模型跑快**
+
+| 讲 | 标题 | 解决什么问题 | 示例交互 |
+| --- | --- | --- | --- |
+| [142 · 在新硬件上做性能分析](./src/content/lectures/142-profiling-new-hardware.mdx) | 厂商 profiler 的时间线怎么读，按什么顺序找瓶颈 | 带标注的时间线：点每段看属于哪类瓶颈 |
+| [143 · 矩阵乘法与注意力的适配](./src/content/lectures/143-gemm-attention-adaptation.mdx) ⭐ | 矩阵单元的形状、对齐和数据排布怎么影响 kernel | 调分块和对齐，看矩阵单元利用率 |
+| [144 · 用 Triton 与厂商语言写 kernel](./src/content/lectures/144-writing-kernels.mdx) | 同一个 kernel 在不同后端上怎么写 | 同一个 RMSNorm 的几种写法并排对照 |
+| [145 · 低精度与量化的取舍](./src/content/lectures/145-low-precision-tradeoffs.mdx) | 硬件不原生支持某种精度时怎么办 | 选硬件和精度，看能否直接用、怎么替代 |
+| [146 · 集合通信库与多卡互联](./src/content/lectures/146-collective-libraries.mdx) | NCCL 之外的通信库和拓扑怎么影响多卡 | 切换拓扑，看 All-Reduce 耗时 |
+| [147 · 推理引擎的硬件插件](./src/content/lectures/147-engine-hardware-plugin.mdx) ⭐ | 不改上游代码，怎么把一块新卡接进推理引擎 | 插件接口图：每个接口替换了引擎里的哪个模块 |
+
+**第 20 篇 · 案例：海光 DCU**
+
+| 讲 | 标题 | 解决什么问题 | 示例交互 |
+| --- | --- | --- | --- |
+| [148 · 海光 DCU 的软硬件栈](./src/content/lectures/148-hygon-dcu-stack.mdx) | 用前两篇的框架拆开一块真实的国产卡 | 海光软件栈与 CUDA 栈逐层对照 |
+| [149 · 从 CUDA 到 DCU：迁移与版本矩阵](./src/content/lectures/149-cuda-to-dcu.mdx) | HIP、PyTorch DCU 版和版本对应 | 版本矩阵检查 |
+| [150 · 读 vllm-plugin-das：平台类与运行时补丁](./src/content/lectures/150-reading-vllm-plugin-das.mdx) | 海光的 vLLM 插件是怎么组织的 | 对应第 147 讲 |
+| [151 · DCU 上的矩阵乘：hipBLASLt、MMAC 与小 M kernel](./src/content/lectures/151-dcu-gemm-kernel.mdx) | 为什么库选的分块不适合 decode，专用 kernel 怎么写 | 对应第 143 讲 |
+| [152 · DCU 上的注意力、量化与通信](./src/content/lectures/152-dcu-attention-quant-comm.mdx) | 插件怎么选注意力后端、量化方法和通信方式 | 对应第 143–146 讲 |
+| [153 · 复盘：一个模型上线 DCU 的完整清单](./src/content/lectures/153-dcu-launch-checklist.mdx) | 从拿到卡到上线，每一步的验收标准 | 可勾选的适配清单 |
+
 
 ## 全文用到的案例模型：数字从哪来
 
@@ -362,8 +407,8 @@
 
 网站提供两条路线，可随时切换（记在浏览器里）：
 
-- **完整路线**：按 01 → 133 顺序学。第三到第五章按每周 2 天约 22 周。
-- **Infra 快速路线**（共 107 讲）：第一章只读 03、05、06、10、11；第二章跳过 16–20（训练相关）和第 6 篇整篇；其余照常。适合已有基础、想尽快进入推理优化的读者。
+- **完整路线**：按 01 → 153 顺序学。第三到第六章按每周 2 天约 28 周。
+- **Infra 快速路线**（共 127 讲）：第一章只读 03、05、06、10、11；第二章跳过 16–20（训练相关）和第 6 篇整篇；其余照常。适合已有基础、想尽快进入推理优化的读者。
 
 ## 本地运行
 
@@ -392,7 +437,7 @@ npm run preview  # 本地预览构建结果
 ```
 site/
   src/
-    data/course.ts            课程结构（5 章 17 篇 133 讲、快速路线规则）
+    data/course.ts            课程结构（6 章 20 篇 153 讲、快速路线规则）
     content/lectures/*.mdx    每讲一篇（本 README 的课程列表即链接到这里）
     components/               可复用交互组件
     pages/                    首页、篇页、文章页、搜索索引
@@ -406,8 +451,16 @@ site/
 
 ## 参考与致谢
 
-- 实践参考：miniinfer（手写迷你推理引擎 v0–v5）、nano-vllm、vLLM、SGLang 等开源项目源码；也向李博杰《深入理解 AI Infra》这类优秀的开源课程/图书致意。
+- 实践参考：miniinfer（手写迷你推理引擎 v0–v5）、nano-vllm、vLLM、SGLang，以及海光 DCU 的 vLLM 插件 vllm-plugin-das 等开源项目源码；第六章的可动手部分用本机 Apple MPS 真实运行。也向李博杰《深入理解 AI Infra》这类优秀的开源课程/图书致意。
 
 ---
 
-> **在线阅读：** **<https://ai-infra-handbook.sunxiaohui2022.workers.dev/>** 　　 示例由大模型逐讲生成，若有笔误或建议欢迎在仓库提 Issue。
+> **在线阅读：** [在线阅读](https://ai-infra-handbook.sunxiaohui2022.workers.dev/) 　　 示例由大模型逐讲生成，若有笔误或建议欢迎在仓库提 Issue。
+
+---
+
+## 许可
+
+本课程原创正文、配图及配套代码采用 Apache License 2.0 许可。Copyright © 2026 扶摇Sun（孙晓辉）。
+
+仓库中的第三方代码、字体、模板与参考资料保留各自的版权和许可声明，不因收录于本仓库而改用 Apache-2.0；具体来源和使用条件见相应目录。

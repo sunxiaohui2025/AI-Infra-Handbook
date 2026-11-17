@@ -1,7 +1,7 @@
 ---
 id: 123
 slug: v4-quantization
-title: v4 · 权重量化
+title: 权重量化
 chapter: 5
 part: 15
 problem: 用四分之一的内存放下权重
@@ -80,4 +80,4 @@ import Note from '../../components/Note.astro';
 
 v4 新增 quant.py：加载权重后，把每层 7 个线性层量化成 INT8，每个输出通道一个 scale；模型的矩阵乘统一走 `linear()`，量化时先算整数矩阵乘、再按列乘 scale。线性层从 1680 MiB 降到 421 MiB；4 条检查里 3 条仍然逐 token 一致，读同一串 token 时 128 步的最高分 token 全部相同，KL 散度 0.0011。在 CPU 上因为每次都要把 int8 转回浮点，单请求反而慢了约 20%。
 
-到这里，引擎每一步 decode 仍然只为每个请求出一个 token。能不能一步多出几个？下一讲：**v5 · 投机解码**。
+到这里，引擎每一步 decode 仍然只为每个请求出一个 token。能不能一步多出几个？下一讲：**投机解码**。

@@ -1,7 +1,7 @@
 ---
 id: 118
 slug: v0-forward
-title: v0 · 从权重文件到第一个 token
+title: 从权重文件到第一个 token
 chapter: 5
 part: 15
 problem: 不借助任何框架，自己写出 Qwen3 的前向
@@ -104,4 +104,4 @@ PyTorch 的线性层把权重存成 [输出, 输入]，所以 y = x · Wᵀ。�
 
 v0 用四个文件让 Qwen3-0.6B 跑了起来：config.py 读模型的 10 个尺寸，weights.py 把 311 个张量读进字典，model.py 用 59 行写出完整的前向（RMSNorm、RoPE、q/k 归一化、GQA、因果注意力、SwiGLU、残差），engine.py 用一个循环做贪心生成。和 HuggingFace 比对，4 条提示的 32 个 token 全部一致。
 
-它的毛病是每生成一个 token 都要把整段序列重算一遍：199 个 token 的提示，第 64 步要算 263 个 token，耗时从 419 ms 涨到 724 ms。下一讲：**v1 · KV Cache**。
+它的毛病是每生成一个 token 都要把整段序列重算一遍：199 个 token 的提示，第 64 步要算 263 个 token，耗时从 419 ms 涨到 724 ms。下一讲：**KV Cache**。

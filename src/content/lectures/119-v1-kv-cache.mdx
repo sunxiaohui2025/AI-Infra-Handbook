@@ -1,7 +1,7 @@
 ---
 id: 119
 slug: v1-kv-cache
-title: v1 · KV Cache
+title: KV Cache
 chapter: 5
 part: 15
 problem: 生成第 N 个 token 时，不再重算前面的 N − 1 个
@@ -91,4 +91,4 @@ Qwen3-0.6B 每个 token 的 KV 有多大？2（K 和 V）× 28 层 × 8 个 KV �
 
 v1 给每个请求按“提示 + 最大输出”分配一块连续的 KV Cache（FP32 下每个 token 224 KiB），注意力里先把新 token 的 K、V 写进去，再读出全部历史；生成循环分成一次 prefill 和之后每步一个 token 的 decode。和 HuggingFace 仍然逐 token 一致，64 个 token 从 34 s 降到 4.55 s，decode 每步稳定在 65 ms 左右。
 
-可这 65 ms 里，绝大部分时间花在把 3 GB 权重读一遍，只为一个请求算出一个 token。如果同时有 8 个请求，能不能让它们共用这一遍读取？下一讲：**v2 · Continuous Batching**。
+可这 65 ms 里，绝大部分时间花在把 3 GB 权重读一遍，只为一个请求算出一个 token。如果同时有 8 个请求，能不能让它们共用这一遍读取？下一讲：**Continuous Batching**。
