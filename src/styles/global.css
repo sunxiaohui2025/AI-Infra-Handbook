@@ -122,9 +122,9 @@ html.ai-full, html.ai-full body { height: 100%; overflow: hidden; }
 
 /* ---------- Home ---------- */
 .ai-home { max-width: 1200px; margin: 0 auto; padding: var(--space-6) var(--space-8) var(--space-8); }
-.ai-hero { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--space-6); flex-wrap: wrap; margin-bottom: var(--space-4); }
+.ai-hero { display: flex; justify-content: space-between; align-items: flex-end; gap: var(--space-6); flex-wrap: wrap; margin-bottom: var(--space-4); overflow-x: auto; }
 .ai-hero h1 { margin: 0 0 var(--space-1); font-size: 36px; line-height: 44px; font-weight: 600; letter-spacing: -.01em; }
-.ai-hero p { margin: 0; color: var(--ink-2); max-width: 600px; }
+.ai-hero p { margin: 0; color: var(--ink-2); white-space: nowrap; }
 .ai-stats { display: flex; gap: var(--space-6); }
 .ai-stat b { display: block; font-family: var(--font-mono); font-size: 22px; line-height: 28px; font-weight: 500; }
 .ai-stat > span { font-size: 12px; line-height: 16px; color: var(--ink-3); }
