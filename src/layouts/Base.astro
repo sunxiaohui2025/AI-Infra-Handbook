@@ -17,9 +17,6 @@ const { title, view } = Astro.props;
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600&family=Noto+Serif+SC:wght@400;600;700&display=swap" rel="stylesheet" />
-    <script is:inline>
-      try { document.documentElement.dataset.route = localStorage.getItem('ai-route') || 'full'; } catch (e) {}
-    </script>
   </head>
   <body class={view === 'lec' ? 'is-read' : undefined}>
     <div class="ai-app" id="app" data-side="closed">
@@ -42,10 +39,6 @@ const { title, view } = Astro.props;
               <span class="ai-top-gzh-pop"><img src="/gzh.jpg" alt="公众号二维码" /></span>
             </span>
             <a class="ai-top-fb" href="/feedback">反馈</a>
-            <div class="ai-seg" role="group" aria-label="学习路线">
-              <button data-route-btn="full">完整路线</button>
-              <button data-route-btn="fast">Infra 快速路线</button>
-            </div>
           </div>
         </header>
       )}
@@ -53,21 +46,6 @@ const { title, view } = Astro.props;
     </div>
 
     <script>
-      /* ---------- 路线切换 ---------- */
-      const html = document.documentElement;
-      const routeBtns = document.querySelectorAll<HTMLButtonElement>('[data-route-btn]');
-      function syncRoute() {
-        routeBtns.forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.routeBtn === html.dataset.route)));
-      }
-      routeBtns.forEach((b) =>
-        b.addEventListener('click', () => {
-          html.dataset.route = b.dataset.routeBtn;
-          try { localStorage.setItem('ai-route', b.dataset.routeBtn!); } catch (e) {}
-          syncRoute();
-        }),
-      );
-      syncRoute();
-
       /* ---------- 顶栏：滚动后才出现分隔线（讲阅读页没有顶栏，跳过） ---------- */
       const top = document.getElementById('top');
       if (top) {
