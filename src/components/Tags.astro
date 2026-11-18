@@ -1,8 +1,0 @@
----
-import type { Lecture } from '../data/course';
-interface Props { l: Lecture }
-const { l } = Astro.props;
----
-{l.key && <span class="ai-tag ai-tag--key">重点</span>}
-{l.opt && <span class="ai-tag ai-tag--opt">{l.part === 6 ? '轻量线' : '选读'}</span>}
-{!l.fast && <span class="ai-tag ai-tag--skip skip-tag">快速路线跳过</span>}

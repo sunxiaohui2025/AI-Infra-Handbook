@@ -2,7 +2,6 @@
 // 篇页：居中两栏，左侧本章目录，右侧本篇讲列表。
 import Base from '../../layouts/Base.astro';
 import SideNav from '../../components/SideNav.astro';
-import Tags from '../../components/Tags.astro';
 import { CH, PN, partLs, chOf, chName, pad, fastCount } from '../../data/course';
 
 export function getStaticPaths() {
@@ -37,7 +36,6 @@ const first = ls.find((l) => l.fast) || ls[0];
               <a class="ai-lrow" href={`/l/${l.id}`} data-skip={l.fast ? undefined : '1'}>
                 <span class="ai-num">{pad(l.id)}</span>
                 <span><div class="ai-lrow-title">{l.title}</div><div class="ai-lrow-q">{l.q}</div></span>
-                <span class="ai-lrow-tags"><Tags l={l} /></span>
                 <span class="ai-lrow-go">→</span>
               </a>
             ))}

@@ -1,6 +1,6 @@
 ---
 // 篇页和文章页左侧的目录树：只显示当前章（篇 › 讲），顶部 1–5 切章；不用线条。
-import { CH, PN, partLs, chLs, chName, pad, fastCount } from '../data/course';
+import { CH, PN, partLs, chLs, chName, pad } from '../data/course';
 
 interface Props { ch: number; part: number; lec?: number }
 const { ch, part, lec = 0 } = Astro.props;
@@ -29,7 +29,6 @@ const { ch, part, lec = 0 } = Astro.props;
             <div class={'ai-tree-prow' + (p === part && !lec ? ' is-cur' : '')}>
               <button class="ai-chev" data-exp aria-expanded="true" aria-label={`展开或收起第 ${p} 篇`}>▾</button>
               <a href={`/p/${p}`}>第 {p} 篇 {PN[p]}</a>
-              <span class="ai-num"><span class="r-fast">{fastCount(ls)}/</span>{ls.length}</span>
             </div>
             <div class="ai-tree-ls">
               {ls.map((l) => (

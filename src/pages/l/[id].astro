@@ -5,7 +5,6 @@ import { getCollection, render } from 'astro:content';
 import Base from '../../layouts/Base.astro';
 import SideNav from '../../components/SideNav.astro';
 import ImmersiveRail from '../../components/ImmersiveRail.astro';
-import Tags from '../../components/Tags.astro';
 import CompareMode from '../../components/CompareMode.astro';
 import { LECTURES, PN, partLs, pad, lecture } from '../../data/course';
 
@@ -33,9 +32,6 @@ const proj = l.part >= 15 || l.part === 7;      // 第五、六章和第 7 篇�
             <header class="ai-art-head" id="top-of-article">
               <div class="ai-kicker"><a href={`/p/${l.part}`}>第 {l.part} 篇 {PN[l.part]}</a><span>第 {idx} 讲 / 共 {ls.length} 讲</span></div>
               <h1><span class="ai-art-no">第{pad(l.id)}讲</span>{l.title}</h1>
-              <div class="ai-article-meta">
-                <Tags l={l} />
-              </div>
             </header>
 
             {Content ? <Content /> : (
