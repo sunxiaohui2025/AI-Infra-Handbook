@@ -1,0 +1,129 @@
+---
+id: 118
+slug: model-loading-cold-start
+title: 模型加载与冷启动
+chapter: 4
+part: 15
+problem: 几十 GB 权重怎么在几十秒内加载并就绪
+prereqs: [61, 89, 116]
+level: 主线
+demos: [ColdStartCalc]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import ColdStartCalc from '../../components/ColdStartCalc.astro';
+import Figure from '../../components/Figure.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[61, 89, 116]} />
+
+第 116 讲里我们算过一笔排空账：如果新实例冷启动要花 $T_s$ 秒，在每秒 $\lambda$ 个请求的流量下，启动期间就会积压 $\lambda \cdot T_s$ 个请求。如果冷启动要 120 秒、流量是每秒 5 个请求，实例还没准备好就已经堆了 600 个请求，等它好不容易就绪，排在后面的请求早就因为 TTFT 超时全部失败了。
+
+可很多团队刚上线推理服务时都会惊讶：一个普通的 Web 服务启动只要 2 秒，为什么一个 32B 或 70B 的大模型实例启动要一两分钟，甚至三五分钟？这一讲把模型从“躺在存储里的文件”变成“GPU 上能接流量的就绪实例”的全过程逐段拆开，算出每一段的时间花在哪里，以及工程上怎么把冷启动压到几十秒以内。
+
+## 冷启动的五段路：权重到底经过了哪里
+
+以一个 4 卡 TP4 部署的 **Qwen3-32B（FP16 权重，约 64 GB）** 为例。要把这 64 GB 变成能跑推理的进程，数据在系统里要走过五段路：
+
+<Figure title="图 118-1　大模型推理实例冷启动的五阶段耗时构成" caption="传统流程（上方）中，权重先从远端存储下载到本地或内存，再由多个进程重复读取并在 CPU 切分，最后逐个拷贝进 GPU 并现场捕获 CUDA Graph；优化流程（下方）通过容器预热、预分片 safetensors、内存映射与图缓存，把瓶颈压到硬件物理带宽上限。">
+  <svg class="ai-tl-svg" viewBox="0 0 640 130" style="width:100%;height:auto;display:block;">
+    <text x="12" y="24" class="ai-sa-tx">传统冷启动（~140 s）</text>
+    <rect x="12" y="32" width="60" height="22" rx="3" fill="var(--surface-sunk)" stroke="var(--line-strong)"/><text x="42" y="47" text-anchor="middle" font-size="9.5">拉镜像</text>
+    <rect x="74" y="32" width="240" height="22" rx="3" fill="var(--key)"/><text x="194" y="47" text-anchor="middle" font-size="9.5" fill="#fff">远端拉权重 (~80s)</text>
+    <rect x="316" y="32" width="120" height="22" rx="3" fill="var(--key-soft)" stroke="var(--key)"/><text x="376" y="47" text-anchor="middle" font-size="9.5">CPU切分+H2D</text>
+    <rect x="438" y="32" width="45" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="460" y="47" text-anchor="middle" font-size="9.5">NCCL</text>
+    <rect x="485" y="32" width="130" height="22" rx="3" fill="var(--accent)"/><text x="550" y="47" text-anchor="middle" font-size="9.5" fill="#fff">CUDA Graph + 预热</text>
+
+    <text x="12" y="82" class="ai-sa-tx">工程优化后（~15 s）</text>
+    <rect x="12" y="90" width="24" height="22" rx="3" fill="var(--surface-sunk)" stroke="var(--line-strong)"/><text x="24" y="105" text-anchor="middle" font-size="9">4s</text>
+    <rect x="38" y="90" width="52" height="22" rx="3" fill="var(--accent)"/><text x="64" y="105" text-anchor="middle" font-size="9" fill="#fff">NVMe 读</text>
+    <rect x="92" y="90" width="32" height="22" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="108" y="105" text-anchor="middle" font-size="9">H2D</text>
+    <rect x="126" y="90" width="28" height="22" rx="3" fill="var(--key-soft)" stroke="var(--key)"/><text x="140" y="105" text-anchor="middle" font-size="9">图缓存</text>
+    <text x="166" y="105" class="ai-sa-tx">总耗时从 ~140 s 压到 ~15 s（节省近 90% 积压）</text>
+  </svg>
+</Figure>
+
+1. **镜像拉取与进程初始化**：一个装了 PyTorch、CUDA、vLLM 和各类算子库的容器镜像通常有 10–20 GB。如果节点上没有缓存镜像，光拉取解压就要 1–3 分钟；即使镜像在本地，拉起 Python 并 `import torch`、初始化 CUDA 上下文也要约 **3–5 秒**。
+2. **权重读取（存储 → 主机内存）**：如果权重放在对象存储（如 S3，单实例下载约 0.5 GB/s），64 GB 要 **128 秒**；如果放在共享 NFS（1.5 GB/s），约 **43 秒**；如果提前缓存到节点本地的 NVMe SSD（6 GB/s），只要 **10.7 秒**。
+3. **张量切分与 H2D 拷贝（主机内存 → GPU 显存）**：TP4 有 4 张卡，如果直接加载 HuggingFace 上未切分的权重，**4 个工作进程往往会各自把 64 GB 全读一遍**，在 CPU 内存里挑出自己那 1/4（16 GB），再通过 PCIe（双向分摊约 12–24 GB/s）拷进显存。不仅 CPU 内存峰值可能翻倍导致 OOM，PCIE 带宽也被浪费。
+4. **通信组建立与 KV 探测**：多卡建立 NCCL 通信环，随后引擎跑一次“假装最大长度”的试运行（profile run），测出峰值激活显存，用剩下的显存划出 PagedAttention 的 KV 块池。这一步通常要 **3–7 秒**。
+5. **CUDA Graph 捕获与 JIT 编译**：第 89 讲说过，为了消除小算子的 CPU 发射开销，引擎启动时会针对几十个不同的 batch 大小（如 1、2、4、8……256）逐一录制 CUDA Graph。如果还要触发 Triton kernel 的首次即时编译（JIT），这一步就能吃掉 **15–40 秒**。
+
+## 为什么越到大规模，冷启动越“反直觉”
+
+看到这里你可能会想：既然单卡要加载权重，那我用 8 张卡跑 TP8，每张卡只放 1/8 的权重，冷启动应该快 8 倍吧？
+
+**事实恰恰相反，如果不做预分片，TP8 的冷启动往往比单卡更慢。** 原因有三层：第一，8 个进程同时去读同一份网络存储上的权重文件，会直接把宿主机网卡和页缓存打满，有效读速不升反降；第二，每张卡的 Python 都要把张量先读进 CPU 内存再切片，如果服务器主机内存只有 256 GB，8 个进程同时加载 140 GB 的 Llama-3-70B 权重会瞬间把主机内存撑爆（Host OOM）；第三，8 卡之间建 NCCL 通信组、同步 barrier 和各自捕获几十张 CUDA Graph 的协调开销，反而比单卡多出好几秒。
+
+另一个让结论翻转的临界点在于**“热存储成本 vs 积压损失”**。如果一个模型一天只扩缩容一两次，把 140 GB 放在对象存储省下的 NVMe 盘钱很划算；但如果集群用来扛突发峰值、每天弹性起停几十次，每次多出来的 90 秒冷启动会直接打穿 SLO，这时候用本地 NVMe 盘或内存缓存池（Host RAM Cache）才是真正省钱的方案。
+
+下面的交互拆解器可以切换模型规模、存储介质和工程优化开关，对比每一段的耗时和 5 QPS 下的请求积压量。
+
+<ColdStartCalc caption="图 118-2　模型冷启动耗时拆解器。对比对象存储、NFS 与本地 NVMe 的读权重差距，再打开“预分片 + GDS/并行加载”和“跳过/缓存 CUDA Graph”，观察总启动时间与积压请求数的变化。" />
+
+## 把冷启动压到 15 秒以内的四种工程手段
+
+要把冷启动从两分钟压进二三十秒，工业界主要靠四板斧，正好对应上面五段路里的四个瓶颈：
+
+1. **safetensors + mmap（零拷贝按需加载）**：早期 PyTorch 的 `.bin`（pickle 格式）必须把整个文件反序列化进 CPU 内存再拷贝到显存，既慢又费双倍内存。现代推理引擎默认使用 `safetensors`，它的文件头记录了每个张量的偏移量，配合操作系统的 `mmap`（内存映射），进程只需要映射虚拟地址，真正拷贝到 GPU 时才由内核按页把对应字节读进来，省去了中间一次完整的 CPU 内存拷贝。
+2. **权重预分片（Pre-sharded Weights）**：上线前在离线流水线里按部署时的 TP 度（比如 TP4 或 TP8）提前把权重切好，存成 `rank0.safetensors`、`rank1.safetensors`……。上线启动时，每张卡只读自己那 **1/TP** 的文件，CPU 内存峰值降为 1/TP，PCIe 传输量也降为 1/TP，彻底消除多进程抢读和 CPU 切片开销。
+3. **GPUDirect Storage（GDS）与异步并行加载（Run:ai Streamer / FastSafetensors）**：传统路径是“NVMe → Linux 内核页缓存 → 用户态 CPU 内存 → PCIe → GPU 显存”，要绕经 CPU 多次拷贝。支持 GDS 的硬件允许网卡或 NVMe 控制器通过 PCIe DMA **直接把权重字节写进 GPU 显存**，把 CPU 解放出来；即使不用 GDS，用多线程异步预读磁盘（`readahead`）并和 H2D 拷贝做流水线重叠，也能把有效吞吐拉满到 PCIe 或磁盘的物理上限。
+4. **预热池与图/编译缓存**：把 Triton 编译产物（`~/.triton/cache`）和 `torch.compile` 缓存打进镜像或挂载共享只读卷，避免每次新副本重新编译；对于高频扩缩容的模型，甚至可以把“已经加载好权重、停在待命状态”的实例保留在节点主机内存或低成本休眠池里，需要扩容时只需几秒钟唤醒即可。
+
+<Note kind="point">冷启动优化的核心顺序是：先用容器镜像预拉取解决“拉镜像慢”，再用本地 NVMe 缓存 + 预分片 safetensors 解决“读权重和 CPU 切分慢”，最后用编译缓存与分级 CUDA Graph 捕获把运行前准备压到几秒钟。</Note>
+
+## 真实系统怎么做
+
+在 **vLLM** 中，默认加载器支持 `safetensors` 的按需读取，并内置了 `--load-format sharded_state`（配合离线保存脚本提前按 TP 切好分片），以及 `runai_model_streamer` 加载后端，通过多线程并发从 S3/本地盘流式读取并异步拷贝到 GPU。在 **Kubernetes + 推理平台** 的生产实践里，通常会配合 DaemonSet 在所有 GPU 节点提前拉取基础镜像，并用高速本地盘（或节点间 P2P 镜像/权重分发，如 Dragonfly、JuiceFS 本地缓存）把热点模型权重常驻在节点 NVMe 上。
+
+## 用代码复现
+
+下面的代码模拟 64 GB（Qwen3-32B FP16，TP4）和 140 GB（Llama-3-70B FP16，TP8）在三种存储介质下的冷启动时间拆解，并对比“未预分片全量读”和“预分片 + 并行加载 + 缓存图”的差距与积压量。
+
+```python
+def cold_start(gb, tp, store_bw, graph_s, comm_s, sharded=False, cache_graph=False, container_s=4.0):
+    read_eff = store_bw * min(tp, 2) * 0.9 if sharded else store_bw * 0.75
+    t_read = gb / read_eff
+    t_h2d = (gb / tp) / 24.0 if sharded else gb / 12.0
+    t_graph = 2.0 if cache_graph else graph_s
+    total = container_s + t_read + t_h2d + comm_s + t_graph
+    return t_read, t_h2d, comm_s, t_graph, total
+
+configs = [
+    ("Qwen3-32B · S3 未优化",        64,  4, 0.5, 14, 4, False, False),
+    ("Qwen3-32B · NFS 未优化",       64,  4, 1.5, 14, 4, False, False),
+    ("Qwen3-32B · NVMe 未优化",      64,  4, 6.0, 14, 4, False, False),
+    ("Qwen3-32B · NVMe 预分片+图缓存", 64,  4, 6.0, 14, 4, True,  True),
+    ("Llama-3-70B · NVMe 未优化",   140,  8, 6.0, 20, 7, False, False),
+    ("Llama-3-70B · NVMe 预分片+图缓存", 140, 8, 6.0, 20, 7, True, True),
+]
+
+print("场景                           | 读权重  | H2D/切分 | 通信  | 图捕获 | 总耗时  | 5QPS积压")
+for name, gb, tp, bw, gs, cs, sh, cg in configs:
+    tr, th, tc, tg, tot = cold_start(gb, tp, bw, gs, cs, sh, cg)
+    print(f"{name:30s} | {tr:5.1f} s | {th:6.1f} s | {tc:3.0f} s | {tg:4.1f} s | {tot:5.1f} s | {5*tot:5.0f} 个")
+```
+
+输出：
+
+```text
+场景                           | 读权重  | H2D/切分 | 通信  | 图捕获 | 总耗时  | 5QPS积压
+Qwen3-32B · S3 未优化             | 170.7 s |    5.3 s |   4 s | 14.0 s | 198.0 s |   990 个
+Qwen3-32B · NFS 未优化            |  56.9 s |    5.3 s |   4 s | 14.0 s |  84.2 s |   421 个
+Qwen3-32B · NVMe 未优化           |  14.2 s |    5.3 s |   4 s | 14.0 s |  41.6 s |   208 个
+Qwen3-32B · NVMe 预分片+图缓存       |   5.9 s |    0.7 s |   4 s |  2.0 s |  16.6 s |    83 个
+Llama-3-70B · NVMe 未优化         |  31.1 s |   11.7 s |   7 s | 20.0 s |  73.8 s |   369 个
+Llama-3-70B · NVMe 预分片+图缓存     |  13.0 s |    0.7 s |   7 s |  2.0 s |  26.7 s |   133 个
+```
+
+## 容易混淆的地方
+
+1. **用了 `safetensors` 不代表就不会 CPU OOM。** 如果开启了多线程强行预读所有分片到内存缓冲区，或者 TP8 没有预分片、8 个进程各自加载完整权重，主机内存依然会爆。
+2. **CUDA Graph 捕获的并不是权重，而是 GPU kernel 发射序列。** 把权重放进显存之后，必须知道实际的 KV 块池大小和算子形状才能录图，所以它发生在冷启动的最后一步；如果不需要极致低延迟，或只录几个常用 batch 档位，就能省下十几秒。
+3. **只优化“读权重”往往会撞上下一个瓶颈。** 当读盘时间从 170 秒降到 6 秒后，原本不起眼的 4 秒容器导入和 14 秒 CUDA Graph 捕获立刻变成总时间的大头（占了一半以上）。
+
+## 回顾
+
+大模型冷启动慢，是因为它要依次走完容器与 Python 初始化、几十 GB 权重读盘、张量切分与 H2D 拷贝、通信组与 KV 探测、CUDA Graph 捕获与 JIT 编译这五段路。不预分片的多卡并行反而会因为多进程抢读和 CPU 切片变慢；把预热镜像、本地 NVMe 缓存、预分片 `safetensors`、异步流式加载和编译/图缓存组合起来，能把 32B–70B 模型的冷启动从两三分钟压到 15–30 秒。
+
+实例终于稳稳跑起来了。可线上流量千变万化，某天用户突然抱怨“回答卡住了”或“首字变慢了”，我们该看哪些数字才能第一时间判断是队列堵了、KV 满了、还是网卡丢包了？下一讲：**监控指标与可观测性**。

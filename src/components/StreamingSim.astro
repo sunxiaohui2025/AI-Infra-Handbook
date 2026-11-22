@@ -1,0 +1,95 @@
+---
+// SSE 流式输出、合包与客户端断开取消的交互模拟器（第 154 讲）。
+interface Props { title?: string; caption?: string }
+const { title = '流式输出与断连取消模拟器', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cc" data-stream-sim>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>TPOT <b data-tv></b> ms</span><input type="range" min="15" max="60" step="5" value="30" data-t /></label>
+    <label class="ai-tl-lr"><span>输出 <b data-ov></b> token</span><input type="range" min="100" max="1000" step="100" value="400" data-o /></label>
+    <label class="ai-tl-lr"><span>SSE 合包 <b data-kv></b> token/帧</span><input type="range" min="1" max="8" step="1" value="1" data-k /></label>
+    <label class="ai-tl-lr"><span>断开策略 <b data-cv></b></span>
+      <select data-c style="font-size:12px;padding:2px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);">
+        <option value="none">不中途断开（完整生成）</option>
+        <option value="no-cancel">20% 处断开 · 未传播取消</option>
+        <option value="cancel">20% 处断开 · 传播取消</option>
+      </select>
+    </label>
+  </div>
+  <svg class="ai-tl-svg" viewBox="0 0 640 130" data-svg style="width:100%;height:auto;display:block;margin:8px 0;"></svg>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const tEl = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    const oEl = fig.querySelector<HTMLInputElement>('[data-o]')!;
+    const kEl = fig.querySelector<HTMLInputElement>('[data-k]')!;
+    const cEl = fig.querySelector<HTMLSelectElement>('[data-c]')!;
+    const svg = fig.querySelector<SVGSVGElement>('[data-svg]')!;
+    const eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+
+    function draw() {
+      const tpot = Number(tEl.value);
+      const out = Number(oEl.value);
+      const chunk = Number(kEl.value);
+      const mode = cEl.value;
+
+      fig.querySelector('[data-tv]')!.textContent = String(tpot);
+      fig.querySelector('[data-ov]')!.textContent = String(out);
+      fig.querySelector('[data-kv]')!.textContent = String(chunk);
+      fig.querySelector('[data-cv]')!.textContent = mode === 'none' ? '正常' : mode === 'cancel' ? '立即取消' : '继续空跑';
+
+      const ttftPrefill = 200; // ms
+      const nonStreamWait = ttftPrefill + out * tpot;
+      const streamFirst = ttftPrefill + chunk * tpot;
+      const frames = Math.ceil(out / chunk);
+      const sseWrapBytes = frames * 180; // OpenAI SSE JSON 封装约 180 B/帧
+      const payloadBytes = out * 4;       // 平均每个 token 约 4 B UTF-8
+      const totalKB = (sseWrapBytes + payloadBytes) / 1024;
+
+      const cancelAt = Math.round(out * 0.2);
+      const gpuSteps = mode === 'cancel' ? cancelAt : out;
+      const wastedSteps = mode === 'no-cancel' ? out - cancelAt : 0;
+
+      const maxMs = Math.max(nonStreamWait, 12000);
+      const barW = 460;
+      const sx = (ms: number) => Math.min(barW, Math.max(2, (ms / maxMs) * barW));
+
+      const firstW = sx(streamFirst);
+      const fullW = sx(nonStreamWait);
+      const usedW = sx(ttftPrefill + (mode === 'none' ? out : cancelAt) * tpot);
+      const wasteW = sx(wastedSteps * tpot);
+
+      svg.innerHTML = `
+        <text x="10" y="24" class="ai-sa-tx">非流式（整段等完）</text>
+        <rect x="150" y="12" width="${fullW.toFixed(1)}" height="16" rx="3" fill="var(--surface-sunk)" stroke="var(--line-strong)"/>
+        <text x="${(156 + fullW).toFixed(1)}" y="24" class="ai-sa-tx">首字节 = ${(nonStreamWait / 1000).toFixed(2)} s</text>
+
+        <text x="10" y="58" class="ai-sa-tx">SSE 流式（合包=${chunk}）</text>
+        <rect x="150" y="46" width="${firstW.toFixed(1)}" height="16" rx="3" fill="var(--accent)"/>
+        <rect x="${(150 + firstW).toFixed(1)}" y="46" width="${Math.max(0, usedW - firstW).toFixed(1)}" height="16" rx="3" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        ${wasteW > 0 ? `<rect x="${(150 + usedW).toFixed(1)}" y="46" width="${wasteW.toFixed(1)}" height="16" rx="3" fill="var(--key-soft)" stroke="var(--key)" stroke-dasharray="3 2"/>` : ''}
+        <text x="150" y="78" class="ai-sa-tx" fill="var(--accent)">首字可见：${streamFirst} ms（快 ${(nonStreamWait / streamFirst).toFixed(1)}×）</text>
+        ${wasteW > 0 ? `<text x="${(150 + usedW).toFixed(1)}" y="96" class="ai-sa-tx" fill="var(--key)">断连后空跑浪费 ${wastedSteps} 步（${((wastedSteps * tpot) / 1000).toFixed(1)} s）</text>` : ''}
+
+        <text x="10" y="118" class="ai-sa-tx">SSE 帧数：${frames} 帧 · 净文本 ${payloadBytes} B + JSON/SSE 包装 ${sseWrapBytes} B = ${totalKB.toFixed(1)} KiB（协议开销占比 ${((sseWrapBytes / (sseWrapBytes + payloadBytes)) * 100).toFixed(0)}%）</text>
+      `;
+
+      eq.innerHTML =
+        `非流式首字节要等 <b>${(nonStreamWait / 1000).toFixed(2)} s</b>；SSE 每 ${chunk} 个 token 推一帧，首字仅 <b>${streamFirst} ms</b>（合包从 1 提到 ${chunk}，SSE 帧数从 ${out} 降到 ${frames}，首字只多等 ${(chunk - 1) * tpot} ms）。`
+        + (mode === 'no-cancel'
+          ? `<br><span style="color:var(--key)">客户端在第 ${cancelAt} 个 token 处关闭连接，但网关未向引擎发 abort：GPU 继续空跑完剩下 ${wastedSteps} 步，白白占住槽位和 KV 块。</span>`
+          : mode === 'cancel'
+          ? `<br>客户端断开后网关立即触发 abort：引擎在第 ${cancelAt} 步释放请求槽位和 KV 块，省下 <b>${wastedSteps}</b> 步 decode 计算。`
+          : '');
+    }
+
+    fig.addEventListener('input', draw);
+    fig.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-stream-sim]').forEach(init);
+</script>

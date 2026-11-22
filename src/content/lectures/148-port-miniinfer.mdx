@@ -1,0 +1,124 @@
+---
+id: 148
+slug: port-miniinfer
+title: 实操 · 把 miniinfer 移植到非 CUDA
+chapter: 6
+part: 19
+problem: 在 Apple MPS 上真实走一遍移植
+prereqs: [125, 144, 146, 147]
+level: 主线
+demos: [CodeWalk, CodeDiff, RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CodeDiff from '../../components/CodeDiff.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import LayerDrift from '../../components/LayerDrift.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[125, 144, 146, 147]} />
+
+前七讲的原理，这一讲全部落到代码上。目标是把第 16 篇写的 miniinfer 搬到一块非 NVIDIA 的加速器上，真实运行、真实比对、真实计时。
+
+本机没有国产卡，但有一块能用的非 CUDA 加速器：Apple M2 的 GPU，PyTorch 通过 MPS 后端支持它。它和一块国产 GPGPU 的处境相似——不是 CUDA，算子库不全，低精度支持有缺口，profiler 工具另一套。所以这一讲的流程、踩的坑和验收标准都可以照搬；只有最后调 kernel 那一步，各家的工具不同。
+
+起点选 **v1**（KV Cache 版，第 125 讲）：它只有五个文件、160 行，prefill 和 decode 两条路径都有，足够暴露移植的问题，又不会被调度、分页这些东西干扰。
+
+## 第一步：把设备收到一个地方
+
+v1 的代码里，设备这件事散在三处：`LLM.__init__` 的默认参数 `device="cpu"`、`load_weights` 的参数、`KVCache` 的参数。移植的第一件事不是改它们，而是**先建一个地方专管设备**，之后所有和“哪块卡”相关的决定都走这里。
+
+<CodeWalk file="port/device.py" steps={[
+  { lines: [5, 13], title: '挑一块设备', body: '<p>顺序是 CUDA → MPS → CPU。注意第一个分支：<code>torch.cuda.is_available()</code> 在一块海光 DCU 上也会返回真——那份 PyTorch 是用 HIP 编译的，对外仍自称 cuda（第 144 讲）。所以这一行代码同时覆盖了 NVIDIA 和走 ROCm 式接法的国产卡；走 PrivateUse1 式接法的硬件要在这里加一个分支（<code>torch.npu.is_available()</code> 一类）。</p>' },
+  { lines: [16, 21], title: '同步', body: '<p>GPU 上 kernel 是异步执行的：Python 里一行 <code>x @ w</code> 返回时，设备可能还没开始算。计时之前必须同步，否则量到的是“发射完了”的时间，不是“算完了”的时间。CUDA 和 MPS 的同步函数名字不同，所以包一层。</p><p>这是移植时第一个容易出错的地方：忘了同步，压测数字会小得离谱，而且越优化越“快”。</p>' },
+  { lines: [24, 31], title: '这块卡支持这种精度吗', body: '<p>不要去查文档或者维护一张表，直接试一次：建一个这种类型的小张量，做一次乘法，再取出结果。不支持的组合会在这里立刻报错，而不是在第 17 层算到一半时报。</p><p><code>.sum().item()</code> 里的 <code>item()</code> 是故意的：它强制等设备算完，这样“能建张量但不能算”的情况也会被挡住。</p>' },
+]} />
+
+然后引擎只改四行：设备从参数里拿到后统一用 `self.device`，并在建模型之前先检查精度。
+
+<CodeDiff a="v1/engine.py" b="port/engine.py" caption="图 148-1　引擎的改动。device 的默认值从写死的 cpu 变成 None（由 device.py 决定），权重和 KV Cache 都用挑出来的设备；generate 里把 start 提成一个变量，为下一步做准备。" />
+
+<Note kind="point">移植的第一条经验：**先把“设备”这件事收敞口**。第 141 讲统计过，nano-vllm 里和设备、运行时绑定的写法有 23 行，散在一个文件里。如果不先收口，这 23 行会在后面每一次调试里反复出现。</Note>
+
+## 第二步：跑通，和参考答案逐 token 比
+
+改完就能跑。第 124 讲建立的检查脚本原样可用——它用同一组提示、贪心解码，和 HuggingFace 存下来的参考答案逐 token 比对：
+
+<RunOutput cmd={`.venv/bin/python tests/check.py port "{'device':'mps'}"`} file="outputs/check_port_mps.txt" caption="图 148-2　移植版在 Apple MPS 上的正确性检查（FP32，本机真实运行）。" />
+
+四条提示、每条 32 个 token，全部与 HuggingFace 逐 token 一致。这个结果说明三件事：MPS 上这 23 种算子的实现都是对的；FP32 下的数值差异（1e-6 量级，第 146 讲量过）不足以改变贪心选择；KV Cache 的写入和读取在新后端上没有走偏。
+
+<Note kind="warn">能跑通 FP32 不等于能跑通别的精度。下面第四步就会看到 FP16 的翻车。移植的检查要按“每个精度各跑一遍”来做，而不是跑通一次就宣布完成。</Note>
+
+## 第三步：算子盘点，找出不支持的算子
+
+跑通之后先别调性能，而是把这个模型用到的算子完整数一遍，确认没有东西在悄悄回退到 CPU。办法是第 147 讲的 `TorchDispatchMode`：
+
+<RunOutput cmd=".venv/bin/python bench/port_ops.py" file="outputs/port_ops.txt" caption="图 148-3　算子清单、MPS 的支持情况、以及补上缺失算子的两种办法（本机真实运行）。" />
+
+对这次移植，三个结论：
+
+**31 种算子，回退到 CPU 的 0 个**。这条最重要——它意味着后面量到的性能数字是真的在设备上跑出来的。如果这里不是 0，所有性能结论都要作废。
+
+**一步 decode 要在设备上算 2221 次**。这个数字解释了第 145 讲的下发开销：两千多次调用，每次都要走分发、算形状、下发。
+
+**MPS 缺 FP8 矩阵乘和 FlashAttention 内核**。对 miniinfer 的当前版本不影响（它用 `bmm` + `softmax` 手写注意力，用 FP32/FP16 权重），但如果要把第 129 讲的量化版或第 84 讲的 FlashAttention 搬过来，这就是缺口。
+
+## 第四步：精度，一个真实的坑
+
+FP32 跑通了，换 FP16 试试——这是移植里必然要走的一步，因为 FP32 在任何加速器上都是浪费（权重大一倍、带宽多读一倍）。
+
+结果是第 146 讲开头那段输出：生成一串句号和换行。逐层比对直接给出了位置：
+
+<LayerDrift file="outputs/port_align.json" caption="图 148-4　逐层误差（本机真实运行）。勾上 “mps float16 naive”：误差在第 4 层从 4e-3 跳到 1e0。再勾上 “mps float16 fixed”，看改完之后的样子。" />
+
+原因在第 146 讲讲透了：RMSNorm 的平方和在 FP16 里溢出（激活值 6544 的平方是 4.28 × 10⁷，超过 FP16 的上限 65504）。改法是把平方和升到 FP32：
+
+<CodeDiff a="v1/model.py" b="port/model.py" caption="图 148-5　model.py 的三处改动：RMSNorm 的平方和升到 FP32（这一步修掉了 FP16 的溢出）；end 改成由调用方传入（下一步会看到它值多少钱）；forward 多一个 trace 参数，用来逐层比对。" />
+
+改完之后 FP16 和 BF16 都和参考逐 token 一致，FP16 的逐层误差（3e-3）还比 BF16（2e-2）更小。
+
+## 第五步：性能，以及一行代码值多少
+
+现在量速度。同一个 199 token 的提示（和第 125 讲同一条），生成 64 个 token，分别计时 prefill 和每步 decode：
+
+<RunOutput cmd=".venv/bin/python bench/port_speed.py" file="outputs/port_speed.txt" caption="图 148-6　CPU 与 MPS、三种精度下的 prefill 与 decode 耗时（本机 Apple M2，真实运行；每次计时前后都做了设备同步）。" />
+
+逐行读这张表。
+
+**CPU FP32 → MPS FP32：prefill 355 ms → 170 ms，decode 每步 65 ms → 56 ms**。prefill 快了一倍（它受算力限制，GPU 的算力更高），decode 只快 14%。decode 为什么没跟上？因为它受带宽限制（第 68 讲），而 M2 的 CPU 和 GPU **共用同一块内存**——统一内存架构下，换到 GPU 并不能换来更高的带宽。这个现象在独立显卡上不会出现，但它恰好演示了一件事：**decode 的速度由带宽决定，不由谁在算决定**。
+
+**v1 原样搬到 MPS → port 版：decode 每步 56 ms → 49 ms，快了 13%**。两个版本的数学完全一样，差别只有 `model.py` 里那一行：v1 写 `end = int(pos[-1]) + 1`，port 版把 `end` 作为参数传进来。表最后两行解释了这 7 ms：MPS 上下发一个很小的加法平均 5.2 μs，而把一个数从设备拷回 CPU（`int(tensor)`）平均 139.9 μs——相差 27 倍。28 层每层一次，就是 28 × 140 μs ≈ 3.9 ms；再加上它每次都打断设备上正在排队的 kernel 流水，实际代价更大。
+
+<Note kind="point">这是移植性能问题的典型形状：**不是哪个 kernel 慢，而是 CPU 和设备之间的同步太频繁**。这类问题改起来几乎没有成本（把一个数从外面传进来），收益却是百分之十几。调优时先找这类同步点（`int(tensor)`、`.item()`、`tensor.cpu()`、`if tensor > 0`、打印张量），再去看 kernel，顺序和第 149 讲一致。</Note>
+
+**FP32 → FP16：decode 每步 49.3 ms → 32.9 ms，快 1.5 倍**。理论上应该快 2 倍：decode 一步要读 596 M 个参数的权重（脚本第一行算出来的），FP32 是 2.38 GB，FP16 是 1.19 GB，字节减半。实际只有 1.5 倍，差的那部分是下发开销和没跑满的带宽——按这两个数算，FP32 下达到的有效带宽是 2.38 GB ÷ 49.3 ms ≈ 48 GB/s，FP16 是 1.19 GB ÷ 32.9 ms ≈ 36 GB/s。精度越低，要读的字节越少，固定开销的占比就越高，所以效率反而下降。这是第 67 讲“实测与理论的差距”在一块新硬件上的具体体现。
+
+**BF16 的 prefill 比 FP16 慢**（196 ms 对 128 ms），decode 却一样快（33 ms）。prefill 受算力限制，这个差别说明 MPS 上 BF16 的矩阵乘走的路径不如 FP16 高效；decode 受带宽限制，两者字节数相同，所以没差别。**同样是 16 位，在同一块卡上也可能不等价**——选精度时要实测，不能只看位数。
+
+**CPU BF16 的 prefill 是 3665 ms，比 CPU FP32 慢 10 倍**。这是全表最反直觉的一行。原因是本机 CPU 没有原生的 BF16 矩阵乘指令，PyTorch 只能把 BF16 转成 FP32 再算，每次矩阵乘都多两次类型转换。**低精度在没有原生支持的硬件上会变慢，而不是变快**——第 152 讲会把这件事展开讲，它也是适配国产卡时最常见的误判之一。
+
+## 还差什么
+
+到这里，一个能跑、跑对、知道瓶颈在哪的移植版完成了。离“能上线”还差这些，每一项对应后面的讲：
+
+| 还缺什么 | 为什么现在没做 | 对应的讲 |
+| --- | --- | --- |
+| 分页 KV、连续批处理、调度 | 这些是引擎层的逻辑，和硬件无关，v3 已经有了，直接套上来即可 | 121、122 |
+| 融合算子（RMSNorm、RoPE、SwiGLU） | 现在每个都是几个基础算子拼出来的，一步多上千次下发 | 83、144 |
+| FlashAttention 类的注意力 | MPS 缺这个内核；长上下文下现在的写法会让注意力矩阵落地 | 84、143 |
+| 图模式 / 图捕获 | 去掉同步点之后整个前向已经能编成一张图（第 145 讲量过：3319 个节点、0 处中断），但还没接后端 | 138 |
+| 量化 | MPS 缺 FP8 矩阵乘；INT8 有 `_int_mm`，可以试 | 145 |
+| 多卡 | 本机只有一块 GPU，通信这一层完全没碰 | 146 |
+| profiler 下的逐 kernel 分析 | 下一讲的主题 | 142 |
+
+在一块真实的国产卡上，这张表还要多两行：**厂商的算子库接进来**（矩阵乘换成厂商的库，注意力换成厂商移植的 FlashAttention），以及**引擎插件**（把这些选择告诉 vLLM 这样的引擎，而不是只在自己的小引擎里用，第 154 讲）。
+
+<Note kind="column">这次移植的全部改动：新增 `port/device.py`（31 行），`engine.py` 改 4 处，`model.py` 改 3 处。总共不到 50 行——和第 141 讲那个“4.4%”的统计是一致的。但要注意这个数字的前提：miniinfer 本来就只用基础算子，没有 CUDA 专有库、没有自写 kernel、没有通信。真实引擎的那 4.4% 里，每一行背后都是一个库。</Note>
+
+## 回顾
+
+一次完整的移植，顺序是：把设备收进一个模块（顺手把同步和精度探测也包进去）→ 跑通并和参考答案逐 token 比对 → 盘点算子确认没有东西回退到 CPU → 逐个精度跑逐层比对（FP16 在 RMSNorm 上溢出，升到 FP32 解决）→ 量性能并先解决同步点。本机的实测给出了几个可以带走的结论：decode 的速度由带宽决定，统一内存下换到 GPU 也快不了多少；一行 `int(pos[-1])` 值 13% 的 decode 吞吐；FP16 只快 1.5 倍而不是 2 倍，因为固定开销占比上升；CPU 上的 BF16 比 FP32 慢 10 倍，因为没有原生支持。
+
+第 19 篇到此结束——模型跑通了、跑对了。第 20 篇开始讲怎么跑快。第一个问题是：在一块没有 Nsight 的卡上，怎么知道时间花在哪里？

@@ -1,0 +1,124 @@
+---
+// 弹性伸缩策略模拟器（第 157 讲）：对比 GPU 利用率触发 vs 队列+KV水位触发 vs 预热池。
+interface Props { title?: string; caption?: string }
+const { title = '突发流量下的扩缩容模拟器', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cc" data-autoscale>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>突发流量 <b data-bv></b>×（基线 10 → 峰值）</span><input type="range" min="2" max="4" step="1" value="3" data-b /></label>
+    <label class="ai-tl-lr"><span>冷启动时间 <b data-tv></b> s</span><input type="range" min="30" max="120" step="30" value="60" data-t /></label>
+    <label class="ai-tl-lr"><span>扩容信号</span>
+      <select data-p style="font-size:12px;padding:2px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);">
+        <option value="gpu">GPU 利用率 &gt; 85%（滞后）</option>
+        <option value="queue" selected>排队长度 + KV 水位 &gt; 70%</option>
+        <option value="warm">水位触发 + 1 台热备池（10s 接管）</option>
+      </select>
+    </label>
+  </div>
+  <svg class="ai-tl-svg" viewBox="0 0 640 165" data-svg style="width:100%;height:auto;display:block;margin:8px 0;"></svg>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  function init(fig: HTMLElement) {
+    const bEl = fig.querySelector<HTMLInputElement>('[data-b]')!;
+    const tEl = fig.querySelector<HTMLInputElement>('[data-t]')!;
+    const pEl = fig.querySelector<HTMLSelectElement>('[data-p]')!;
+    const svg = fig.querySelector<SVGSVGElement>('[data-svg]')!;
+    const eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+
+    function draw() {
+      const mult = Number(bEl.value);
+      const coldS = Number(tEl.value);
+      const pol = pEl.value;
+      fig.querySelector('[data-bv]')!.textContent = String(mult);
+      fig.querySelector('[data-tv]')!.textContent = String(coldS);
+
+      // 简化离散时间仿真：0..240s，每 2s 一步。基线到达率 10 req/s，单副本上限 15 req/s（初始 1 个副本）。
+      // 第 20s 流量突增到 10 * mult req/s。
+      const capPerRep = 15;
+      const baseQps = 10;
+      const peakQps = baseQps * mult;
+      const needReps = Math.ceil(peakQps / 10.5); // 按 70% 目标水位
+      const dt = 2;
+      const steps = 120; // 240s
+
+      let reps = 1;
+      let backlog = 0;
+      let triggerAt = -1;
+      let readyAt = -1;
+      let warmReadyAt = -1;
+      let maxBacklog = 0;
+      let maxTtftMs = 200;
+      let sloViolateS = 0;
+
+      const ptsQ: string[] = [];
+      const ptsR: string[] = [];
+
+      for (let i = 0; i <= steps; i++) {
+        const t = i * dt;
+        const qps = t >= 20 ? peakQps : baseQps;
+
+        if (pol === 'warm' && triggerAt < 0 && t >= 20 && backlog > 3) {
+          triggerAt = t;
+          warmReadyAt = t + 10; // 热备池 10s 接管 1 个副本
+          readyAt = t + coldS;  // 其余冷启动副本
+        } else if (pol === 'queue' && triggerAt < 0 && t >= 20 && backlog > 3) {
+          triggerAt = t;
+          readyAt = t + coldS;
+        } else if (pol === 'gpu' && triggerAt < 0 && t >= 46) {
+          // GPU 利用率采集窗 + 连续采样平滑通常额外滞后 ~26s
+          triggerAt = t;
+          readyAt = t + coldS;
+        }
+
+        if (warmReadyAt >= 0 && t >= warmReadyAt && reps < 2) reps = 2;
+        if (readyAt >= 0 && t >= readyAt) reps = needReps;
+
+        const serve = reps * capPerRep;
+        backlog = Math.max(0, backlog + (qps - serve) * dt);
+        if (backlog > maxBacklog) maxBacklog = backlog;
+
+        const ttft = 200 + (backlog / serve) * 1000;
+        if (ttft > maxTtftMs) maxTtftMs = ttft;
+        if (ttft > 1000) sloViolateS += dt;
+
+        const x = 45 + (t / 240) * 560;
+        const yB = 135 - Math.min(110, (backlog / 2000) * 110);
+        const yR = 135 - (reps / 5) * 110;
+        ptsQ.push(`${x.toFixed(1)},${yB.toFixed(1)}`);
+        ptsR.push(`${x.toFixed(1)},${yR.toFixed(1)}`);
+      }
+
+      svg.innerHTML = `
+        <line x1="45" y1="25" x2="45" y2="135" stroke="var(--line-strong)"/>
+        <line x1="45" y1="135" x2="605" y2="135" stroke="var(--line-strong)"/>
+        <line x1="${(45 + (20 / 240) * 560).toFixed(1)}" y1="25" x2="${(45 + (20 / 240) * 560).toFixed(1)}" y2="135" stroke="var(--line)" stroke-dasharray="3 3"/>
+        <text x="${(48 + (20 / 240) * 560).toFixed(1)}" y="34" class="ai-sa-tx">20s 流量突增</text>
+        <polyline fill="none" stroke="var(--key)" stroke-width="2" points="${ptsQ.join(' ')}"/>
+        <polyline fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="5 3" points="${ptsR.join(' ')}"/>
+        <text x="50" y="152" class="ai-sa-tx">0s</text>
+        <text x="315" y="152" class="ai-sa-tx">120s</text>
+        <text x="585" y="152" class="ai-sa-tx">240s</text>
+        <rect x="400" y="12" width="12" height="3" fill="var(--key)"/><text x="416" y="17" class="ai-sa-tx">积压请求</text>
+        <rect x="490" y="12" width="12" height="3" fill="var(--accent)"/><text x="506" y="17" class="ai-sa-tx">就绪副本数</text>
+      `;
+
+      eq.innerHTML =
+        `峰值到达率 <b>${peakQps} 请求/s</b>，目标副本数 <b>${needReps}</b>。`
+        + `峰值积压 <b>${Math.round(maxBacklog)}</b> 个请求，最坏 TTFT 约 <b>${(maxTtftMs / 1000).toFixed(2)} s</b>，TTFT 超 1 s 的持续时间 <b>${sloViolateS} s</b>。`
+        + (pol === 'gpu'
+          ? '<br><span style="color:var(--key)">GPU 利用率指标采集平滑滞后且在低并发 decode 时就已虚高，等它触发再加冷启动，积压往往已经把 SLO 打穿。</span>'
+          : pol === 'warm'
+          ? '<br>热备池在 10 s 内先顶上第 2 个副本，把净缺口压小，显著削平了等待尖峰。'
+          : '<br>队列长度和 KV 水位在流量突增后秒级触发，省去了监控聚合窗口的滞后。');
+    }
+
+    fig.addEventListener('input', draw);
+    fig.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-autoscale]').forEach(init);
+</script>

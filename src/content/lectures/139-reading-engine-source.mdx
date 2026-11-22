@@ -1,0 +1,98 @@
+---
+id: 139
+slug: reading-engine-source
+title: 怎么读大型引擎的源码
+chapter: 5
+part: 18
+problem: 入口、定位、压测、贡献
+prereqs: [66, 70, 82, 131, 135, 136, 137]
+level: 主线
+demos: [RunOutput]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import RunOutput from '../../components/RunOutput.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[66, 70, 82, 131, 135, 136, 137]} />
+
+第五章从一个 119 行的 v0 开始，写到 400 行的 miniinfer，再读 1200 行的 nano-vllm，最后读了 17 万行的 vLLM 和体量相当的 SGLang。这最后一讲把一路上用到的读法整理出来：面对一个大型引擎，怎么找入口、怎么定位一个功能、怎么验证自己的理解、怎么开始改它。
+
+## 一、先有一张地图，再进代码
+
+读大型代码库最常见的失败，是从目录树的第一个文件开始往下读。17 万行里，和“一个请求怎么被处理”直接相关的只占一小部分；其余的是模型实现、硬件适配、各种可选功能。所以第一步是**带着一张地图进去**，地图就是你已经懂的那个小引擎。
+
+第五章其实一直在用这张地图。把四份代码的同一个模块放在一起：
+
+| 模块 | miniinfer v5 | nano-vllm | vLLM V1 | SGLang |
+| --- | --- | --- | --- | --- |
+| 请求状态 | `sequence.py` | `engine/sequence.py` | `v1/request.py` | `managers/schedule_batch.py`（`Req`） |
+| 调度器 | `scheduler.py` | `engine/scheduler.py` | `v1/core/sched/scheduler.py` | `managers/scheduler.py`、`schedule_policy.py` |
+| KV 块与前缀缓存 | `block_manager.py` | `engine/block_manager.py` | `v1/core/kv_cache_manager.py`、`block_pool.py` | `mem_cache/radix_cache.py`、`memory_pool.py` |
+| 主循环 | `engine.py` 的 `step()` | `engine/llm_engine.py` 的 `step()` | `v1/engine/core.py` 的 `step()` | `managers/scheduler.py` 的 `event_loop_overlap()` |
+| 拼输入、跑模型 | `engine.py` + `model.py` | `engine/model_runner.py` | `v1/worker/gpu/model_runner.py` | `managers/tp_worker.py`、`model_executor/model_runner.py` |
+| 注意力 | `model.py` 的 `attend()` | `layers/attention.py` | `v1/attention/backends/` | `layers/attention/`（本篇未取下） |
+| 采样 | `argmax` | `layers/sampler.py` | `v1/worker/gpu/sample/` | `layers/sampler.py`（本篇未取下） |
+| 投机解码 | `spec.py` | （第 134 讲移植） | `v1/worker/gpu/spec_decode/` | `speculative/`（本篇未取下） |
+
+有了这张表，读 vLLM 的调度器时，你知道它一定要回答 miniinfer 的调度器回答过的那几个问题：这一步跑谁、每个请求算几个 token、块不够怎么办、请求什么时候结束。3569 行里，能对上这几个问题的就是主干，其余的（PD 分离、多模态、LoRA、流水线并行……）第一遍可以全部跳过。
+
+## 二、顺着一个请求走，而不是顺着目录走
+
+第 135–137 讲都是这样读的：找到入口（`LLM.generate` 或 HTTP 接口），找到主循环（`EngineCore.run_busy_loop`、`Scheduler.event_loop_overlap`），然后只追一个请求：它在哪里被分词、被放进哪个队列、在哪一行被调度、它的 KV 块在哪里分配、在哪里被送进模型、新 token 在哪里接上、在哪里结束。每一站只读到“知道这一站做了什么”为止，不往旁边展开。
+
+几个实用的办法：
+
+- **读注释里的设计说明**。大项目的核心函数开头往往有一段说明设计的注释（第 135 讲调度器开头那段“没有 prefill 阶段”的注释，比后面 300 行代码更重要）。
+- **读数据结构，再读函数**。先看 `SchedulerOutput`、`Request`、`TreeNode` 这些结构里有哪些字段，函数做的事情大多就是在改这些字段。
+- **读测试**。单元测试是最好的用法示例：它会构造一个最小的场景（几个请求、几个块），断言调度的结果。vLLM 的调度器测试在 `tests/v1/core/` 下。
+- **读提交历史**。一段看不懂的代码，用 `git log -L` 或 `git blame` 找到引入它的提交，再看对应的 PR 描述：大多数 PR 会写清楚为什么要这样改、解决了什么问题、压测数字是多少。
+
+## 三、要定位一个功能，从配置项搜起
+
+想知道某个功能是怎么实现的，最快的入口往往是它的**配置项**：每个用户能打开的功能都有一个参数，参数从命令行一路传到用它的地方。比如想知道第 135 讲的“长 prefill 上限”是怎么起作用的：
+
+<RunOutput cmd=".venv/bin/python bench/trace_flag.py long_prefill_token_threshold" file="outputs/trace_flag.txt" caption="图 139-1　在 vLLM 源码里搜一个配置项（只搜文本）。它出现在三个文件里：config/scheduler.py 定义它（默认 0，表示不限）和校验它，engine/arg_utils.py 把命令行参数传进来，v1/core/sched/scheduler.py 用它。读最后一个文件里的那 11 处，就知道这个功能的全部行为。" />
+
+这条“定义 → 传递 → 使用”的链在所有大型项目里都存在。读的顺序反过来：先读定义处的文档字符串（它说清了意图和默认值），再直接跳到使用处，中间的传递可以略过。
+
+## 四、验证你的理解：跑起来，打日志，做剖析
+
+读懂了一段代码，要用运行来验证。对推理引擎，有几种由浅入深的办法：
+
+1. **最小配置跑一遍**：一张卡、一个小模型（比如第五章一直在用的 Qwen3-0.6B）、关掉 CUDA Graph（vLLM 的 `enforce_eager=True`，nano-vllm 同名），这样所有代码都按 Python 的顺序执行，能打断点、能加打印。
+2. **打开调试日志**：vLLM 用环境变量 `VLLM_LOGGING_LEVEL=DEBUG`；在调度器里临时打印每一步的 `num_scheduled_tokens`，就能看到第 135 讲那张 token 预算图的真实版本（就像 miniinfer 的 `bench/batching.py` 画出的甘特图）。
+3. **剖析**：用 PyTorch Profiler 或 Nsight Systems 抓一段 decode（第 66 讲），看每一步里 CPU 在做什么、GPU 在做什么、中间有没有空隙。第 131 讲在 CPU 上做的“时间花在哪里”，在 GPU 上就要靠这些工具。
+4. **对照实验**：只改一个参数（打开、关闭前缀缓存；草稿数 0 和 4；关闭重叠调度），比较输出和速度。第五章每一版的 `bench/` 脚本都是这个思路。
+
+## 五、压测：先想清楚要测什么
+
+第 82 讲讲了推理压测的方法，读引擎源码时它是检验理解的最后一关：你认为某个改动会让什么变快，压测要能测出来。几个容易踩的坑：
+
+- **离线吞吐和在线服务是两回事**。离线（一次给全部请求，测总 token/s）看的是满载时的吞吐；在线（请求按一定的速率到达，测 TTFT、TPOT 的分布，第 70 讲）看的是延迟和 SLO。vLLM 的 `vllm bench throughput` 和 `vllm bench serve` 分别对应这两种。
+- **随机的提示测不出前缀缓存**。随机 token 之间没有公共前缀，前缀缓存毫无作用；要测前缀缓存，就要构造共享前缀的负载（第 128 讲的系统提示实验）。
+- **控制输出长度**。不控制时，不同的引擎、不同的采样参数会在不同的地方遇到结束符，生成的 token 数不一样，吞吐没有可比性。压测时通常忽略结束符、固定输出长度（nano-vllm 的 `bench.py` 就用了 `ignore_eos=True`）。
+- **先预热**。第一次请求会触发编译、录 CUDA Graph、分配显存，计时要从预热之后开始。
+- **扫一个区间，而不是测一个点**。并发数（或到达速率）从小到大扫一遍，画出吞吐和延迟的曲线，才能看出系统在哪里饱和（第 82 讲）。
+
+## 六、开始贡献
+
+读懂之后，最好的检验是改它，第 134 讲就是一次小小的练习。给 vLLM、SGLang 这样的项目贡献代码，通常的路径是：
+
+1. **从小的开始**：文档、测试、带有“good first issue”标签的问题、你自己在使用中遇到并能复现的 bug。
+2. **大的改动先讨论**：新功能、改接口、改调度策略，先开一个 issue 或 RFC，说明动机、设计和预期的收益，和维护者达成一致再写代码。
+3. **按项目的规矩来**：装好 pre-commit 做格式和静态检查，跑相关的单元测试，新代码配上测试。
+4. **用数字说话**：性能相关的 PR 附上压测的设置和前后对比（硬件、模型、并发、输入输出长度），正确性相关的附上能复现问题的最小例子。
+5. **保持 PR 小而聚焦**：一个 PR 只做一件事，更容易被审阅和合入。
+
+<Note kind="point">读大型引擎：带着小引擎的地图进去，只追一个请求的路径，每一站只读到知道它做了什么为止；先读设计注释和数据结构，再读函数；用测试和提交历史理解“为什么”；定位功能从配置项搜起（定义 → 传递 → 使用）；用最小配置运行、调试日志、剖析和对照实验验证理解；压测分清离线和在线、控制输出长度、预热、扫区间；贡献从小处开始，大改先讨论，用数字说话。</Note>
+
+## 回顾：第五章走过的路
+
+| 篇 | 做了什么 | 得到了什么 |
+| --- | --- | --- |
+| 第 16 篇 | 手写 miniinfer：v0 前向、v1 KV Cache、v2 continuous batching、v3 分页和前缀缓存、v4 量化、v5 投机解码 | 一个推理引擎的每个零件从哪里来、为什么需要，以及每一个都用实测数字检验过 |
+| 第 17 篇 | 读 nano-vllm，并把投机解码移植进去 | 同样的思想在 GPU 上怎么实现：变长 FlashAttention、写 KV 的 kernel、CUDA Graph、张量并行；一个功能在真实引擎里要碰到多少地方 |
+| 第 18 篇 | 读 vLLM、SGLang，概览其他引擎和规模化部署 | 工业级引擎的结构和取舍：进程拆分、统一 token 预算、基数树前缀缓存、调度和执行重叠、KV connector |
+
+到这里，我们已经掌握了从 400 行 miniinfer 到 17 万行工业级引擎的阅读方法。在结束第五章之前，还剩一个架构师落地时绕不开的问题：面对 vLLM、SGLang 和 TensorRT-LLM，实际业务里到底该怎么选？下一讲：**主流引擎选型对比**。

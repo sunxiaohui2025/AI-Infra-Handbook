@@ -1,0 +1,141 @@
+---
+id: 120
+slug: autoscaling
+title: 弹性伸缩
+chapter: 4
+part: 15
+problem: 流量波峰波谷时怎么自动扩缩容而不打穿 SLO
+prereqs: [116, 118, 119]
+level: 主线
+demos: [AutoscaleSim]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import AutoscaleSim from '../../components/AutoscaleSim.astro';
+import Figure from '../../components/Figure.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[116, 118, 119]} />
+
+第 119 讲我们配好了监控，第 118 讲把冷启动压到了几十秒。现在面对一个真实业务每天都在发生的问题：白天高峰期每秒 40 个请求，凌晨只有 4 个请求。如果全天按峰值 40 QPS 配卡，夜里 90% 的 GPU 都在空转烧钱；如果交给 Kubernetes 默认的自动扩缩容（HPA）去管，往往会出现一个更糟的局面——流量刚涨上来，新卡还没启动完，旧卡已经被排队压垮，等新卡终于就绪时，流量高峰甚至已经过去了。
+
+这一讲讲清楚大模型推理服务做弹性伸缩的三件核心事情：为什么传统的“按 CPU/GPU 利用率扩容”一定会失灵、该用什么指标和提前量触发扩容、以及缩容时怎么优雅下线（drain）才不会把用户正在生成的长流式请求一刀切掉。
+
+## 为什么 GPU 利用率会骗人
+
+在传统 Web 服务里，HPA 的标准配置是“CPU 利用率超过 70% 就扩容”。很多人顺手把它改成了“GPU 利用率超过 70% 就扩容”，结果上线当天就翻了车。
+
+原因在第 70 讲和第 119 讲已经埋下了伏笔：**在 decode 阶段，哪怕只有一个请求在跑，GPU 利用率也可能显示 90% 以上。** 只要一个请求进来做几步 decode，GPU 的 SM 就在等 HBM 搬权重，驱动层统计到“这段时间 GPU 没闲着”，利用率瞬间拉满；而此时这张卡的 KV Cache 只用了 5%，每秒其实还能再塞进 10 个并发请求。
+
+反过来，如果把阈值设成 95% 再配上一个 60 秒的指标平滑窗口，等系统确认“利用率真的连续一分钟超过 95%”再去拉新副本，加上第 118 讲算过的 60 秒冷启动，整整滞后了将近两分钟。在 3 倍突发流量下，这两分钟足够攒出上千个排队请求，把所有人的 TTFT 拖到几十秒。
+
+下面的模拟器把两种策略放在同一场流量突增里对比。你可以调节突发倍数和冷启动耗时，亲眼看一看“按 GPU 利用率触发”和“按队列与 KV 水位触发 + 热备池”的积压曲线有多大差别。
+
+<AutoscaleSim caption="图 120-1　突发流量下的扩缩容模拟器。基线 10 req/s 在第 20 s 突然跳到 20–40 req/s。对比“GPU 利用率”的监控滞后、“排队+KV 水位”的秒级触发，以及“热备池 10 s 接管”对峰值积压的削平效果。" />
+
+## 真正有效的扩容信号：队列长度、KV 水位与提前量
+
+既然 GPU 利用率不行，推理集群应该看什么指标？生产上通常用**多指标联合触发**，且全部来自第 119 讲的第二层引擎指标：
+
+1. **等待队列长度（`num_requests_waiting`）与在途请求比**：一旦引擎内部开始出现排队（例如 `waiting > 0` 持续 5–10 秒），说明当前副本的算力或并发槽位已经饱和，必须立刻触发扩容，而不是等平滑窗口。
+2. **KV Cache 水位（`gpu_cache_usage_perc`）**：这是最强的**提前预警信号**。在请求还没开始排队、TTFT 也还完全正常的时候，只要 KV 池占用率爬升到 **70%–75%**，就意味着距离触发抢占和排队只剩最后一点缓冲空间。以 KV 水位 70% 作为扩容线，等于提前几十秒拿到了扩容窗口。
+3. **PD 分离下的独立伸缩**：如果用了第 112 讲的 PD 分离架构，prefill 池和 decode 池的瓶颈完全不同，应该**独立扩缩容**。当上游突然涌入一批长文档总结请求（输入 16K、输出 100），prefill 池排队暴涨但 decode 池很空，只扩 prefill 副本即可；当变成大量长输出推理请求，则主要扩 decode 副本。
+
+### 什么时候需要“热备池”？
+
+冷启动时间 T_s 和业务能容忍的积压时间之间存在一个硬门槛。假设单副本最大服务率是 μ，突发到达率是 λ_peak，在扩容副本就绪的 T_s 秒内，每个已有副本每秒多欠下 (λ_peak − μ_cur) 个请求。如果 T_s = 60 s、缺口是每秒 15 个请求，就会积压 900 个请求；靠新副本多出来的那点余量慢慢排空，可能需要几分钟，SLO 早就穿了。
+
+所以当业务的日夜波峰特别陡峭（比如整点秒杀、早高峰开盘），或者冷启动 T_s > 30 s 时，仅靠被动扩容来不及。工程上的标准解法是**“水位扩容 + 1–2 个低成本热备实例（Warm Pool）”**（或按定时策略在早 8 点提前预扩）：热备实例已经拉好镜像并把权重加载在主机内存甚至显存里，收到信号后 **5–10 秒** 就能切入负载均衡，把最危险的前半分钟缺口先顶住，给后面的冷启动副本争取时间。
+
+## 缩容的难题：怎么优雅下线，不杀掉长连接
+
+扩容怕“慢”，缩容怕“粗暴”。
+
+普通无状态 Web 服务缩容时，负载均衡摘掉节点后，等 5 秒让手头上的短 HTTP 请求返回，就可以直接 `kill` 掉进程。但大模型流式接口的单个请求可能要生成 30–60 秒；如果直接发 `SIGTERM` 把容器杀掉，正在接收第 200 个 token 的用户会突然看到“网络连接中断”。
+
+更麻烦的是 **Continuous Batching** 带来的“长尾粘性”：只要这台即将下线的副本里还有 1 条请求没生成完，它就不能关机；可只要这台副本还在负载均衡池里，源源不断的新请求又会打进来，导致它永远空不下来。
+
+生产上必须走标准的**四步优雅下线（Graceful Drain）**：
+
+<Figure title="图 120-2　推理副本缩容的优雅下线（Graceful Drain）四步状态机" caption="缩容控制器先通过就绪探针将副本从负载均衡摘除（不再接新请求），同时等待存量流式请求自然结束或达到宽限上限，最后才释放 GPU 资源。">
+  <svg class="ai-tl-svg" viewBox="0 0 640 105" style="width:100%;height:auto;display:block;">
+    <g class="ai-sa-b"><rect x="10" y="24" width="135" height="54" rx="6"/><text x="77" y="45" text-anchor="middle" font-weight="600">1. 标记下线</text><text x="77" y="63" text-anchor="middle" font-size="9.5">/ready 返回 503</text></g>
+    <g class="ai-sa-b sw"><rect x="170" y="24" width="140" height="54" rx="6"/><text x="240" y="45" text-anchor="middle" font-weight="600">2. 网关摘流</text><text x="240" y="63" text-anchor="middle" font-size="9.5">停发新请求 · 保留旧流</text></g>
+    <g class="ai-sa-b gpu"><rect x="335" y="24" width="140" height="54" rx="6"/><text x="405" y="45" text-anchor="middle" font-weight="600">3. 排空存量</text><text x="405" y="63" text-anchor="middle" font-size="9.5">running=0 或达 60s 上限</text></g>
+    <g class="ai-sa-b"><rect x="500" y="24" width="130" height="54" rx="6"/><text x="565" y="45" text-anchor="middle" font-weight="600">4. 销毁回收</text><text x="565" y="63" text-anchor="middle" font-size="9.5">释放显存 · 归还节点</text></g>
+    <line x1="145" y1="51" x2="170" y2="51" class="ai-sa-ln"/>
+    <line x1="310" y1="51" x2="335" y2="51" class="ai-sa-ln"/>
+    <line x1="475" y1="51" x2="500" y2="51" class="ai-sa-ln"/>
+  </svg>
+</Figure>
+
+1. **摘除就绪状态**：引擎收到缩容信号（`SIGTERM` 或下线 API）后，立刻把 `/health` 或 `/ready` 探针改成 `503`，但**不关闭**正在跑的推理循环。
+2. **网关停止派发新请求**：网关感知到探针失败（或 Kubernetes Endpoints 移除该 Pod IP）后，不再把新请求路由到这台机器，但已经建立的 SSE 长连接保持畅通。
+3. **等待存量请求自然结束**：引擎继续跑 Continuous Batching 直到 `num_requests_running == 0`。为了防止极少数超长请求死活不结束，Pod 的 `terminationGracePeriodSeconds` 要设成略大于单请求最大时长（例如 120–180 秒）。
+4. **冷却窗口（Scale-down Stabilization）**：扩缩容最忌讳“刚缩下去，5 分钟后又来一个小波峰再冷启动”。缩容通常要配置 **5–10 分钟的冷却稳定期**（确认过去 10 分钟内水位一直低于 30% 才缩容），让扩容敏捷、缩容克制。
+
+<Note kind="point">弹性伸缩的黄金法则是“快扩慢缩”：扩容看队列长度与 70% KV 水位（秒级触发，必要时配热备池或定时预扩），缩容加 5–10 分钟冷却窗口并走四步优雅下线，绝不在流式生成中途强杀进程。</Note>
+
+## 真实系统怎么做
+
+在 Kubernetes 上部署 **vLLM** 或 **SGLang** 时，主流做法是用 **KEDA（Kubernetes Event-driven Autoscaling）** 替代原生的 CPU HPA：KEDA 每 5–15 秒直接向 Prometheus 查询 `avg(vllm:num_requests_waiting)` 和 `avg(vllm:gpu_cache_usage_perc)`，把这两个指标折算成目标副本数；缩容时通过 `preStop` 钩子和足够长的 `terminationGracePeriodSeconds`（如 180 s）配合网关的零停机摘流，确保所有进行中的 SSE 流式连接完整收尾。
+
+## 用代码复现
+
+下面的代码仿真第 120 讲模拟器的核心结论：基线 10 QPS、单副本能力 15 QPS，第 20 s 突增到 30 QPS（3 倍突发），对比“GPU 利用率触发（额外滞后 26 s）”、“队列/KV 水位触发”和“水位触发 + 1 台 10 s 接管的热备池”在 60 s 冷启动下的最大积压、最坏 TTFT 和 SLO 违约时长。
+
+```python
+def sim_autoscale(policy, peak_qps=30, cold_s=60):
+    cap, base_qps, need_reps = 15, 10, 3
+    dt, reps, backlog = 2, 1, 0.0
+    trigger_at = ready_at = warm_ready_at = -1
+    max_backlog = max_ttft = slo_violate_s = 0.0
+
+    for t in range(0, 242, dt):
+        qps = peak_qps if t >= 20 else base_qps
+        if policy == "warm" and trigger_at < 0 and t >= 20 and backlog > 3:
+            trigger_at, warm_ready_at, ready_at = t, t + 10, t + cold_s
+        elif policy == "queue" and trigger_at < 0 and t >= 20 and backlog > 3:
+            trigger_at, ready_at = t, t + cold_s
+        elif policy == "gpu" and trigger_at < 0 and t >= 46:
+            trigger_at, ready_at = t, t + cold_s
+
+        if 0 <= warm_ready_at <= t and reps < 2:
+            reps = 2
+        if 0 <= ready_at <= t:
+            reps = need_reps
+
+        serve = reps * cap
+        backlog = max(0.0, backlog + (qps - serve) * dt)
+        ttft_ms = 200.0 + (backlog / serve) * 1000.0
+        max_backlog = max(max_backlog, backlog)
+        max_ttft = max(max_ttft, ttft_ms)
+        if ttft_ms > 1000.0:
+            slo_violate_s += dt
+    return max_backlog, max_ttft / 1000.0, slo_violate_s
+
+print("策略                     | 峰值积压 | 最坏 TTFT | TTFT>1s 违约时长")
+for label, pol in [("GPU 利用率 (>85%, 滞后)", "gpu"), ("队列+KV 水位 (>70%)", "queue"), ("水位 + 1台热备池 (10s)", "warm")]:
+    mb, mt, sv = sim_autoscale(pol)
+    print(f"{label:24s} | {mb:5.0f} 个 | {mt:7.2f} s | {sv:6.0f} s")
+```
+
+输出：
+
+```text
+策略                     | 峰值积压 | 最坏 TTFT | TTFT>1s 违约时长
+GPU 利用率 (>85%, 滞后)       |  1290 个 |   86.20 s |    168 s
+队列+KV 水位 (>70%)          |   930 个 |   62.20 s |    120 s
+水位 + 1台热备池 (10s)         |   180 个 |   12.20 s |     70 s
+```
+
+## 容易混淆的地方
+
+1. **缩短 HPA 采集间隔不等于没有冷启动延迟。** 把 Prometheus 抓取间隔从 30 s 改成 5 s 能帮你早 25 秒发现问题，但后面的 60 s 拉起容器和加载权重依然绕不过去；真正陡峭的突发流量必须靠“70% KV 水位提前量 + 热备池/定时预扩”来扛。
+2. **缩容把有前缀缓存的副本杀掉，会短暂拉低全集群命中率。** 如果用了第 114 讲的缓存感知路由，缩容时优先淘汰**前缀缓存命中率最低、或最近最少被路由**的副本，能减少对剩余副本的 prefill 冲击。
+
+## 回顾
+
+大模型推理的弹性伸缩不能依赖失真的 GPU 利用率，而要盯紧 `num_requests_waiting` 和 70% KV 水位；在冷启动较长、波峰陡峭时，用少量的热备池或定时预扩先顶住前几十秒的缺口；缩容则通过冷却窗口避免抖动，并严格执行“摘探针 → 网关摘流 → 等存量流式结束 → 释放资源”的优雅下线流程。
+
+流量波动靠弹性伸缩解决了。可如果是某张 GPU 突然掉卡、或者我们要把模型从旧版本升级到新版本，怎么保证线上正在对话的用户无感切换、不丢数据、不发错版本？下一讲：**故障恢复与灰度发布**。

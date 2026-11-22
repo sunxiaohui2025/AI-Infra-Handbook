@@ -1,0 +1,147 @@
+---
+id: 117
+slug: serving-streaming
+title: 服务化与流式输出
+chapter: 4
+part: 15
+problem: 推理引擎怎么变成高可用的线上 API 服务
+prereqs: [70, 81, 116]
+level: 主线
+demos: [StreamingSim]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import StreamingSim from '../../components/StreamingSim.astro';
+import Figure from '../../components/Figure.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[70, 81, 116]} />
+
+第 116 讲我们算清了一个推理集群在稳态下需要多少张卡。但一台跑着推理引擎的机器，离真正能接线上流量的“服务”还差很远。
+
+想象一个最直观的问题：你在本地跑脚本时，等模型把 400 个 token 全部生成完再一次性 `print` 出来，如果每个 token 要 30 ms，加上 200 ms 的 prefill，一共要等 **12.2 秒**。在网页或手机上让用户对着空白屏幕干等 12 秒，绝大多数人会在第 4 秒就关掉页面。更麻烦的是，用户真的点下“停止生成”或直接关掉标签页时，如果推理引擎不知道连接已经断了，它还会傻傻地把剩下的 300 多个 token 算完，白白占着宝贵的 KV Cache 槽位。
+
+这一讲把推理引擎外面这一层“服务化”壳子拆开：一个请求怎么穿过 API 网关、通过服务端推送事件（Server-Sent Events，SSE）一个字一个字地流回来，背压（backpressure）和限流怎么保护引擎不被冲垮，以及客户端断开时取消信号怎么一路传到调度器。
+
+## 从引擎进程到线上 API：多出来的那一跳
+
+在第 81 讲里，我们看过请求在推理引擎内部经过的 10 个阶段：分词、调度、KV 分配、前向、采样、反分词。在生产环境里，用户不会直接连上 GPU 进程，前面通常还隔着两层：
+
+1. **反向代理 / API 网关**（如 Envoy、Nginx 或自研网关）：负责 TLS 加密终止、鉴权（API Key 校验）、限流（Rate Limiting）和把请求路由到健康的推理副本。
+2. **异步 HTTP 服务层**（如 vLLM 里跑在 `uvicorn` + `FastAPI` 上的 `OpenAIServingChat`）：负责把 JSON 请求解析成内部数据结构，调用分词器，把请求塞进引擎的异步队列，再把引擎吐出来的 token 打包成 SSE 帧写回 socket。
+
+<Figure title="图 117-1　线上推理服务的请求与取消路径" caption="请求经过网关鉴权与限流后进入异步 HTTP 层，由推理引擎循环吐出 token；若客户端中途断开，TCP FIN/RST 必须一路穿透异步事件循环并触发引擎 abort，才能立刻释放 KV 块。">
+  <svg class="ai-tl-svg" viewBox="0 0 640 135" style="width:100%;height:auto;display:block;">
+    <g class="ai-sa-b"><rect x="12" y="26" width="95" height="46" rx="6"/><text x="59" y="46" text-anchor="middle">客户端</text><text x="59" y="61" text-anchor="middle" font-size="9.5">浏览器 / App</text></g>
+    <g class="ai-sa-b sw"><rect x="145" y="26" width="120" height="46" rx="6"/><text x="205" y="46" text-anchor="middle">API 网关</text><text x="205" y="61" text-anchor="middle" font-size="9.5">鉴权 · 限流 · 路由</text></g>
+    <g class="ai-sa-b"><rect x="305" y="26" width="135" height="46" rx="6"/><text x="372" y="46" text-anchor="middle">异步 HTTP 层</text><text x="372" y="61" text-anchor="middle" font-size="9.5">FastAPI · SSE 封装</text></g>
+    <g class="ai-sa-b gpu"><rect x="480" y="26" width="145" height="46" rx="6"/><text x="552" y="46" text-anchor="middle">推理引擎循环</text><text x="552" y="61" text-anchor="middle" font-size="9.5">调度 · KV 池 · GPU</text></g>
+    <line x1="107" y1="42" x2="145" y2="42" class="ai-sa-ln"/>
+    <line x1="265" y1="42" x2="305" y2="42" class="ai-sa-ln"/>
+    <line x1="440" y1="42" x2="480" y2="42" class="ai-sa-ln"/>
+    <line x1="480" y1="58" x2="107" y2="58" class="ai-sa-ln nv"/>
+    <text x="295" y="18" text-anchor="middle" class="ai-sa-tx">SSE 流式帧（data: delta.content）</text>
+    <path d="M 59 72 L 59 108 L 552 108 L 552 72" fill="none" stroke="var(--key)" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="305" y="124" text-anchor="middle" class="ai-sa-tx" fill="var(--key)">客户端断开（TCP FIN）→ 网关取消上游 → 引擎 abort(request_id) 释放 KV 块</text>
+  </svg>
+</Figure>
+
+看到这里你可能会想：FastAPI 和推理循环如果跑在同一个 Python 进程里，Python 不是有全局解释器锁（GIL）吗，HTTP 处理和分词会不会把 GPU 调度卡住？答案是**会的**。当并发上来后，哪怕每次 JSON 序列化和正则分词只花 1 ms，100 个并发请求就能把主线程的 CPU 占满，导致 GPU 在两步 decode 之间干等。所以主流引擎（vLLM V1、SGLang）都会把**独立进程**作为默认模式：HTTP 服务与分词在一个进程里跑，GPU 调度与前向循环在另一个独立进程里跑，两者之间用 ZeroMQ 或共享内存传控制消息和生成的 token ID。
+
+## SSE 流式输出：为什么不用普通 HTTP，也不用 WebSocket
+
+大模型返回的是“一条长长的文本，每隔几十毫秒多出几个字”。在 Web 协议里，有三种常见做法：
+
+1. **普通一次性 HTTP**：等整段生成完再返回。首字等待时间（TTFT）直接退化成“prefill + 全部 decode”，完全不可用。
+2. **WebSocket**：全双工长连接，客户端和服务端都能随时发消息。但它需要专门的握手升级、心跳保活，很多七层负载均衡器和企业防火墙对长时 WebSocket 的支持不如标准 HTTP 稳定；而且在“一问一答”的对话接口里，客户端发完 prompt 后根本不需要再往同一个连接里写数据。
+3. **SSE（Server-Sent Events）**：本质上就是一个普通的 HTTP/1.1 或 HTTP/2 POST 响应，只是响应头里加上 `Content-Type: text/event-stream` 和 `Transfer-Encoding: chunked`，服务端每生成一点内容就往 TCP 连接里 `flush` 一段以 `data: ` 开头、`\n\n` 结尾的文本，最后发一行 `data: [DONE]\n\n` 结束。
+
+SSE 既能穿过所有标准 HTTP 基础设施，又让首字可见时间从 12.2 秒降回 **230 ms**（200 ms prefill + 30 ms 首步 decode）。
+
+### 流式输出里的一个反直觉账：协议开销比正文还大
+
+把每个 token 单独包装成一帧 OpenAI 兼容格式的 SSE JSON，长这样：
+
+```text
+data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1700000000,"model":"llama-3-8b","choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}
+
+```
+
+数一下字符数：这一整行加上末尾两个换行符，大约 **180 字节**；而里面真正承载信息的 `"你"`（或英文一个单词片段），平均只有约 **4 字节**（UTF-8 中文 3 字节，英文词片段 4–5 字节）。也就是说，**逐 token 发送时，98% 的网络流量和 JSON 序列化 CPU 时间都花在了协议壳子上**，真正有用的文本只占 2%。
+
+如果在吞吐很高、或者客户端网络较慢的场景下，把每 **4 个或 8 个 token 合并成一帧 SSE** 发送，会发生什么？帧数和 JSON 序列化次数直接降为 **1/4 或 1/8**，协议开销从 72 KB 降到 18 KB 或 9 KB；代价仅仅是首字以及相邻两帧的间隔从 30 ms 变成 120 ms（每秒 8 帧，仍然接近人眼平滑滚动的节奏）。当然，如果业务强要求“第一个 token 一出来就立刻推给用户”，引擎可以把**第一帧设为 1 个 token，后续帧按 2–4 个 token 或每 50 ms 合包一次**，兼顾 TTFT 和网关 CPU。
+
+下面的模拟器可以直观调节 TPOT、输出长度、SSE 合包数和断连取消策略，看到首字时间、协议开销和空跑浪费的变化。
+
+<StreamingSim caption="图 117-2　SSE 流式输出与断连取消模拟器。试着把合包数从 1 调到 4，看帧数与协议开销占比的变化；再切换“断开策略”，看网关未取消时 GPU 白白空跑的步数。" />
+
+## 背压、断连与取消传播
+
+流式连接把“生产端”（GPU）和“消费端”（客户端）直接连在了一起，如果消费端出问题，生产端也会被拖累。
+
+**第一种情况是慢客户端（背压）。** 假设用户用极慢的 2G 手机网络，或者下游批处理脚本读完一帧后自己卡住去做数据库写入，TCP 接收窗口很快被填满，服务端的内核发送缓冲区也跟着满，`socket.write()` 开始阻塞。如果异步 HTTP 层的写入队列没有上限，积压的 JSON 字符串就会把网关或 HTTP 进程的内存撑爆；如果 HTTP 层直接把引擎吐 token 的异步生成器挂起等待，甚至会把整个引擎调度循环卡死。正确的做法是：**引擎到 HTTP 层的内存队列设一个有界容量**（比如每请求最多缓冲 64 个未发送的 token），超过这个阈值说明客户端已经不可救药地卡死，直接超时断开并向引擎发送取消指令。
+
+**第二种情况是客户端主动断开。** 用户点下“停止生成”后，浏览器关闭 TCP 连接（发送 FIN 包）。很多团队刚上线大模型服务时都会踩一个坑：**网关（如 Nginx）默认不会在客户端断开时立刻掐断上游连接，或者 FastAPI 路由函数里没有监听 `request.is_disconnected()`**。结果就是：客户端早就在第 80 个 token 时关掉了网页，但推理引擎毫不知情，继续把剩下 320 个 token 算完。按 30 ms/token 算，这一条幽灵请求不仅白占了 **9.6 秒**的槽位，还锁住了几百 MB 的 KV Cache 显存，让后面排队的新请求白白等超时。
+
+<Note kind="point">生产环境必须打通全链路取消：API 网关开启客户端断连检测（例如 Envoy 的 stream_idle_timeout 与下游 RST 透传），异步 HTTP 层在每次写 SSE 帧或定时检查连接状态时捕获断开异常，并在 `finally` 块里向引擎发出 `abort(request_id)`，让调度器在下一个 step 立刻回收该请求的 KV 块。</Note>
+
+## 超时与两级限流
+
+普通 Web 接口只需要一个总超时（比如 5 秒），但大模型流式接口的生成时间取决于输出长度，写 100 字只要 3 秒，写 2000 字要 60 秒，没法用一个固定的总超时一刀切。生产上必须把超时拆成三段：
+
+- **排队与首字超时（TTFT Timeout）**：比如 5 秒或 10 秒。如果请求进队 10 秒还没吐出第一个 token，说明集群过载，立刻返回 `503 Service Unavailable` 或快速失败，防止雪崩。
+- **帧间空闲超时（Chunk Idle Timeout）**：比如 15 秒。只要还在稳定吐 token，整个连接就可以活 5 分钟；但如果连续 15 秒没有新 token 出来，说明引擎卡死或死锁，立刻切断。
+- **最大生成长度与总时长兜底**：比如 `max_tokens` 上限和 300 秒总超时，防止恶意或死循环复读把槽位永久占死。
+
+限流也要做两级，因为**“每秒多少个请求（QPS）”并不能代表真实负载**。一个 100 token 的请求和一个 32,000 token 的请求，占用的计算量和 KV 显存差几百倍。所以第一级在网关按 **QPS / 并发连接数** 做粗保护，防止恶意刷接口；第二级在网关或调度层按 **Token 速率（TPM，每分钟 token 数）和最大输入长度** 做配额控制，同时在引擎侧保留基于排队长度与 KV 水位的 **准入控制（Admission Control）**——当 KV 池占用超过 95% 且等待队列超过阈值时，宁可直接拒绝新请求返回 `429 Too Many Requests`，也不要把所有正在跑的请求一起拖入抢占和重算的泥潭。
+
+## 真实系统怎么做
+
+在 **vLLM** 的 OpenAI 兼容服务器（`vllm/entrypoints/openai/api_server.py` 与 `serving_chat.py`）中，HTTP 服务运行在独立进程，通过 `AsyncLLM` 客户端经由 ZeroMQ 与后端 `EngineCore` 进程通信。客户端断开连接时，Starlette/FastAPI 的 `Response` 流生成器退出并触发 `finally` 清理，向 `EngineCore` 发送 `ABORT` 控制帧，引擎在下一轮 `schedule()` 之前把该请求从 `running` 或 `waiting` 队列中移除并归还物理 KV 块。同时，vLLM 提供了 `--stream-interval` 参数（默认每步 1 个 token，可调大为每 N 步推一帧）来控制 SSE 合包频率，在高吞吐场景下大幅降低 Python 序列化和网络中断的 CPU 开销。
+
+## 用代码复现
+
+下面的代码算出正文里所有流式与取消的数字：非流式与流式首字时间的差距、逐 token 发送与每 4 / 8 个 token 合包时的 SSE 帧数与协议开销占比，以及客户端在 20% 处断开但未传播取消时浪费的 GPU 步数和槽位时间。
+
+```python
+def stream_stats(tpot_ms=30, prefill_ms=200, out_tokens=400, chunk_size=1, wrap_bytes=180, tok_bytes=4):
+    non_stream_ms = prefill_ms + out_tokens * tpot_ms
+    stream_first_ms = prefill_ms + chunk_size * tpot_ms
+    frames = (out_tokens + chunk_size - 1) // chunk_size
+    payload = out_tokens * tok_bytes
+    overhead = frames * wrap_bytes
+    ratio = overhead / (payload + overhead) * 100
+    return non_stream_ms, stream_first_ms, frames, payload, overhead, ratio
+
+print("合包大小 | 非流式首字 | 流式首字 | SSE 帧数 | 净文本 | 协议开销 | 开销占比")
+for k in (1, 4, 8):
+    ns, sf, fr, pay, ov, rat = stream_stats(chunk_size=k)
+    print(f"{k:4d}     | {ns/1000:6.2f} s   | {sf:5d} ms | {fr:4d} 帧  | {pay:4d} B | {ov:6d} B | {rat:5.1f}%")
+
+cancel_at = int(400 * 0.2)
+wasted_steps = 400 - cancel_at
+print(f"\n第 {cancel_at} 步断开且未传播取消：GPU 空跑浪费 {wasted_steps} 步（{wasted_steps * 30 / 1000:.2f} s 槽位时间）")
+```
+
+输出：
+
+```text
+合包大小 | 非流式首字 | 流式首字 | SSE 帧数 | 净文本 | 协议开销 | 开销占比
+   1     |  12.20 s   |   230 ms |  400 帧  | 1600 B |  72000 B |  97.8%
+   4     |  12.20 s   |   320 ms |  100 帧  | 1600 B |  18000 B |  91.8%
+   8     |  12.20 s   |   440 ms |   50 帧  | 1600 B |   9000 B |  84.9%
+
+第 80 步断开且未传播取消：GPU 空跑浪费 320 步（9.60 s 槽位时间）
+```
+
+## 容易混淆的地方
+
+1. **流式输出并没有让总生成变快。** 最后一个 token 吐出来的总时间依然是 prefill + 全部 decode，甚至因为多次网络封包略微多几毫秒；流式改变的是用户的**首字等待时间（TTFT）**和交互感知。
+2. **Nginx 反向代理默认会缓冲响应。** 如果不在网关配置 `proxy_buffering off`（或返回头里带 `X-Accel-Buffering: no`），网关会把 SSE 帧攒够几 KB 才往外发，流式瞬间退化成“一坨一坨卡顿输出”。
+3. **只按 QPS 限流护不住推理引擎。** 5 个 32K 上下文的请求就能打满整张卡的 KV 池，而 50 个短请求却轻松通过；限流必须同时看 Token 速率与 KV 池水位。
+
+## 回顾
+
+把推理引擎变成线上服务，需要在前面加上网关（TLS、鉴权、按 QPS 与 TPM 两级限流）和独立的异步 HTTP 进程，并用 SSE 分块推送把用户的首字等待从十几秒压到几百毫秒。逐 token 推 SSE 时协议外壳占到流量的九成以上，适度合包（如首帧 1 token、后续每 4 token）能显著降低网关 CPU；同时必须打通 TCP 断连到引擎 `abort` 的全链路取消，并配置首字、帧间与总长三段超时。
+
+到这里，一个在线实例已经能稳定接流量了。但线上集群不可能永远不重启、不扩容——当一个新副本拉起时，几十 GB 的模型权重怎么从存储加载到显存里、为什么冷启动动辄一两分钟？下一讲：**模型加载与冷启动**。

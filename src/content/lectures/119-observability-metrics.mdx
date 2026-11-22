@@ -1,0 +1,143 @@
+---
+id: 119
+slug: observability-metrics
+title: 监控指标与可观测性
+chapter: 4
+part: 15
+problem: 线上服务出问题时看哪些指标、怎么定位
+prereqs: [70, 75, 78, 82, 117]
+level: 主线
+demos: []
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import Figure from '../../components/Figure.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[70, 75, 78, 82, 117]} />
+
+线上告警响了，用户反馈“模型回复突然变得特别慢”。你打开传统服务器监控面板一看：CPU 利用率只有 25%，内存很宽裕，HTTP 状态码全是 `200 OK`，甚至连 GPU 利用率也显示“一切正常（95%）”。可 P99 首字延迟（TTFT）已经从 0.4 秒飙到了 8 秒。
+
+为什么传统微服务监控在大模型推理面前会“失明”？因为传统服务的延迟是毫秒级、请求之间彼此独立；而推理服务是有状态的（KV Cache 常驻显存）、流式长连接的（HTTP 状态码早在 200 ms 时就返回了 `200`，后面的卡顿根本不会体现在 HTTP 状态码里）、且 GPU 的“忙”分不出是在算有效 token 还是在频繁抢占重算。这一讲建立一套针对大模型推理的可观测性指标体系：从请求的生命周期出发，把指标分成四层，并给出每类指标的采集方式和排障路径。
+
+## 监控指标的四层地图
+
+把指标按“问题出在哪里”分成四层，顺着请求流经的路径排开：
+
+<Figure title="图 119-1　大模型推理服务的四层监控指标与定位链路" caption="当用户感知到变慢时，先看业务延迟层确认是 TTFT 还是 TPOT 恶化，再分别去引擎调度层（排队/KV 抢占）或硬件通信层（带宽/温度/降频）找根因。">
+  <svg class="ai-tl-svg" viewBox="0 0 640 165" style="width:100%;height:auto;display:block;">
+    <g class="ai-sa-b"><rect x="12" y="16" width="142" height="125" rx="6"/><text x="83" y="36" text-anchor="middle" font-weight="600">1. 业务与 SLO 层</text><text x="83" y="58" text-anchor="middle" font-size="9.5">TTFT P50 / P99</text><text x="83" y="76" text-anchor="middle" font-size="9.5">TPOT / ITL P99</text><text x="83" y="94" text-anchor="middle" font-size="9.5">E2E 延迟 · Goodput</text><text x="83" y="112" text-anchor="middle" font-size="9.5">输入/输出 Token/s</text><text x="83" y="130" text-anchor="middle" font-size="9.5">客户端中断率</text></g>
+    <g class="ai-sa-b sw"><rect x="170" y="16" width="145" height="125" rx="6"/><text x="242" y="36" text-anchor="middle" font-weight="600">2. 引擎与调度层</text><text x="242" y="58" text-anchor="middle" font-size="9.5">waiting / running 队列</text><text x="242" y="76" text-anchor="middle" font-size="9.5">队列等待时间</text><text x="242" y="94" text-anchor="middle" font-size="9.5">KV Cache 使用率 %</text><text x="242" y="112" text-anchor="middle" font-size="9.5">抢占次数 preemptions</text><text x="242" y="130" text-anchor="middle" font-size="9.5">Prefix Cache 命中率</text></g>
+    <g class="ai-sa-b gpu"><rect x="331" y="16" width="145" height="125" rx="6"/><text x="403" y="36" text-anchor="middle" font-weight="600">3. 硬件与通信层</text><text x="403" y="58" text-anchor="middle" font-size="9.5">显存占用 · HBM 带宽</text><text x="403" y="76" text-anchor="middle" font-size="9.5">Tensor Core 活跃度</text><text x="403" y="94" text-anchor="middle" font-size="9.5">NVLink / RDMA 吞吐</text><text x="403" y="112" text-anchor="middle" font-size="9.5">GPU 功耗 · 温度 · 降频</text><text x="403" y="130" text-anchor="middle" font-size="9.5">ECC 内存错误计数</text></g>
+    <g class="ai-sa-b"><rect x="492" y="16" width="136" height="125" rx="6"/><text x="560" y="36" text-anchor="middle" font-weight="600">4. 采集与追踪</text><text x="560" y="58" text-anchor="middle" font-size="9.5">/metrics (Prometheus)</text><text x="560" y="76" text-anchor="middle" font-size="9.5">DCGM Exporter</text><text x="560" y="94" text-anchor="middle" font-size="9.5">OpenTelemetry Trace</text><text x="560" y="112" text-anchor="middle" font-size="9.5">结构化慢请求日志</text><text x="560" y="130" text-anchor="middle" font-size="9.5">按分位数聚合桶</text></g>
+    <line x1="154" y1="78" x2="170" y2="78" class="ai-sa-ln"/>
+    <line x1="315" y1="78" x2="331" y2="78" class="ai-sa-ln"/>
+    <line x1="476" y1="78" x2="492" y2="78" class="ai-sa-ln"/>
+  </svg>
+</Figure>
+
+### 第一层：业务与 SLO 指标
+
+这一层直接对应用户体感，核心是三个延迟指标和两个吞吐指标：
+
+- **TTFT（Time To First Token）**：从 HTTP 层收到请求到发出第一个有效 token 的耗时。注意要分别看 P50 和 P99：P50 反映常规 prefill 速度，P99 反映排队拥堵和超长 prompt 冲击。
+- **TPOT 与 ITL（Inter-Token Latency）**：TPOT 是整条请求的平均每 token 间隔，而 **ITL 是相邻两个 token 之间的真实间隔直方图**。为什么不能只看 TPOT？假设前 99 个 token 每步只要 20 ms，中间突然被一个 3 万 token 的长 prefill 插队卡住 1.5 秒，整条请求的 TPOT 才 35 ms，看着完全达标，但用户在屏幕上明显看到“卡死一秒半”。只有 **ITL 的 P99** 能抓出这种单步抖动（jitter）。
+- **Goodput（合格吞吐）**：第 82 讲和第 116 讲强调过，只有同时满足 TTFT 与 TPOT SLO 且完整结束（未超时、未报错）的请求，才算进有效吞吐。
+
+### 第二层：引擎与调度内部指标
+
+业务指标变差时，90% 的根因都在这一层。推理引擎通过 `/metrics` 接口暴露内部的调度状态：
+
+- **`num_requests_waiting` 与 `time_in_queue_seconds`**：如果 TTFT 飙升，先看排队时间。如果排队时间占了 TTFT 的 80%，说明实例算力/KV 槽位不够，需要限流或扩容；如果排队时间很短但 TTFT 依然很慢，问题出在单次 prefill 太长或前缀缓存（Prefix Cache）失效。
+- **`gpu_cache_usage_perc`（KV 块池占用率）与 `num_preemptions_total`（抢占次数）**：这是最关键的健康信号。当 KV 占用率长期顶在 95% 以上，引擎为了给正在生成的长请求腾出新的 KV 块，不得不把另一条请求换出或直接丢弃重算（第 78 讲）。**哪怕每次只发生 1% 的抢占，也会让大量已经算了一半的请求重新 prefill，拖垮整台机器的 ITL 和吞吐。**
+- **`prefix_cache_hit_rate`**：如果系统平时靠前缀缓存扛住了大量长 system prompt，突然命中率从 80% 掉到 5%（比如上游业务在 prompt 开头加了一个动态时间戳），prefill 计算量会瞬间暴涨十几倍，直接打穿 TTFT。
+
+### 第三层：硬件与通信层
+
+如果调度队列不长、KV 占用也才 50%，但计算本身变慢了，就要看由 **NVIDIA DCGM Exporter**（或其他厂商硬件监控插件）采出来的底层硬件指标：
+
+- **别再只看 `GPU Utilization`**：`nvidia-smi` 里的 GPU 利用率只统计“过去一秒内有任意 kernel 在跑的时间比例”，哪怕只有一个极小的算子在等 HBM 搬数据，它也会报 100%。真正有区分度的是 **Tensor Core 活跃度（`DCGM_FI_PROF_PIPE_TENSOR_ACTIVE`）** 和 **HBM 显存带宽利用率（`DCGM_FI_PROF_DRAM_ACTIVE`）**。
+- **硬件降频与 ECC 错**：如果某张卡因为机房散热问题触发过温降频（`thermal throttling`），或者出现未纠正的 ECC 显存错误，整组 TP/EP 的 All-Reduce 都要等这颗“最慢的卡”，表现为所有请求同时变慢。
+
+## 两个反直觉的监控陷阱
+
+**陷阱一：只看“平均值”，和把“短请求/长请求”混在同一个直方图里。** 假设线上 90% 的请求只有 200 个输入 token（TTFT 80 ms），10% 的长文档总结请求有 16,000 个输入 token（TTFT 2500 ms）。如果把所有请求的 TTFT 塞进同一个 Prometheus Histogram，P50 永远是 85 ms，看起来风平浪静；可只要长请求比例从 10% 涨到 12%，P90 就会瞬间跳到 2500 ms。生产上必须按输入长度分桶（例如 `<1K`、`1K–8K`、`>8K`）或者按路由池分开统计 SLO。
+
+**陷阱二：Histogram 的桶（Bucket）设错了，导致 P99 算出来全靠猜。** Prometheus 的直方图是通过有限个区间（比如 `[0.1, 0.5, 1.0, 5.0]` 秒）来估算分位数的。如果一个微服务框架沿用了默认的 `[0.005, 0.01, ..., 1.0]` 毫秒级桶，而推理请求动辄 15 秒，那么所有超过 1 秒的请求全落进 `+Inf` 桶里，算出来的 P99 永远是“1 秒”，完全失真。推理服务的 TTFT 和 E2E 延迟直方图必须显式配置覆盖 **10 ms 到 120 s** 的细粒度指数桶。
+
+## 真实系统怎么做：排障决策表
+
+在 **vLLM** 和 **SGLang** 中，引擎原生暴露了 Prometheus `/metrics` 端点（例如 `vllm:time_to_first_token_seconds`、`vllm:time_per_output_token_seconds`、`vllm:kv_cache_usage_perc`、`vllm:num_preemptions_total`），并支持通过 OpenTelemetry（`--otlp-traces-endpoint`）给单个请求打上全链路 Trace（记录网关等待、分词、队列等待、prefill、decode 各阶段时间戳）。遇到线上抖动时，可以按下面这张表三步定位：
+
+| 现象 | 先查哪个指标 | 常见根因 |
+| --- | --- | --- |
+| TTFT P99 飙升，TPOT 正常 | `time_in_queue_seconds`、`prefix_cache_hit_rate` | 队列积压（需扩容/限流），或 prompt 前缀变动导致缓存失效 |
+| ITL P99 出现秒级尖刺 | `num_preemptions_total`、单步 prefill 长度 | KV 池满触发抢占重算，或未开 Chunked Prefill 被长请求卡住 |
+| 所有副本 TPOT 整体变慢 | `DRAM_ACTIVE`、GPU 时钟频率、NCCL 耗时 | 并发 `b` 过高超出带宽墙、单卡过热降频、或跨机网卡拥塞 |
+
+<Note kind="point">可观测性的第一原则是“指标能直接指向动作”：看 TTFT 拆出排队 vs prefill，看 ITL 与抢占次数抓单步抖动，按请求长度分桶避免长短请求互相掩盖，并用 Prometheus 直方图 + OpenTelemetry 单请求 Trace 闭合排查链路。</Note>
+
+## 用代码复现
+
+下面的代码演示两件事：第一，为什么“平均 TPOT 达标”会掩盖“单步卡顿（ITL P99）”；第二，为什么把短请求和长请求混在一起统计、或者直方图桶设置过粗，会让 P99 监控完全失真。
+
+```python
+import bisect
+
+# 1. 演示 TPOT 均值掩盖 ITL 尖刺：100 个 decode 步，99 步是 20 ms，中间 1 步被长 prefill 卡住 1500 ms
+itl_steps = [20.0] * 99 + [1500.0]
+avg_tpot = sum(itl_steps) / len(itl_steps)
+itl_sorted = sorted(itl_steps)
+p99_itl = itl_sorted[int(0.99 * len(itl_sorted))]
+print(f"平均 TPOT = {avg_tpot:.1f} ms（看似达标），但 ITL P99 = {p99_itl:.1f} ms（用户明显卡顿）")
+
+# 2. 演示 Prometheus Histogram 桶边界对 P99 估算的影响
+def hist_quantile(samples, buckets, q=0.99):
+    counts = [0] * (len(buckets) + 1)
+    for x in samples:
+        idx = bisect.bisect_left(buckets, x)
+        counts[idx] += 1
+    target = q * len(samples)
+    cum = 0
+    for i, c in enumerate(counts):
+        prev_cum = cum
+        cum += c
+        if cum >= target:
+            if i == len(buckets):
+                return buckets[-1]  # 落入 +Inf 桶时，Prometheus 只能退回最后一个有限边界
+            lo = 0.0 if i == 0 else buckets[i - 1]
+            hi = buckets[i]
+            return lo + (hi - lo) * ((target - prev_cum) / c)
+    return buckets[-1]
+
+# 95% 短请求 (0.2s) + 5% 长请求 (4.5s)
+ttfts = [0.2] * 95 + [4.5] * 5
+true_p99 = sorted(ttfts)[int(0.99 * len(ttfts))]
+bad_buckets = [0.05, 0.1, 0.25, 0.5, 1.0]                 # 默认微服务桶上限只有 1.0s
+good_buckets = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0]
+
+print(f"真实 P99 TTFT = {true_p99:.2f} s")
+print(f"用默认微服务桶估算 P99 = {hist_quantile(ttfts, bad_buckets):.2f} s（全部溢出到 +Inf，严重低估）")
+print(f"用推理专用桶估算 P99   = {hist_quantile(ttfts, good_buckets):.2f} s（准确反映长尾）")
+```
+
+输出：
+
+```text
+平均 TPOT = 34.8 ms（看似达标），但 ITL P99 = 1500.0 ms（用户明显卡顿）
+真实 P99 TTFT = 4.50 s
+用默认微服务桶估算 P99 = 1.00 s（全部溢出到 +Inf，严重低估）
+用推理专用桶估算 P99   = 7.20 s（准确反映长尾）
+```
+
+## 容易混淆的地方
+
+1. **HTTP 200 不等于请求成功。** SSE 流式接口一旦吐出响应头就是 `200 OK`；如果模型生成到一半显存溢出或超时中断，错误只能通过流内错误事件和引擎指标体现，HTTP 状态码监控抓不到它。
+2. **GPU 利用率 100% 不代表算力跑满了。** 在内存带宽受限的 decode 阶段，SM 绝大多数时间都在等 HBM 搬权重和 KV，但 `nvidia-smi` 依然显示 100% 忙。
+3. **直方图分位数在跨多台机器聚合时不能直接“求平均”。** 算整个集群的 P99 时，必须在 PromQL 里用 `histogram_quantile(0.99, sum(rate(..._bucket[1m])) by (le))` 先把各副本的桶计数相加，再求分位数；把每个副本的 P99 直接取平均在数学上是错的。
+
+## 回顾
+
+推理服务的可观测性围绕请求生命周期分成三层指标和一套采集链路：业务层盯紧分段 TTFT、ITL 分位数和 Goodput；引擎层盯紧排队时间、KV Cache 水位、抢占次数和前缀缓存命中率；硬件层通过 DCGM 看 Tensor Core 活跃度、显存带宽与降频。同时要避开“用平均 TPOT 掩盖单步卡顿”和“直方图桶覆盖不到长尾”两个坑。
+
+有了准确的监控指标，当监控面板显示排队长度和 KV 水位正在快速攀升时，集群不能总靠人半夜爬起来手动加机器。怎么让系统自己判断什么时候扩容、什么时候缩容，又不会因为冷启动滞后把 SLO 打穿？下一讲：**弹性伸缩**。

@@ -1,0 +1,126 @@
+---
+id: 121
+slug: failover-canary
+title: 故障恢复与灰度发布
+chapter: 4
+part: 15
+problem: 线上节点挂了、发新版本时怎么做到无感切换
+prereqs: [114, 116, 117, 120]
+level: 主线
+demos: []
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import Figure from '../../components/Figure.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[114, 116, 117, 120]} />
+
+第 116 讲末尾我们提过一个很现实的问题：一个 8 卡 TP8 实例只要坏掉其中 1 张卡，整个实例上的几十条并发请求就会同时卡死。而在另一边，业务方每周都在催着上线新版本——换一个量化权重（从 BF16 换成 FP8）、升级一版推理引擎、或者改一下 system prompt。
+
+如果一台机器挂了，正在流式输出到一半的用户怎么续上？如果发新版本出了精度退化或者显存泄漏，怎么在只影响 1% 用户的代价下立刻发现并回滚？这一讲讲生产环境里的两道保险：**故障自动恢复（Failover）** 与 **灰度发布（Canary / Blue-Green）**。
+
+## 故障检测与隔离：为什么“进程还活着”不代表健康
+
+线上 GPU 节点出故障，最常见、最致命的往往不是进程直接崩溃（Crash），而是**静默挂死（Hang）**：比如某张卡的 NCCL 通信死锁、PCIe 掉卡（Xid 79 错误），或者某个 CUDA kernel 进入死循环。此时容器进程还在，端口也还通，如果健康检查只测“TCP 端口能不能连上”或者“`/health` 能不能返回 `200`”，网关就会继续把新请求源源不断地往这台“僵尸节点”上送。
+
+所以生产级推理服务的健康检查必须分两层：
+
+- **存活探针（Liveness）**：检查引擎主循环的心跳时间戳——如果调度器超过 10 秒没有推进过任何一步，或者工作进程已经退出，直接重启容器。
+- **就绪探针（Readiness）**：在发版启动阶段确认模型和 CUDA Graph 已加载完成；运行期间一旦触发被动摘除条件（如连续 3 次请求超时、NCCL 报错），立刻返回 `503` 把自己从网关摘除，避免继续吸新流量。
+- **被动熔断（Outlier Detection）**：网关（如 Envoy）本身也要盯着每个上游副本的响应：如果某个副本在 10 秒内连续出现 3 次帧间超时或 `5xx`，网关不等 K8s 探针结果，直接把它隔离出可用池 30 秒。
+
+<Figure title="图 121-1　故障隔离、流式断点续传与金丝雀灰度路由" caption="健康流量经由 API 网关按权重分发：95% 走稳定版（v1），5% 走金丝雀新版（v2），并可额外复制一份影子流量异步对比输出。当任一副本出现静默挂死或连续超时，网关熔断器立刻摘流，同时客户端或网关携带已收到的前缀重试健康副本。">
+  <svg class="ai-tl-svg" viewBox="0 0 640 165" style="width:100%;height:auto;display:block;">
+    <g class="ai-sa-b"><rect x="12" y="55" width="90" height="50" rx="6"/><text x="57" y="77" text-anchor="middle">客户端</text><text x="57" y="93" text-anchor="middle" font-size="9.5">记录已收 token</text></g>
+    <g class="ai-sa-b sw"><rect x="140" y="45" width="135" height="70" rx="6"/><text x="207" y="68" text-anchor="middle" font-weight="600">网关 / 熔断器</text><text x="207" y="85" text-anchor="middle" font-size="9.5">95% v1 · 5% v2</text><text x="207" y="101" text-anchor="middle" font-size="9.5">连续超时自动摘除</text></g>
+    <g class="ai-sa-b gpu"><rect x="330" y="14" width="140" height="44" rx="6"/><text x="400" y="34" text-anchor="middle">副本池 v1（95%）</text><text x="400" y="49" text-anchor="middle" font-size="9.5">健康 · 携带前缀续传</text></g>
+    <g class="ai-sa-b"><rect x="330" y="70" width="140" height="40" rx="6" style="opacity:0.45;"/><text x="400" y="89" text-anchor="middle">故障副本（已隔离）</text><text x="400" y="103" text-anchor="middle" font-size="9.5">Xid 掉卡 / 连续超时</text></g>
+    <g class="ai-sa-b sw"><rect x="330" y="120" width="140" height="36" rx="6"/><text x="400" y="137" text-anchor="middle">金丝雀 v2（5%）</text><text x="400" y="150" text-anchor="middle" font-size="9.5">监控 TTFT · 乱码率</text></g>
+    <g class="ai-sa-b"><rect x="505" y="120" width="122" height="36" rx="6"/><text x="566" y="137" text-anchor="middle">影子对比</text><text x="566" y="150" text-anchor="middle" font-size="9.5">异步评测 · 不返回用户</text></g>
+    <line x1="102" y1="80" x2="140" y2="80" class="ai-sa-ln"/>
+    <line x1="275" y1="68" x2="330" y2="36" class="ai-sa-ln nv"/>
+    <line x1="275" y1="82" x2="330" y2="90" class="ai-sa-ln" stroke-dasharray="3 3"/>
+    <line x1="275" y1="98" x2="330" y2="138" class="ai-sa-ln"/>
+    <line x1="470" y1="138" x2="505" y2="138" class="ai-sa-ln" stroke-dasharray="4 3"/>
+  </svg>
+</Figure>
+
+### 故障发生时：一个正在流式生成的请求怎么恢复？
+
+普通 API 请求失败了，网关直接重发一遍就行；但流式生成不能从头重来——用户屏幕上已经显示出前 150 个字，如果重头再生成一遍，屏幕上的文字会闪烁跳变、前后矛盾。
+
+第 116 讲提过恢复的核心原理：**只要把用户已经收到的输出拼回原始输入后面，在新副本上做一次 prefill，就能无缝接着往下生成。** 比如原始输入 1000 token，旧副本吐出 200 token 后突然挂掉；网关或客户端 SDK 把这 200 个已收到的 token 拼接到输入末尾（新输入变成 1200 token），发送给另一台健康的副本。新副本对这 1200 个 token 做一次计算受限的 prefill，几百毫秒内就恢复出完全一致的上下文状态，然后吐出第 201 个 token，用户几乎感觉不到中间换了一台机器。
+
+当然，如果这个请求连第一个 token 都还没吐出来（在 prefill 阶段挂了），那就更简单：因为还没有任何字节发给用户，网关可以直接安全地整包重试另一台副本。
+
+## 为什么“蓝绿发布”在大模型集群里常常做不起？
+
+在传统业务里，发新版本最稳妥的是**蓝绿发布**：线上跑着 100 台老版本（蓝），另外再起 100 台新版本（绿），验证通过后把流量一刀切过去，有问题立刻切回老版本。
+
+但在大模型推理集群里，100 台 8 卡 H100 节点意味着近千万美元的硬件，**线上根本不可能为了发一次版额外空置一倍的 GPU 池**。生产上实际用的是**滚动金丝雀（Canary）+ 影子流量（Shadow Traffic）**：
+
+1. **影子流量（Shadowing，0% 用户风险）**：在真正切任何真实用户流量之前，网关先复制 1% 的线上请求异步发给新版本副本，但**把新版本的返回丢弃，只把老版本的结果返回给用户**。后台离线对比新老版本的输出质量（如 JSON 格式合法率、乱码率、EOS 提前终止率）和 TTFT/TPOT，确认新量化权重或新引擎没有精度崩坏后，才进入下一步。
+2. **金丝雀放量（Canary，1% → 5% → 25% → 100%）**：先拿 1 台或 5% 的副本升到新版本。这里有一个非常关键的工程细节：**必须按用户会话（Session ID）或请求哈希做粘性路由，或者至少保证同一段多轮对话打到同一版本**。否则第一轮是 BF16 回答，第二轮切到 FP8 回答，不仅风格可能微变，还会因为跨版本 KV/系统提示差异导致前缀缓存彻底失效。
+3. **自动回滚红线**：金丝雀期间盯紧四条红线——TTFT P99 涨超 20%、ITL P99 涨超 20%、`finish_reason == "length"`（意外死循环复读）比例突增、或显存占用异常爬升（内存/KV 块泄漏）。只要触发任意一条，网关立刻把权重降回 0%。
+
+### 一个反直觉的灰度风险：低流量下测不出问题
+
+很多团队按 1% 流量灰度了一整天，一切指标绿灯，于是放心地全量推到 100%——结果 10 分钟后全集群崩了。
+
+为什么？因为 **1% 的流量根本打不满新版本副本的并发批大小和 KV 块池**。假设新版本在升级引擎时引入了一个微妙的 **KV 块回收泄漏**（每 1000 个请求漏掉 1 个块），或者 **高并发下 CUDA Graph 分桶越界** 的 Bug。在 1% 灰度流量下，新副本每秒只接 0.3 个请求，KV 池永远只用 5%，跑三天也不会报错；一旦切到 100% 流量，并发冲上 80，半小时内 KV 池漏光，全集群同时触发抢占雪崩。
+
+所以金丝雀发布不仅要看“流量比例”，还要看**单副本的真实并发压力**：如果要用少量副本做灰度，必须通过**减少灰度副本数（例如只留 1 个副本接 5% 的全站流量，让这 1 个副本的 QPS 和正式副本持平）**，或者用压测工具先把灰度副本打到 80% KV 水位跑半小时，再全量放开。
+
+<Note kind="point">大模型灰度发布不能靠“双倍机器蓝绿硬抗”，也不能靠“低负载 1% 流量空转”：先用影子流量验证精度与格式，再用单副本满压的金丝雀验证高并发下的显存与尾延迟，同时在网关层配好基于超时率与复读率的自动回滚和流式前缀续传。</Note>
+
+## 真实系统怎么做
+
+在 **vLLM Production Stack** 与 **Envoy AI Gateway** 等开源生产架构中，健康检查通常将引擎内部的调度循环存活与 HTTP `/health` 解耦；网关层配置 `outlier_detection` 对连续 `5xx` 或流式超时节点做秒级隔离；对于有严格连续性要求的对话应用，客户端或 BFF（Backend for Frontend）层会缓存本次已收到的 `delta.content` 文本，在遭遇 `ERR_INCOMPLETE_CHUNKED_ENCODING` 断流时自动构造带 `assistant` 已生成前缀的续写请求发往备用副本，完成无感断点续传。
+
+## 用代码复现
+
+下面的代码算出两笔恢复与灰度账：第一，1000 输入 + 200 已输出 token 在断点续传时只需要补算一次 1200 token 的 prefill，耗时仅几百毫秒，远快于重新生成；第二，模拟“单副本 1% 流量 vs 单副本压满并发”在 KV 块泄漏 Bug 下的暴露时间差异。
+
+```python
+# 1. 流式断点续传的恢复耗时（Llama-3-8B, H100, 效率 60%）
+F, NE, N = 989e12, 525e6, 8.03e9
+eff = 0.6
+prefill_ms_per_tok = 2 * (N - NE) / F / eff * 1000
+tpot_ms = 25.0
+
+inp, generated_so_far, total_out = 1000, 200, 400
+resume_prefill_ms = (inp + generated_so_far) * prefill_ms_per_tok
+restart_total_ms = inp * prefill_ms_per_tok + generated_so_far * tpot_ms
+print(f"断点续传补算 {inp + generated_so_far} token prefill 仅需 {resume_prefill_ms:.1f} ms")
+print(f"若从头重新生成前 {generated_so_far} 个 token 则需 {restart_total_ms:.1f} ms（慢 {restart_total_ms/resume_prefill_ms:.1f} 倍且内容可能跳变）")
+
+# 2. KV 块泄漏 Bug 在不同灰度压力下的暴露时间
+# 假设 H100 上 KV 池共 10,000 块，每 50 个请求泄漏 1 块，到达率决定多久漏到 95% 告警线
+total_blocks = 10000
+leak_per_req = 1 / 50
+warn_blocks = total_blocks * 0.30  # 假设正常并发占 65%，再漏 30% 就触及 95% 抢占线
+for name, qps in [("1% 低负载灰度（0.3 QPS）", 0.3), ("单副本压满（15 QPS）", 15.0)]:
+    hours = (warn_blocks / leak_per_req) / qps / 3600
+    print(f"{name}：漏光安全余量需要 {hours:.1f} 小时")
+```
+
+输出：
+
+```text
+断点续传补算 1200 token prefill 仅需 30.4 ms
+若从头重新生成前 200 个 token 则需 5025.3 ms（慢 165.6 倍且内容可能跳变）
+1% 低负载灰度（0.3 QPS）：漏光安全余量需要 138.9 小时
+单副本压满（15 QPS）：漏光安全余量需要 2.8 小时
+```
+
+## 容易混淆的地方
+
+1. **影子流量（Shadow）不能直接发现“高并发下的显存问题”，除非你用它把灰度副本打满。** 1% 的影子流量只适合测**单请求逻辑、输出格式和模型精度**；测并发稳定性和 KV 回收，必须让少量灰度副本吃满真实请求率。
+2. **断点续传在温度大于 0 时，后续词不可能和没断一模一样，但语义完全连贯。** 因为前 200 个 token 已经固定作为新前缀传回去了，用户屏幕上的前半段文字不会闪烁或重写，新续写的第 201 个 token 会严丝合缝地接在后面。
+
+## 回顾
+
+生产环境里的故障恢复靠三层防线：进程内部心跳探针抓静默挂死、网关熔断器秒级摘除连续超时节点、以及携带已生成前缀补算 prefill 的流式断点续传。发版灰度则用“影子流量验精度 + 少副本满压金丝雀验高并发 + 四条红线自动回滚”，既不需要双倍机器的蓝绿成本，也不会被低负载假绿灯骗过。
+
+至此，服务化、冷启动、监控、弹性伸缩和故障灰度全部打通了。最后回到老板和架构师最关心的问题：在 H100、H20、A100 和外部按 token 计费的商业 API 之间，真实生产环境到底该怎么算总账、怎么选型？下一讲：**成本账与硬件选型**。

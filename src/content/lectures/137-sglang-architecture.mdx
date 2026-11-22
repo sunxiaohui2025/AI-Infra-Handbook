@@ -1,0 +1,143 @@
+---
+id: 137
+slug: sglang-architecture
+title: SGLang 的架构
+chapter: 5
+part: 18
+problem: RadixAttention、零开销调度、约束解码
+prereqs: [76, 80, 89, 128, 135]
+level: 主线
+demos: [EngineProcs, RadixTree, OverlapLoop, CodeWalk]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineProcs from '../../components/EngineProcs.astro';
+import RadixTree from '../../components/RadixTree.astro';
+import OverlapLoop from '../../components/OverlapLoop.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[76, 80, 89, 128, 135]} />
+
+SGLang 和 vLLM 是今天用得最多的两个开源推理引擎。它最初来自一篇论文（Zheng 等，*SGLang: Efficient Execution of Structured Language Model Programs*），要解决的问题是：一个 LLM 应用往往不是一次调用，而是一串调用（多轮对话、思维链、先生成再检查、按 JSON 格式输出），这些调用之间共享大量的前缀，输出还要满足格式约束。论文提出了两样东西：**RadixAttention**（用一棵基数树做前缀缓存，自动复用任意请求之间的公共前缀）和**压缩的有限状态机**（加速约束解码）。后来的版本又加上了**零开销调度**（CPU 调度和 GPU 计算重叠）。
+
+这一讲读这三样，以及 SGLang 的整体结构。读的是 2026 年 11 月 9 日 main 分支的提交 `48da6bd`（Apache-2.0 许可），只取下了 `srt/managers`、`srt/mem_cache`、`srt/model_executor`、`srt/constrained` 等几个目录。和上一讲一样，只读源码，没有运行。
+
+## 三个进程
+
+<EngineProcs engine="sglang" caption="图 137-1　SGLang 的进程结构：主进程（HTTP 和分词）、每张卡一个调度器进程（调度和执行模型在同一个进程里）、一个反分词进程。点“下一步”看一个请求的路径。" />
+
+和 vLLM 一样，SGLang 也把分词、调度、反分词放在不同的进程里。最大的不同在中间：vLLM 的 EngineCore 只有一份，调度结果广播给各个 worker 进程；SGLang 是**每张卡一个调度器进程**，调度器和执行模型的 `TpModelWorker` 在同一个进程里。rank 0 从 ZMQ 收到请求后，用 `broadcast_pyobj` 发给其余的 rank（`managers/scheduler_components/request_receiver.py`），每个 rank 各自跑一遍同样的调度，得到同样的结果，然后各自执行。
+
+这样做省掉了“调度结果每步跨进程发给 worker”这一步：调度器直接在本进程里调用模型。代价是每张卡都重复做一遍调度的 CPU 工作，并且必须保证各 rank 的调度结果完全一致。
+
+## RadixAttention：前缀缓存是一棵树
+
+第 128 讲、nano-vllm 和 vLLM 的前缀缓存都是“块哈希”：把序列切成固定大小的块，每块按“前面所有块 + 本块”算哈希，只能整块地命中。SGLang 换了一个数据结构：**基数树**（radix tree，压缩的前缀树）。
+
+- 每个节点存一段 token（`key`）和这些 token 的 KV 在内存池里的槽位（`value`）。
+- 从根到某个节点的路径，拼起来就是一段完整的前缀。
+- 一个节点的孩子按第一个 token 区分，同一段公共前缀只存一次。
+
+<RadixTree caption="图 137-2　依次送入 5 个请求，看树怎么长。请求 2 和请求 1 在“北京”处分开，匹配停在节点中间，节点被劈成两段；请求 5 是请求 1 加上回答，整条路径都能复用。每次都会对比：按每块 4 个 token 的块哈希能命中多少。" />
+
+<CodeWalk file="third_party/sglang/python/sglang/srt/mem_cache/radix_cache.py" from={251} to={280} steps={[
+  { lines: [254, 261], title: '一个节点', body: '<p><code>children</code>：按孩子的第一个 token（页大小大于 1 时是第一页）索引。<code>key</code>：这个节点的 token 段。<code>value</code>：这段 token 的 KV 槽位，一个整数张量。<code>lock_ref</code>：有几个正在运行的请求在用这个节点，大于 0 就不能淘汰。<code>last_access_time</code>：LRU 淘汰用。</p>' },
+  { lines: [274, 279], title: '被淘汰的节点', body: '<p><code>value</code> 为空表示它的 KV 已经不在显存里了（打开分层缓存时，可能还在 CPU 内存里，第 113 讲）。节点之间按最近访问时间比较大小，放进堆里就能取出最久没访问的。</p>' },
+]} />
+
+### 匹配：从根往下走，停在中间就劈开
+
+<CodeWalk file="third_party/sglang/python/sglang/srt/mem_cache/radix_cache.py" from={658} to={707} steps={[
+  { lines: [658, 668], title: '沿着树往下走', body: '<p>从根开始，用请求剩余 token 的第一个找孩子；找到了，算这个孩子的 key 和请求剩余部分的公共前缀有多长。路过的节点都刷新访问时间。</p>' },
+  { lines: [669, 673], title: '停在节点中间：劈开', body: '<p>公共前缀比孩子的 key 短，说明请求在这个节点的中间分叉了。把节点劈成两段，前一段成为新的父节点，匹配到此为止。劈开不复制 KV，只是把槽位张量切成两段。</p>' },
+  { lines: [674, 682], title: '整段匹配：继续往下', body: '<p>孩子的 key 全部匹配上，就收下它的槽位，继续用剩下的 token 往下找。返回的是一路收下的槽位列表和最后停在的节点。</p>' },
+  { lines: [684, 707], title: '_split_node', body: '<p>新节点拿走 key 和 value 的前 split_len 个，原节点留下后面的部分，挂在新节点下面。引用计数、命中次数、优先级都继承下来。</p>' },
+]} />
+
+### 插入、加锁、淘汰
+
+<CodeWalk file="third_party/sglang/python/sglang/srt/mem_cache/radix_cache.py" from={559} to={623} steps={[
+  { lines: [559, 587], title: '淘汰：从没人用的叶子里挑最久没访问的', body: '<p>需要腾出 num_tokens 个槽位时，把所有可淘汰的叶子（没有孩子、没人在用）放进一个堆，按淘汰策略（默认 LRU）一个个弹出：把它的槽位还给内存池，从树上删掉。删掉之后，如果父节点也变成了没人用的叶子，就把父节点也放进堆里。所以淘汰总是从树的末梢往根部推进：公共前缀（靠近根的节点）被很多请求访问过，最后才会被淘汰。</p>' },
+  { lines: [589, 602], title: '加锁：一路锁到根', body: '<p>一个请求开始用某条前缀时，从它停在的节点一直到根，每个节点的 <code>lock_ref</code> 加一。从 0 变成 1 的节点，从“可淘汰”移到“受保护”。正在运行的请求所用的前缀绝不会被淘汰。</p>' },
+  { lines: [604, 623], title: '解锁', body: '<p>请求结束（或这一段 prefill 完成、换了更深的节点）时一路减回去，减到 0 的节点又可以被淘汰了。这对应块哈希方案里的引用计数。</p>' },
+]} />
+
+插入（第 712–767 行的 `_insert_helper`）和匹配几乎一样：沿树往下走，在分叉处劈开节点，最后把没匹配上的部分作为一个新的叶子挂上去。请求结束时，它的全部 token（提示 + 输出）都插入树中，KV 的槽位交给树管理，而不是还给内存池。下一轮对话进来时，就能匹配上整个上一轮。
+
+### 内存：槽位是一个个 token，不是块
+
+基数树的 `value` 是逐个 token 的槽位编号，这背后是 SGLang 的两级内存池（`mem_cache/memory_pool.py`）：
+
+<CodeWalk file="third_party/sglang/python/sglang/srt/mem_cache/memory_pool.py" from={381} to={478} steps={[
+  { lines: [412, 423], title: 'ReqToTokenPool：每个请求一行', body: '<p>一个形状为 [请求数上限, 最长上下文] 的 int32 张量 <code>req_to_token</code>：第 r 行第 i 列，是第 r 个请求第 i 个 token 的 KV 在 KV 池里的槽位号。它相当于块表，只是粒度是 token：每个 token 单独记一个槽位，不要求连续。第 0 行留空，CUDA Graph 补齐出来的空请求都指向它，读写无害（和 nano-vllm 用 −1 的思路一样）。</p>' },
+  { lines: [432, 465], title: '分一行', body: '<p>新请求从空闲行里拿一行。分块 prefill 的后续段沿用已有的行。</p>' },
+  { lines: [467, 478], title: '还一行', body: '<p>请求结束时只还“行”。行里指向的 KV 槽位并不在这里释放：它们已经交给基数树了，由树决定什么时候淘汰。</p>' },
+]} />
+
+第二级是 KV 池（`token_to_kv_pool`）：一个按槽位编号的大张量，存每一层每个 token 的 K、V。分配器在 `mem_cache/allocator` 里。打开 `page_size` 大于 1 时，分配、匹配和淘汰都按页对齐，粒度变粗，但有的注意力后端要求按页存（和 nano-vllm 的 256、vLLM 的块是同一类约束）。
+
+把两种前缀缓存放在一起比较：
+
+| | 块哈希（vLLM、nano-vllm、miniinfer） | 基数树（SGLang） |
+| --- | --- | --- |
+| 命中粒度 | 整块（16–256 个 token） | 1 个 token（或一页） |
+| 查找 | 逐块算哈希、查表 | 沿树往下比较 token |
+| 结构维护 | 哈希表 + 空闲队列 | 劈开、插入节点；锁要一路加到根 |
+| 淘汰 | LRU 的空闲块队列，倒着还让前缀留得久 | 从叶子开始的 LRU，公共前缀自然最后被淘汰 |
+| 跨机器共享 | 哈希可以跨进程稳定，便于做全局的 KV 池 | 需要额外给页算哈希（节点上的 `hash_value`） |
+| 额外开销 | 每块一次哈希 | 树的 Python 操作，前缀很多时匹配较慢 |
+
+两者在实际的命中率上差得并不多（块足够小时），差别更多在工程上：基数树天然适合“多轮对话、思维链分叉”这类前缀呈树状的负载；块哈希更简单，也更适合跨机器的 KV 共享。
+
+### 缓存感知的调度
+
+有了前缀缓存，调度器选谁先 prefill 也会影响命中率。SGLang 的 `SchedulePolicy`（`managers/schedule_policy.py`）提供了几种策略：
+
+<CodeWalk file="third_party/sglang/python/sglang/srt/managers/schedule_policy.py" from={167} to={260} steps={[
+  { lines: [167, 182], title: '两类策略', body: '<p><b>缓存感知</b>的：lpm（最长前缀匹配优先）、dfs-weight（按树的深度优先顺序，让同一棵子树下的请求挨着跑）、hrrn、最短 prefill 优先。<b>不感知缓存</b>的：fcfs（先来先到）、lof（最长输出优先）、随机等。</p>' },
+  { lines: [216, 228], title: '不管哪种策略，都先做匹配', body: '<p>即使是 fcfs，也会先对每个等待的请求做一次前缀匹配，知道它有多少 token 不用再算，后面算预算时要用。</p>' },
+  { lines: [234, 241], title: 'lpm：命中越长越先', body: '<p>命中前缀越长的请求越先放进来。道理是：它命中的那段前缀现在还在缓存里，越早跑，越不容易被淘汰；而且它需要算的 token 少，同样的预算能放进更多请求。</p>' },
+]} />
+
+两个值得注意的细节：等待队列超过 128 个请求时，lpm 会退化成 fcfs（`_determine_active_policy`，第 312 行），因为对每个请求做匹配再排序太慢了；这个提交里默认的策略是 fcfs（`srt/arg_groups/fields/schedule.py`），缓存感知的排序要显式打开。缓存感知的调度能提高命中率，但会让前缀不常见的请求等得更久，默认值偏向公平。
+
+## 零开销调度：发射这一步，再处理上一步
+
+第 135 讲看到，vLLM 用占位的办法让调度和执行重叠。SGLang 的调度循环更直接地体现了这个思路：
+
+<OverlapLoop caption="图 137-3　调度和计算重叠（和图 135-4 是同一个模型）。SGLang 称之为“零开销调度”：只要 CPU 一步的工作比 GPU 一步快，CPU 的时间就完全藏在 GPU 后面。" />
+
+<CodeWalk file="third_party/sglang/python/sglang/srt/managers/scheduler.py" from={2116} to={2221} steps={[
+  { lines: [2116, 2148], title: '普通的循环', body: '<p>收请求 → 决定下一批 → 执行 → 处理结果，严格串行。和 nano-vllm 的 <code>step()</code> 一样。</p>' },
+  { lines: [2151, 2161], title: '重叠的循环：一个结果队列', body: '<p>执行的结果不立刻处理，而是连同这一批放进队列。<code>pop_and_process</code> 处理队首那一批的结果。</p>' },
+  { lines: [2187, 2200], title: '先决定、发射这一步', body: '<p>决定下一批、调用 <code>run_batch</code>。在重叠模式下，<code>run_batch</code> 把计算排进 GPU 的流就返回，不等算完。结果（还在 GPU 上的张量）放进队列。</p>' },
+  { lines: [2205, 2208], title: '再处理上一步', body: '<p>GPU 正在算这一步，CPU 去处理<b>上一步</b>的结果：追加 token、检查结束、把 KV 插入基数树、释放结束的请求。处理时要从 GPU 取上一步采样的 token，这时上一步早已算完，不用等。</p>' },
+  { lines: [2174, 2185], title: '有时要先处理上一步', body: '<p>如果上一步的结果会影响这一步该放谁（比如上一步有请求结束了，不处理就会把它再放进这一步），就先处理再调度，牺牲一点重叠，保证正确。</p>' },
+  { lines: [2213, 2216], title: '采样放在最后', body: '<p>这一步的采样依赖上一步的结果（比如约束解码的语法状态要先接受上一步的 token，才能算出这一步允许哪些 token），所以等上一步处理完再发射采样。</p>' },
+]} />
+
+重叠有一个隐含的前提：调度第 i + 1 步时还不知道第 i 步采样出的 token。SGLang 让 GPU 上的输入直接引用第 i 步的输出张量（token 不回到 CPU 再送下去），所以 i + 1 步的输入在 GPU 上自然就是对的。这和 vLLM 的占位是同一个思路的两种写法。重叠模式默认打开，`--disable-overlap-schedule` 可以关掉。
+
+### 调度规则：prefill 优先，可以混合
+
+`get_next_batch_to_run`（`managers/scheduler.py` 第 4158 行）的主干是：先把上一步的 prefill 批并入运行中的 batch；然后尝试组一个新的 prefill 批（`get_new_batch_prefill`）；组得出来就跑 prefill，组不出来才跑 decode（`update_running_batch`，KV 不够时会“撤回”一部分请求，相当于抢占）。这和 nano-vllm 的 prefill 优先一样。打开 `--enable-mixed-chunk` 后，分块 prefill 的批可以把运行中的 decode 请求也带上（`mix_with_running`，第 4701 行），一步里混合两种，这又接近 vLLM 的做法了。
+
+## 约束解码：每一步一个词表掩码
+
+第 80 讲讲过约束解码的原理：按语法（JSON Schema、正则、EBNF）维护一个状态机，每一步算出“下一个 token 可以是哪些”，把其余 token 的打分设成 −∞。SGLang 支持 xgrammar、outlines、llguidance 几个后端（`srt/constrained/`），默认用 xgrammar：
+
+<CodeWalk file="third_party/sglang/python/sglang/srt/constrained/xgrammar_backend.py" from={78} to={200} steps={[
+  { lines: [97, 109], title: '接受一个 token', body: '<p>每个请求一个 <code>GrammarMatcher</code>，记着语法走到了哪里。采样出 token 后调用 <code>accept_token</code> 推进状态。不被接受说明前面的掩码有 bug，直接报错。</p>' },
+  { lines: [111, 113], title: '回退', body: '<p>投机解码时，被拒绝的草稿 token 已经被状态机接受过了，要退回 k 步。这和 KV 的回滚（num_computed_tokens 减回去）是同一件事在语法状态上的版本。</p>' },
+  { lines: [123, 147], title: '算掩码，加到打分上', body: '<p><code>fill_next_token_bitmask</code> 把“下一个允许的 token”写成一个位图（每个 token 一位，15 万个词约 19 KB）。整个 batch 的位图拼起来送到 GPU，一个 Triton kernel 把不允许的位置的打分设成 −∞。位图在 CPU 上算，这一步可以和 GPU 的前向重叠（上一节的“采样放在最后”）。</p>' },
+  { lines: [168, 200], title: '跳跃式前进', body: '<p>有时语法规定接下来只能是一串固定的字符（比如 JSON 的 <code>{"name": "</code>），没必要一个 token 一个 token 地生成。<code>try_jump_forward</code> 问状态机“接下来有没有唯一确定的字符串”，有就直接接上，再重新分词（<code>jump_and_retokenize</code> 处理新旧 token 不一致时的回退）。这就是论文里“压缩的有限状态机”的用途。</p><p>注意：在本讲取下的几个目录里，调度器并没有直接调用 <code>try_jump_forward</code>，只有语法后端之间互相包装时用到。读源码时，“接口还在”不等于“功能在用”，要顺着调用链确认。</p>' },
+]} />
+
+<Note kind="point">SGLang = 每张卡一个调度器进程（调度和执行同进程，rank 0 收请求再广播）+ RadixAttention（前缀缓存是一棵基数树，逐 token 命中，节点加锁防淘汰，从叶子开始 LRU 淘汰）+ 两级内存池（请求 → token 槽位，槽位 → KV）+ 零开销调度（发射这一步之后再处理上一步，CPU 藏在 GPU 后面）+ 基于位图的约束解码。默认是 prefill 优先、fcfs，缓存感知的调度和混合分块要显式打开。</Note>
+
+## 回顾
+
+SGLang 和 vLLM 走到了相近的地方：都分了进程、都有分页（或逐 token）的 KV 和前缀缓存、都让调度和执行重叠、都支持投机解码和约束解码。差别主要在几处取舍：前缀缓存用树还是用哈希；调度结果是广播给 worker，还是每张卡各算一遍；prefill 和 decode 默认分开跑还是混着跑。读懂这些取舍背后的原因，比记住哪个引擎有哪个功能更有用，因为功能会互相借鉴，取舍的道理不会变。
+
+下一讲把视野放宽：TensorRT-LLM、LMDeploy、llama.cpp 这些引擎各自的定位，以及 PD 分离、大规模专家并行在这些引擎里是怎么落地的。下一讲：**其他引擎与规模化部署**。

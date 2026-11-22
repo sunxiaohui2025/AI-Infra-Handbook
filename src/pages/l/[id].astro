@@ -6,7 +6,7 @@ import Base from '../../layouts/Base.astro';
 import SideNav from '../../components/SideNav.astro';
 import ImmersiveRail from '../../components/ImmersiveRail.astro';
 import CompareMode from '../../components/CompareMode.astro';
-import { LECTURES, PN, partLs, pad, lecture } from '../../data/course';
+import { LECTURES, PN, partLs, pad, lecture, prevNextLecture } from '../../data/course';
 
 export function getStaticPaths() {
   return LECTURES.map((l) => ({ params: { id: String(l.id) } }));
@@ -17,9 +17,8 @@ const entry = (await getCollection('lectures')).find((e) => e.data.id === l.id);
 const Content = entry ? (await render(entry)).Content : null;
 const ls = partLs(l.part);
 const idx = ls.findIndex((x) => x.id === l.id) + 1;
-const prev = LECTURES[l.id - 2];
-const next = LECTURES[l.id];
-const proj = l.part >= 15 || l.part === 7;      // 第五、六章和第 7 篇：代码多，用宽版式
+const { prev, next } = prevNextLecture(l.id);
+const proj = l.part >= 16 || l.part === 7;      // 第五、六章和第 7 篇：代码多，用宽版式
 ---
 <Base title={`${pad(l.id)} ${l.title}`} view="lec">
   <main class={`ai-scroll ai-read${proj ? ' ai-proj' : ''}`} id="main">
@@ -39,7 +38,7 @@ const proj = l.part >= 15 || l.part === 7;      // 第五、六章和第 7 篇�
                 <p class="ai-todo-title">这一讲还没有写</p>
                 <dl>
                   <dt>要回答的问题</dt><dd>{l.q}</dd>
-                  <dt>{l.part >= 15 || l.part === 7 ? '对应' : '计划中的演示'}</dt><dd>{l.demo}</dd>
+                  <dt>{l.part >= 16 || l.part === 7 ? '对应' : '计划中的演示'}</dt><dd>{l.demo}</dd>
                 </dl>
                 <p class="ai-todo-hint">想读这一讲时，对写作助手说「写第 {l.id} 讲」即可。</p>
               </div>

@@ -1,0 +1,110 @@
+---
+// 模型加载与冷启动拆解计算器（第 155 讲）。
+interface Props { title?: string; caption?: string }
+const { title = '冷启动耗时拆解器', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cc" data-coldstart>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>模型规模</span>
+      <select data-m style="font-size:12px;padding:2px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);">
+        <option value="8b">Llama-3-8B（FP16 · 16 GB · 1 卡）</option>
+        <option value="32b" selected>Qwen3-32B（FP16 · 64 GB · 4 卡 TP4）</option>
+        <option value="70b">Llama-3-70B（FP16 · 140 GB · 8 卡 TP8）</option>
+      </select>
+    </label>
+    <label class="ai-tl-lr"><span>存储介质</span>
+      <select data-s style="font-size:12px;padding:2px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);">
+        <option value="s3">对象存储 S3（0.5 GB/s）</option>
+        <option value="nfs">网络存储 NFS（1.5 GB/s）</option>
+        <option value="nvme" selected>本地 NVMe SSD（6.0 GB/s）</option>
+      </select>
+    </label>
+    <label class="ai-tl-lr" style="flex-direction:row;align-items:center;gap:6px;">
+      <input type="checkbox" data-shard /> <span>预分片 + GDS/并行加载</span>
+    </label>
+    <label class="ai-tl-lr" style="flex-direction:row;align-items:center;gap:6px;">
+      <input type="checkbox" data-graph /> <span>跳过/缓存 CUDA Graph 捕获</span>
+    </label>
+  </div>
+  <svg class="ai-tl-svg" viewBox="0 0 640 115" data-svg style="width:100%;height:auto;display:block;margin:8px 0;"></svg>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const MODELS: Record<string, { name: string; gb: number; tp: number; graphS: number; commS: number }> = {
+    '8b':  { name: 'Llama-3-8B',  gb: 16,  tp: 1, graphS: 8,  commS: 1 },
+    '32b': { name: 'Qwen3-32B',   gb: 64,  tp: 4, graphS: 14, commS: 4 },
+    '70b': { name: 'Llama-3-70B', gb: 140, tp: 8, graphS: 20, commS: 7 },
+  };
+  const STORES: Record<string, { name: string; bw: number }> = {
+    's3':   { name: '对象存储', bw: 0.5 },
+    'nfs':  { name: 'NFS',      bw: 1.5 },
+    'nvme': { name: 'NVMe SSD', bw: 6.0 },
+  };
+
+  function init(fig: HTMLElement) {
+    const mEl = fig.querySelector<HTMLSelectElement>('[data-m]')!;
+    const sEl = fig.querySelector<HTMLSelectElement>('[data-s]')!;
+    const shEl = fig.querySelector<HTMLInputElement>('[data-shard]')!;
+    const grEl = fig.querySelector<HTMLInputElement>('[data-graph]')!;
+    const svg = fig.querySelector<SVGSVGElement>('[data-svg]')!;
+    const eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+
+    function draw() {
+      const m = MODELS[mEl.value];
+      const st = STORES[sEl.value];
+      const shard = shEl.checked;
+      const cacheGraph = grEl.checked;
+
+      const tContainer = 4.0; // 镜像已预热时容器拉起与 Python 导入
+      // 未预分片：单卡或多进程抢读整份文件 + CPU 切分，按单链路读盘 + H2D (PCIe 4/5 约 20 GB/s 分摊)
+      const readEff = shard ? st.bw * Math.min(m.tp, 2) * 0.9 : st.bw * 0.75;
+      const tRead = m.gb / readEff;
+      const tH2D = shard ? (m.gb / m.tp) / 24 : m.gb / 12; // 预分片后每卡只传 1/tp
+      const tComm = m.commS;
+      const tGraph = cacheGraph ? 2.0 : m.graphS;
+      const total = tContainer + tRead + tH2D + tComm + tGraph;
+
+      const parts = [
+        { label: '容器/导入', s: tContainer, fill: 'var(--surface-sunk)', stroke: 'var(--line-strong)' },
+        { label: '读权重',    s: tRead,      fill: 'var(--accent)',       stroke: 'var(--accent)' },
+        { label: 'H2D/切分',  s: tH2D,       fill: 'var(--accent-soft)',  stroke: 'var(--accent)' },
+        { label: '通信/KV探测', s: tComm,    fill: 'var(--key-soft)',     stroke: 'var(--key)' },
+        { label: 'CUDA Graph', s: tGraph,    fill: 'var(--key)',          stroke: 'var(--key)' },
+      ];
+
+      const W = 600;
+      let x = 20;
+      let bars = '';
+      let leg = '';
+      parts.forEach((p, idx) => {
+        const w = Math.max(4, (p.s / total) * W);
+        bars += `<rect x="${x.toFixed(1)}" y="24" width="${w.toFixed(1)}" height="24" rx="2" fill="${p.fill}" stroke="${p.stroke}"/>`;
+        if (w > 46) {
+          bars += `<text x="${(x + w / 2).toFixed(1)}" y="40" text-anchor="middle" font-size="10" fill="${idx === 1 || idx === 4 ? '#fff' : 'var(--ink)'}">${p.s.toFixed(1)}s</text>`;
+        }
+        const lx = 20 + idx * 122;
+        leg += `<rect x="${lx}" y="66" width="10" height="10" rx="2" fill="${p.fill}" stroke="${p.stroke}"/>`
+            + `<text x="${lx + 14}" y="75" class="ai-sa-tx">${p.label} ${p.s.toFixed(1)}s</text>`;
+        x += w;
+      });
+
+      svg.innerHTML = `
+        <text x="20" y="16" class="ai-sa-tx">冷启动总耗时：${total.toFixed(1)} s（${m.name} · ${st.name}）</text>
+        ${bars}
+        ${leg}
+        <text x="20" y="102" class="ai-sa-tx">若到达率 λ = 5 请求/s，单副本冷启动期间将积压约 ${Math.round(5 * total)} 个请求。</text>
+      `;
+
+      eq.innerHTML =
+        `读权重 <b>${tRead.toFixed(1)} s</b> + H2D/切分 <b>${tH2D.toFixed(1)} s</b> + 通信/KV探测 <b>${tComm.toFixed(1)} s</b> + CUDA Graph <b>${tGraph.toFixed(1)} s</b> + 容器 <b>${tContainer.toFixed(1)} s</b> = <b>${total.toFixed(1)} s</b>。`
+        + (shard ? '<br>预分片后每张卡只加载自己的 1/' + m.tp + ' 分片，省去了“每张卡都读全量权重再切分”的带宽和内存峰值。' : '');
+    }
+
+    fig.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-coldstart]').forEach(init);
+</script>

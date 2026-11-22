@@ -1,0 +1,152 @@
+---
+id: 140
+slug: engine-selection-comparison
+title: 主流引擎选型对比
+chapter: 5
+part: 18
+problem: vLLM、SGLang、TensorRT-LLM 怎么选，各自的核心优势与代价是什么
+prereqs: [135, 136, 137, 138]
+level: 主线
+demos: [EngineMatrix]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import EngineMatrix from '../../components/EngineMatrix.astro';
+import Figure from '../../components/Figure.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[135, 136, 137, 138]} />
+
+第 135 到 138 讲，我们把 vLLM、SGLang 的源码拆开读过，也概览了 TensorRT-LLM 等其他引擎的定位。可真到给新业务拍板技术栈时，架构师往往还是会在三个名字之间反复犹豫：**vLLM、SGLang、TensorRT-LLM**。
+
+网上很容易找到各种“吞吐榜单”，但同样一个模型，今天这篇评测说 SGLang 快 20%，明天那篇说 TensorRT-LLM 领先 30%，后天 vLLM 发一个新版本又追了上来。如果只盯着某一天的 benchmark 数字选型，半年后就会发现：真正卡住团队的往往不是极限吞吐那 10% 的差距，而是**模型上新慢半拍、多轮 Agent 前缀缓存命中不了、或者为了升级 CUDA 被编译引擎锁死**。这一讲把三大主力引擎放到同一张决策表里，从架构押注、量化与硬件支持、调度与缓存代价、部署运维复杂度四个维度算清各自的**优势、硬伤与翻转临界点**。
+
+<Note kind="warn">这一讲对各引擎特点与权衡的分析基于公开架构文档与本篇读过的源码（vLLM V1、SGLang、TensorRT-LLM），文中的延时与收益测算为演示选型临界点的简化模型，实际选型请以目标硬件与真实业务负载的压测为准。</Note>
+
+## 三大引擎到底押注在什么不同的地方
+
+把第 135–138 讲读过的核心设计浓缩成一句话：**它们解决的是同一个问题（把算子和调度压到极限），但各自把筹码押在了不同的一层。**
+
+<Figure title="图 140-1　vLLM、SGLang、TensorRT-LLM 的技术路线与取舍对比" caption="vLLM 押注通用生态与模块化后端（从新模型首日支持到国产卡插件）；SGLang 押注调度器与前缀树的极致协同（RadixAttention + 零开销重叠）；TensorRT-LLM 押注 NVIDIA 自研底层 Kernel 与低精度编译优化。">
+  <svg class="ai-tl-svg" viewBox="0 0 640 175" style="width:100%;height:auto;display:block;">
+    <g class="ai-sa-b gpu"><rect x="14" y="16" width="192" height="142" rx="6"/><text x="110" y="38" text-anchor="middle" font-weight="600">vLLM (V1)</text><text x="110" y="56" text-anchor="middle" font-size="9.5">押注：生态广度与插件化</text><text x="110" y="80" text-anchor="middle" font-size="9.5">• 统一 Token 预算调度</text><text x="110" y="98" text-anchor="middle" font-size="9.5">• 块哈希 Prefix Cache</text><text x="110" y="116" text-anchor="middle" font-size="9.5">• 模型/多模态首日支持最全</text><text x="110" y="134" text-anchor="middle" font-size="9.5">• 硬件插件生态最成熟</text></g>
+    <g class="ai-sa-b sw"><rect x="224" y="16" width="192" height="142" rx="6"/><text x="320" y="38" text-anchor="middle" font-weight="600">SGLang</text><text x="320" y="56" text-anchor="middle" font-size="9.5">押注：调度开销与前缀树复用</text><text x="320" y="80" text-anchor="middle" font-size="9.5">• RadixAttention 基数树缓存</text><text x="320" y="98" text-anchor="middle" font-size="9.5">• 零开销 CPU-GPU 重叠循环</text><text x="320" y="116" text-anchor="middle" font-size="9.5">• 压缩 FSM 约束解码快</text><text x="320" y="134" text-anchor="middle" font-size="9.5">• 适合 Agent / 多轮 / 缓存路由</text></g>
+    <g class="ai-sa-b"><rect x="434" y="16" width="192" height="142" rx="6"/><text x="530" y="38" text-anchor="middle" font-weight="600">TensorRT-LLM</text><text x="530" y="56" text-anchor="middle" font-size="9.5">押注：N 卡底层 Kernel 与低精度</text><text x="530" y="80" text-anchor="middle" font-size="9.5">• FP8 / FP4 / 融合算子首发</text><text x="530" y="98" text-anchor="middle" font-size="9.5">• C++ / PyTorch 双后端演进</text><text x="530" y="116" text-anchor="middle" font-size="9.5">• Hopper/Blackwell 极限压榨</text><text x="530" y="134" text-anchor="middle" font-size="9.5">• 强绑定 NVIDIA 软件栈</text></g>
+  </svg>
+</Figure>
+
+### 1. vLLM：大模型界的“通用标准底座”
+
+第 135、136 讲读过，vLLM V1 把 API 服务器、调度器、Worker 彻底拆进程，用统一 token 预算把 prefill 和 decode 揉进同一个连续批里。
+
+- **最大优势**：**模型与硬件生态的绝对广度**。几乎所有主流开源模型（包括多模态、长上下文、MoE、混合线性注意力）在发布当天就能在 vLLM 里跑起来；而且它定义了最清晰的平台插件接口（第 153 讲会专门讲），AMD、海光、昇腾、TPU 等非 NVIDIA 芯片首选接入的都是 vLLM。
+- **典型短板与代价**：因为要兼容几十种硬件和上百种模型结构，它的很多路径写在 Python 侧，虽然 V1 用进程隔离和块哈希做了大幅优化，但在**高度动态的树状前缀共享**（如多分支思维树、高频结构化 JSON 约束解码）上，不如 SGLang 激进；在 NVIDIA 最新代际芯片（如 Blackwell）的**极限 FP4 融合算子**上，通常也会比 TensorRT-LLM 晚一拍。
+
+### 2. SGLang：为“多轮、Agent、结构化输出”而生的快刀
+
+第 137 讲读过，SGLang 最核心的两个武器是 **RadixAttention** 和 **零开销调度（Zero-Overhead Scheduler）**。
+
+- **最大优势**：第一，**任意位置的前缀复用**。相比 vLLM 基于固定块大小（如 16 个 token 一块）的块哈希，RadixAttention 用基数树（Radix Tree）管理 KV 块，哪怕两条请求在半个块中间分叉、或者多轮对话里不断追加工具返回结果，也能精确复用每一段公共前缀。第二，**更低的 CPU 调度开销与极快的约束解码**。它的压缩有限状态机（Compressed FSM）能把 JSON Schema 里固定不变的引号、键名一次性“跳跃”过去，不必每个字符都做一次状态转移和全词表掩码。
+- **典型短板与代价**：非主流模型架构和多模态变体的跟进速度略慢于 vLLM；国产非 CUDA 硬件的插件生态也明显不如 vLLM 完备。
+
+### 3. TensorRT-LLM：压榨 NVIDIA 硬件上限的“重武器”
+
+- **最大优势**：**NVIDIA 亲儿子的底层 Kernel 与新精度红利**。当 Hopper（FP8）或 Blackwell（NVFP4）刚上市时，能够把 Tensor Core 算力吃满的融合 Attention、FP8/FP4 GEMM、以及针对 MoE 通信优化的底层 kernel，往往最先在 TensorRT-LLM 里落地。对于**流量极大、模型长期固定、且全栈跑在 H100/B200 集群**上的大厂核心业务，这 10%–25% 的极限单卡吞吐提升能直接省下百万美元级卡费。
+- **典型短板与代价**：**部署和迭代重量级**。早期版本需要针对特定模型、特定 batch 和序列上限离线构建 `.engine` 计划文件，换一个并发上限或升级版本就得重新编译；虽然新版已经转向更灵活的 PyTorch 后端，但它的版本矩阵依然与 CUDA、cuDNN、TensorRT 版本强耦合，排障门槛和跨卡迁移成本（锁死在 NVIDIA）是三者里最高的。
+
+下面的交互矩阵可以按不同业务场景切换，查看六个主流引擎的适配定位。
+
+<EngineMatrix caption="图 140-2　按部署场景筛选推理引擎。点击不同场景，查看最适合的引擎与取舍原因。" />
+
+## 四维硬指标横向对比
+
+| 对比维度 | vLLM (V1) | SGLang | TensorRT-LLM |
+| --- | --- | --- | --- |
+| **前缀缓存机制** | 固定块哈希（按 block_size 对齐复用） | RadixAttention 基数树（任意 token 粒度精确复用） | 块级 KV 复用（Paged KV Cache） |
+| **约束解码（JSON）** | 支持（xgrammar / outlines 等后端） | 极快（原生压缩 FSM 跳跃多 token） | 支持（引导解码，偏重 C++ 流水线） |
+| **CPU 调度与发射** | 多进程异步 + 统一 token 预算 | 零开销调度（CPU 提前准备下一步） | C++ 执行循环，CPU 开销极低 |
+| **新模型支持速度** | 最快（通常发布日 Day-0 支持） | 快（主流开源模型与 MoE 紧跟） | 较慢（需等待算子与架构适配） |
+| **多卡与 PD 分离** | 原生 DP 协调器 + KV Connector（NIXL/Mooncake） | 原生 Router + disaggregation_mode | 配合 NVIDIA Dynamo / Triton 编排 |
+| **硬件覆盖面** | 最广（CUDA / ROCm / 国产卡 / TPU） | 较广（以 CUDA 为主，逐步扩展 ROCm 等） | 仅限 NVIDIA GPU |
+
+## 两个选型时最容易误判的“临界点”
+
+看到这里你可能会想：既然 TensorRT-LLM 的 kernel 最快、SGLang 的树缓存最省算力，那我只要无脑二选一不就好了，为什么生产上还有超过一半的团队首选 vLLM？
+
+### 反直觉点一：单卡吞吐高 20%，为什么总成本反而可能更贵？
+
+**原因在于“工程迭代速度”和“长尾业务适配”。** 如果你是一个 5 人推理团队，业务每个月都要尝试 2–3 个新开源模型（或者给不同客户微调了十几种 LoRA），用 TensorRT-LLM 每次调优、对齐新版本 CUDA 和编译验证可能要花掉 1–2 周人天；而 vLLM 直接拉起镜像就能开跑。只有当**单一模型的常驻卡数超过几十张卡、且半年内不怎么换模型结构**时，TensorRT-LLM 省下来的 GPU 租金才显著大于它增加的工程维护成本。
+
+### 反直觉点二：同样开启 Prefix Cache，SGLang 什么时候才会比 vLLM 明显快？
+
+在“固定 1000 token 系统提示 + 单轮短问答”的常规场景里，只要系统提示长度对齐了块大小（比如 16 的倍数），vLLM 的块哈希和 SGLang 的基数树命中率几乎一样高，两者吞吐差距微乎其微。
+
+**真正让结论翻转的临界点，出现在“多轮长上下文 Agent 工具调用”或“JSON 强约束高并发输出”里：**
+
+1. 当 Agent 连续调用 8 轮工具、每轮追加几百个 token 且中间夹杂大量零散分叉时，传统块哈希如果有半个块未对齐或淘汰策略不够细，每轮可能白白多重算十几个到几十个未对齐块，或者受限于树结构管理效率；而基数树能把每一轮新增的公共前缀无缝挂在树枝上按 LRU 精准回收。
+2. 当线上流量是**极短输出 + 强 JSON 格式约束**（比如 20 个 token 的实体抽取）时，普通逐 token 状态机每步都要在 CPU 上算一遍全词表合法掩码，往往直接成为瓶颈；SGLang 的压缩 FSM 把固定语法骨架一次跳过，吞吐能甩开未开启同类优化的引擎一截。
+
+<Note kind="point">选型口诀：不知道选什么、模型换得勤、或者要上国产卡，首选 **vLLM**；重度跑多轮 Agent、强前缀树复用、高频结构化 JSON 输出，首选 **SGLang**；单模型规模极大（百卡级以上）、追求 Blackwell/Hopper 极限 FP8/FP4 性价比且团队有深厚 C++/CUDA 维护能力，再上 **TensorRT-LLM**。</Note>
+
+## 用代码复现：算一算“选型翻转临界点”
+
+下面用一段简单的成本与延迟模型代码，量化对比两个临界点：第一，TensorRT-LLM 假设单卡吞吐高 15%，但每月多出 2 人周的工程维护折算成本（示例 $4,000/月），需要多少张常驻 H100 才真正回本；第二，在多轮 Agent 场景下，Prefix Cache 命中率差 15% 时，单请求 TTFT 与有效 QPS 差多少。
+
+```python
+# 1. 吞吐优势 vs 维护成本的硬件规模临界点（H100 示例月租 $1,800/卡）
+gpu_price_mo = 1800
+trt_speedup = 1.15         # 假设 TensorRT-LLM 极限吞吐高 15%
+extra_eng_cost = 4000      # 假设底层维护与版本适配每月多花 $4,000 工程折算成本
+
+print("目标等价算力(卡) | vLLM 所需卡数 | TRT-LLM 所需卡数 | TRT-LLM 总成本(含维护) | vLLM 总成本 | 更省方案")
+import math
+for target_cards in (4, 8, 16, 24, 32, 64):
+    n_vllm = target_cards
+    n_trt = math.ceil(target_cards / trt_speedup)
+    cost_vllm = n_vllm * gpu_price_mo
+    cost_trt = n_trt * gpu_price_mo + extra_eng_cost
+    winner = "TensorRT-LLM" if cost_trt < cost_vllm else "vLLM / SGLang"
+    print(f"{target_cards:12d}     | {n_vllm:9d}     | {n_trt:11d}      | ${cost_trt:15,.0f}     | ${cost_vllm:9,.0f} | {winner}")
+
+# 2. 多轮 Agent 场景下，前缀缓存命中率差异对有效 QPS 的放大效应
+# 假设单轮总上下文 8000 token，decode 固定占 400 ms，prefill 满算 8000 token 需 320 ms
+decode_ms = 400.0
+full_prefill_ms = 320.0
+print("\n前缀命中率 | 实际 prefill 耗时 | 单请求总计算时间 | 相对吞吐")
+base_time = decode_ms + full_prefill_ms * (1 - 0.70)
+for hit in (0.50, 0.70, 0.85, 0.95):
+    prefill = full_prefill_ms * (1 - hit)
+    tot = decode_ms + prefill
+    print(f"{hit*100:6.0f}%    | {prefill:12.1f} ms   | {tot:11.1f} ms   | {base_time/tot:5.2f}x")
+```
+
+输出：
+
+```text
+目标等价算力(卡) | vLLM 所需卡数 | TRT-LLM 所需卡数 | TRT-LLM 总成本(含维护) | vLLM 总成本 | 更省方案
+           4     |         4     |           4      | $         11,200     | $    7,200 | vLLM / SGLang
+           8     |         8     |           7      | $         16,600     | $   14,400 | vLLM / SGLang
+          16     |        16     |          14      | $         29,200     | $   28,800 | vLLM / SGLang
+          24     |        24     |          21      | $         41,800     | $   43,200 | TensorRT-LLM
+          32     |        32     |          28      | $         54,400     | $   57,600 | TensorRT-LLM
+          64     |        64     |          56      | $        104,800     | $  115,200 | TensorRT-LLM
+
+前缀命中率 | 实际 prefill 耗时 | 单请求总计算时间 | 相对吞吐
+    50%    |        160.0 ms   |       560.0 ms   |  0.89x
+    70%    |         96.0 ms   |       496.0 ms   |  1.00x
+    85%    |         48.0 ms   |       448.0 ms   |  1.11x
+    95%    |         16.0 ms   |       416.0 ms   |  1.19x
+```
+
+可以看到：在 16 张卡以下的小规模集群里，即使 TensorRT-LLM 单卡快 15%，省下来的 2 张卡租金（$3,600）还不够填多出来的工程维护账单；跨过 **20–24 张卡**的临界点后，硬件省钱开始反超。同样地，如果某种负载下基数树能把前缀命中率从 70% 推到 95%，单靠跳过 prefill 就能带来约 **19%** 的有效吞吐提升。
+
+## 容易混淆的地方
+
+1. **三者的差距不是一成不变的“代差”，而是不断互相借鉴的动态平衡。** vLLM V1 引入了独立进程和零拷贝优化，SGLang 也在补齐多模态和硬件后端，TensorRT-LLM 则用 PyTorch 后端大幅降低了编译门槛。选型前一定要用最新稳定版在你的真实模型上压一次 `bench serve`。
+2. **线上集群并不禁止“混用”。** 大厂常见做法是：主力通用模型池和快速实验池用 **vLLM**；高并发 Agent 路由池用 **SGLang**；而流量最大的单一旗舰模型长期稳定后，再切到 **TensorRT-LLM** 压榨最后一点成本。
+
+## 回顾
+
+vLLM、SGLang、TensorRT-LLM 代表了推理引擎设计的三种重心：vLLM 赢在模型首日支持、模块化与跨芯片生态；SGLang 赢在 RadixAttention 基数树缓存、零开销调度与压缩 FSM 约束解码；TensorRT-LLM 赢在 NVIDIA 新一代 GPU 的极限低精度（FP8/FP4）底层 kernel。中小规模或模型迭代快时选 vLLM/SGLang，多轮 Agent 与结构化输出优先看 SGLang，二十卡以上固定模型压榨 N 卡极限才考虑 TensorRT-LLM。
+
+到这里，第五章“推理引擎实践”就全部结束了。从 400 行的 miniinfer 到 17 万行的 vLLM/SGLang，再到三大主力引擎的选型权衡，软件层的原理和源码我们都已经摸透。最后一章，我们把视线往下移一层：如果手里的卡不是 NVIDIA，而是一块国产加速卡或非 CUDA 芯片，怎么把整套模型和引擎搬上去、对齐精度并把性能跑出来？下一讲：**总览 · 换一块卡要重做什么**。

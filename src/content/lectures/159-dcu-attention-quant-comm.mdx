@@ -1,0 +1,113 @@
+---
+id: 159
+slug: dcu-attention-quant-comm
+title: DCU 上的注意力、量化与通信
+chapter: 6
+part: 21
+problem: 插件怎么选注意力后端、量化方法和通信方式
+prereqs: [150, 152, 153, 157]
+level: 主线
+demos: [CodeWalk, CollCompare, PrecisionSupport]
+video: ""
+---
+import PrereqLinks from '../../components/PrereqLinks.astro';
+import CodeWalk from '../../components/CodeWalk.astro';
+import CollCompare from '../../components/CollCompare.astro';
+import PrecisionSupport from '../../components/PrecisionSupport.astro';
+import Note from '../../components/Note.astro';
+
+<PrereqLinks ids={[150, 152, 153, 157]} />
+
+矩阵乘讲完了，剩下三块：注意力后端怎么挑、支持哪些量化方法、多卡通信怎么走。这三件事在插件里的共同特征是**没有唯一答案，只有一套选择规则**——按模型、按架构代号、按消息大小、按配置选。这一讲把这些规则读出来。
+
+<Note kind="warn">读的还是 `third_party/vllm-plugin-das`，提交 `81cbe8f`，只读不运行。配置和命令行的例子引自仓库里的文档（`docs/`、`README.zh-CN.md`），数字引自源码注释。</Note>
+
+## 注意力：五个后端，一套优先级
+
+插件注册了五个注意力后端（`vllm_hcu/platforms/hcu.py` 的 `register_attention_backends`）：普通注意力的 FlashAttention 版和 Triton 版，MLA 的 FlashMLA 版和 Triton 版，以及稀疏 MLA 的版本。注册时有一个细节：**只在这个后端没有被覆盖过时才注册**（`if not backend.is_overridden()`），也就是说用户或第三方指定的选择优先于插件的默认。
+
+选择的优先级写在一个函数里：
+
+<CodeWalk file="third_party/vllm-plugin-das/vllm_hcu/platforms/hcu.py" from={151} to={177} steps={[
+  { lines: [151, 157], title: '三个输入决定一切', body: '<p>函数的输入只有三个布尔量：是不是 MLA 模型、是不是稀疏注意力、要不要优先用 Triton 版的 MLA。文档字符串里交代了分工：<b>这里只给优先级，可用性由后面的校验来过滤</b>。</p>' },
+  { lines: [158, 162], title: '稀疏 MLA：两个候选', body: '<p>稀疏注意力的模型（DeepSeek-V3.2 一类，第 42 讲）走专门的稀疏 MLA 后端，第二选择是另一个基于算子库的稀疏实现。</p>' },
+  { lines: [164, 173], title: 'MLA：FlashMLA 优先，Triton 兜底', body: '<p>MLA 模型（第 40 讲）优先用 FlashMLA 的移植版，兜底是 Triton 版。<code>prefer_triton_mla</code> 为真时顺序反过来——这个标志的来源很有意思：当用户用环境变量关掉了“HCU 托管的自定义算子”时，插件就不再用自己的 FlashMLA，退回 vLLM 自带的 Triton MLA，并打一条警告说明原因。</p><p>这是一处很体贴的设计：关掉自定义算子这个开关，应该意味着“全部走通用实现”，而不是“一半自定义一半通用”。</p>' },
+  { lines: [174, 177], title: '普通 MHA / GQA：FlashAttention 优先', body: '<p>最后一类是普通注意力：先 FlashAttention（厂商移植版），兜底 Triton 版。和第 150 讲说的顺序完全一致——有专门实现就用，没有就用能跑的。</p>' },
+]} />
+
+优先级之外还有两道机制，正是第 150 讲说的“一组候选 + 校验 + 回退”：
+
+**逐个校验**。`get_valid_backends` 把候选逐个拿出来，调用它的 `validate_configuration`（传入设备能力、头数、块大小、数据类型等），返回“不可用的原因”列表；`ImportError` 也被当成一条原因（算子库没装）。全部不可用时**抛错**，并把每个候选的原因打印出来——而不是悄悄降级到一个能跑但很慢的实现。
+
+**块大小的调和**。`update_block_size_for_backend` 处理第 150 讲提到的那个坑：注意力 kernel 支持的块大小和引擎的 KV 块大小要匹配。代码里能看到两处具体的调整（注释写得很清楚）：稀疏 MLA 的模型里还有一个索引器注意力层，上游可能先发现它并选一个 16 token 的块，所以要把管理器的块保持在至少 64 且 64 对齐；而 DeepSeek-V4 的稀疏后端要求 256 token 的 kernel 块，它的压缩缓存还要求管理器的块能被每个压缩比整除——于是用最小公倍数把块大小对齐上去，并打一条警告说明改了。
+
+<Note kind="point">这两段代码回答了一个常见问题：“为什么我在新卡上设的 <code>--block-size</code> 不生效？”因为块大小不是一个自由参数，而是**注意力后端、KV 布局、压缩比共同约束的结果**。适配时要把这些约束写进代码（并打日志说明改了什么），而不是写进文档让用户自己对。</Note>
+
+还有一处和 KV 布局有关的规则，第 150 讲引过：插件的文档建议 MHA / GQA 模型用 FlashAttention 后端时设 `VLLM_KV_CACHE_LAYOUT=HND`，但同时提醒——**混合注意力的模型里可能有不支持这个布局的后端，这时候要取消设置，让 vLLM 去解析一个共同支持的布局**；MLA 等后端应按对应模型的配置来，不要全局强制。
+
+## 量化：23 种启用，4 种注释掉
+
+<PrecisionSupport caption="图 159-1　硬件 × 精度的支持矩阵（第 152 讲）。DCU 属于“较新的国产 GPGPU”那一行；FP8 的可用性在插件里是按架构代号判断的。" />
+
+平台类里列着一张支持名单（第 155 讲的统计：启用 23 种，注释掉 4 种）。读这张名单能看出几件事：
+
+**覆盖面以“已有的开源量化格式”为主**：AWQ 和 GPTQ 两家（各带一个 marlin 变体和一个自动解析的别名）、`compressed-tensors`、`fp8`、`fbgemm_fp8`、`gguf`、`quark`、`torchao`、`modelopt` 系列，以及厂商自己的几种（`deepseek_v4_fp8`、`fp8_per_tensor`、`fp8_per_block`、`online`、`slimquant_w4a8` 及其两个变体）。
+
+**被注释掉的四种**是 `mxfp4`、`bitsandbytes`、`modelopt_fp4`、`gpt_oss_mxfp4`——都和 4 位浮点有关（第 93 讲）。注释掉而不是删掉，说明是“暂时不支持”而不是“永不支持”。
+
+**启动时会改写配置**。`verify_quantization` 里有一段：用 AWQ 时如果没打开 Triton 版的 AWQ 实现，就打一条警告并自己把那个环境变量设上。这是第 154 讲说的“优先改配置”的具体例子——不改上游代码，只改配置。
+
+**FP8 的可用性按架构代号判断**。`supports_fp8` 的实现是一行：返回这块卡是不是 `gfx938`。这就是第 152 讲那张三档支持表落到代码里的样子——**同一家的卡，不同代之间的精度支持可能不一样**，所以判断要按架构代号，不能按厂商或型号系列。
+
+量化方法的实现文件在 `model_executor/layers/quantization/` 下，一个方法一个文件（`compressed_tensors` 的几种组合、`int8_runtime`、`lightop_fp8_runtime`、`lightop_autoawq`、`slimquant_w4a8` 及其 DeepGEMM 变体等）。另外补丁清单里 `worker/op_opt` 那一类有 70 多个文件，其中一批就是量化算子的替换（`patch_compressed_tensors_*`、`patch_w8a8_utils`、`patch_input_quant_fp8`、`patch_auto_awq` 等）——对应第 152 讲说的“量化算子适配要改四处”里的权重重排、缩放布局和反量化位置。
+
+还有一处第 152 讲讲过的细节在文档里有明确说明：对稀疏 MLA 后端，平台会把用户写的 `--kv-cache-dtype fp8_e4m3` **转成内部的 `fp8_ds_mla` 格式**，并强调这是该后端专用的打包布局，不是所有注意力后端通用的 cache 格式。代码里就是那一行 `cache_config.cache_dtype = "fp8_ds_mla"` 加一条说明日志。
+
+## 通信：RCCL、自定义 All-Reduce、IPC All-Gather
+
+<CollCompare caption="图 159-2　四种 All-Reduce 做法在三种拓扑下的耗时（第 153 讲的 α-β 估算）。插件的自定义实现对应“自定义 kernel”那一行，它的适用区间由下面这些条件决定。" />
+
+通信这一层的三件事，第 153 讲都讲过原理，这里对应到代码：
+
+**库：RCCL，但名字叫 nccl**。平台类里 `dist_backend = "nccl"`（第 156、157 讲），所以引擎和模型代码一行不改。
+
+**通信器：直接复用 vLLM 的 CUDA 通信器**。`get_device_communicator_cls` 返回的是上游的 `CudaCommunicator` 类路径——又一次“沿用 CUDA 路线”的红利。
+
+**自定义 All-Reduce：一个条件分支**。第 153 讲列过它的适用区间，这里把源码里的条件再按顺序排一遍（`distributed/device_communicators/custom_all_reduce.py` 和 `csrc/custom_all_reduce.cuh`）：
+
+| 条件 | 值 | 不满足时 |
+| --- | --- | --- |
+| 卡数 | 2、4、6、8 | 打日志，禁用 |
+| 消息大小 | 默认上限 8 MiB | 退回库 |
+| 链路 | 要求全连接（逐对查跳数为 1、类型为直连） | 非全连接时上限压到 512 KB，并提示可以加 `--disable-custom-all-reduce` |
+| 对齐 | 字节数是 16 的倍数、张量基本连续 | 退回库 |
+| 一阶段还是两阶段 | 全连接时：≤4 卡且消息 < 512 KB，或 ≤8 卡且消息 < 256 KB 用一阶段；否则两阶段。PCIe 版的两个阈值是 1 MB 和 64 KB | 由宏里的条件自动选 |
+| 块数 | 上限 36，这条路径上默认 16 | — |
+
+“默认只用 16 个块”这一条配着源码里的注释读很有意思：注释说用 36 个块在作者试过的那些卡上最好或接近最好，并且提到 NCCL 的 kernel 也只占少量计算单元，猜测原因是块太多会在互联总线上争抢。而 ROCm 这条路径把默认值降到 16——**同一份代码，不同平台的最优并行度不同**，这正是第 150 讲说的“参数要按硬件重调”。
+
+**IPC All-Gather：为 MoE 的小消息写的**。第 153 讲引过它的动机注释：NCCL 的 All-Gather 在 decode 的消息大小上每次约 55 μs，而 MoE 的分发每层都要付一次。它的实现是一个 Triton kernel，设计说明里有三条值得记住的约束：每个程序自带调用计数器（所以标志位单调递增、能被图捕获）、两个缓冲槽按调用奇偶交替（一张卡只能在收到所有对端的第 k 次标志后才开始第 k+1 次）、**一个程序就是一个波前所以写入有序**。最后这条是用硬件常数换掉了一次显式同步。
+
+还有一条工程纪律写在同一段注释里：**所有卡必须对每一次调用走相同的路径**（自定义还是回退），而这个决定只依赖全局的尺寸信息和公共的行布局。否则就会出现一部分卡在等自定义 kernel 的标志位、另一部分卡在库里等，直接死锁。
+
+## PD 分离：两套 connector
+
+第 112 讲讲过 PD 分离的原理，第 136 讲读过 vLLM 的 KV connector 接口。插件里实现了两套（`distributed/kv_transfer/kv_connector/v1/`）：一套基于 Mooncake（配套的补丁里还恢复了一个旧版本的 KV 布局接口，注释说明是为了通过 Mooncake 的校验），一套是厂商自己的实现（`du_swift_connector`，另有一个数据并行版本）。仓库的 `docs/` 下有三份使用说明，`examples/` 下有代理脚本。
+
+从文档里的启动命令能看出 PD 分离在这块卡上的真实形态（引自 `docs/pd分离使用.md`）：P 和 D 两侧各起一个 `vllm serve`，用 `--kv-transfer-config` 指定 connector、角色（`kv_producer` / `kv_consumer`）、缓冲大小、端口和代理地址；中间有一个代理进程转发请求。文档里还点出了几个实际问题：跨机时两侧都要打开“多机”开关；支持非对称切分（P 和 D 的并行度不同，要在配置里写明 D 侧的 TP 和 PP）；服务重启时**代理也要重启**。
+
+这些细节是第 112、114 讲那些架构图在一块真实国产卡上的落地形态：原理一样，但每个参数都要按环境配。
+
+<Note kind="column">`docs/` 下这些文档的写法也值得一提：环境变量、启动命令、拓扑组合一字不漏地列出来，连网卡名字和 IP 都在。这类文档不好看，但对适配工作最有用——因为多卡、跨机的问题九成来自环境配置，而不是代码。第 160 讲的清单会把这些整理成可勾选的条目。</Note>
+
+## 三块合起来：一个模型的配置长什么样
+
+插件的 `tests/models/` 下每个 checkpoint 一份 YAML 配置，写明它的并行拓扑、注意力后端、MoE 后端、KV cache 设置和量化方法。拿仓库里一个 MoE 模型的配置为例（`docker/image-citest-conf-hcu.yaml`）：注意力后端写 `FLASH_ATTN`，KV cache 类型 `fp8_e4m3`，KV 布局 `HND`，量化 `slimquant_marlin`，投机解码用 MTP 起草 3 个 token，张量并行 1，还要求打开 V2 的 model runner。
+
+这张配置把这一篇的内容串了起来：**注意力后端（第 150 讲）、KV 精度与布局（第 152 讲）、量化方法（第 152 讲）、投机解码（第 96 讲）、并行度（第 110 讲）各选一个值，组合在一起才是“这个模型在这块卡上的跑法”**。而文档里反复强调的那句话也在这里生效：模型已注册或有配置，不代表精度验证已经通过；换一种量化、换一个拓扑、换一次构建，都要重新验。
+
+## 回顾
+
+注意力在 DCU 上是五个后端加一套优先级：稀疏 MLA 两个候选、MLA 先 FlashMLA 后 Triton、普通注意力先 FlashAttention 后 Triton；每个候选都要通过一次配置校验，全部不可用时抛错而不是降级；关掉自定义算子的开关会让 MLA 整体退回 Triton 版，避免一半自定义一半通用。块大小不是自由参数，而是被注意力后端、索引器层和压缩比共同约束的结果，插件用最小公倍数把它对齐并打日志。量化支持 23 种、注释掉 4 种 4 位浮点相关的方法，FP8 的可用性按架构代号（是不是 `gfx938`）判断，稀疏 MLA 的 KV 精度会被转成专用的打包布局。通信沿用 `nccl` 这个名字和上游的 CUDA 通信器，自定义 All-Reduce 是一个带六项条件的分支（卡数名单、8 MiB 上限、全连接、16 字节对齐、一阶段/两阶段阈值、块数 16），IPC All-Gather 为 MoE 的小消息而写、用波前宽度换掉一次同步，并要求所有卡走相同路径。PD 分离有两套 connector，文档里把环境变量、启动命令和重启顺序都列了出来。
+
+案例读到这里，所有零件都看过了。最后一讲把它们串成一条路：从拿到卡到模型上线，每一步做什么、验收标准是什么。

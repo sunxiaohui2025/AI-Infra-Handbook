@@ -1,0 +1,81 @@
+---
+// 生产成本账与硬件选型对比器（第 159 讲）。
+interface Props { title?: string; caption?: string }
+const { title = '自建 GPU 与外部 API 月成本对比器', caption } = Astro.props;
+---
+<figure class="ai-gt ai-cc" data-deploycost>
+  <div class="ai-ms-title">{title}</div>
+  <div class="ai-tl-ctl">
+    <label class="ai-tl-lr"><span>日均请求率 <b data-qv></b> QPS</span><input type="range" min="1" max="50" step="1" value="10" data-q /></label>
+    <label class="ai-tl-lr"><span>峰值/均值比 <b data-pv></b>×</span><input type="range" min="1" max="4" step="0.5" value="2.5" data-p /></label>
+    <label class="ai-tl-lr"><span>单请求 token（输入/输出）</span>
+      <select data-l style="font-size:12px;padding:2px 6px;border:1px solid var(--line);border-radius:4px;background:var(--surface);">
+        <option value="short">短对话（500 / 200）</option>
+        <option value="med" selected>常规任务（1500 / 400）</option>
+        <option value="long">长文档（6000 / 500）</option>
+      </select>
+    </label>
+  </div>
+  <div class="ai-cg-eq" data-eq></div>
+  {caption && <figcaption class="ai-fig-cap">{caption}</figcaption>}
+</figure>
+
+<script>
+  const LENS: Record<string, { inp: number; out: number; capH100: number; capH20: number }> = {
+    'short': { inp: 500,  out: 200, capH100: 22.0, capH20: 11.5 },
+    'med':   { inp: 1500, out: 400, capH100: 11.0, capH20: 5.5  },
+    'long':  { inp: 6000, out: 500, capH100: 3.6,  capH20: 1.6  },
+  };
+
+  function init(fig: HTMLElement) {
+    const qEl = fig.querySelector<HTMLInputElement>('[data-q]')!;
+    const pEl = fig.querySelector<HTMLInputElement>('[data-p]')!;
+    const lEl = fig.querySelector<HTMLSelectElement>('[data-l]')!;
+    const eq = fig.querySelector<HTMLElement>('[data-eq]')!;
+
+    function draw() {
+      const qps = Number(qEl.value);
+      const peakRatio = Number(pEl.value);
+      const cfg = LENS[lEl.value];
+      fig.querySelector('[data-qv]')!.textContent = String(qps);
+      fig.querySelector('[data-pv]')!.textContent = String(peakRatio);
+
+      const secPerMonth = 30 * 86400;
+      const reqPerMonth = qps * secPerMonth;
+      const inpM = (reqPerMonth * cfg.inp) / 1e6;
+      const outM = (reqPerMonth * cfg.out) / 1e6;
+
+      // 外部 API 示例单价：输入 $0.30 / 1M，输出 $1.20 / 1M
+      const apiCost = inpM * 0.30 + outM * 1.20;
+
+      // 自建按峰值 70% 水位常驻：
+      const peakQps = qps * peakRatio;
+      const nH100Peak = Math.ceil(peakQps / (cfg.capH100 * 0.7));
+      const nH20Peak = Math.ceil(peakQps / (cfg.capH20 * 0.7));
+
+      // 示例月租：H100 $2.5/h ≈ $1,800/月，H20 $1.4/h ≈ $1,008/月
+      const costH100Static = nH100Peak * 2.5 * 720;
+      const costH20Static = nH20Peak * 1.4 * 720;
+
+      // 混部/弹性（均值按包月常驻 + 峰值增量用 Spot/弹性 50% 折扣且只开白天 8h/天）
+      const nH100Base = Math.ceil(qps / (cfg.capH100 * 0.7));
+      const nH100Burst = Math.max(0, nH100Peak - nH100Base);
+      const costHybrid = nH100Base * 1.8 * 720 + nH100Burst * 1.25 * 240; // 包月折 $1.8/h + Spot $1.25/h×240h
+
+      const fmt = (v: number) => '$' + Math.round(v).toLocaleString('en-US');
+      const best = Math.min(apiCost, costH100Static, costH20Static, costHybrid);
+
+      eq.innerHTML =
+        `月总用量：输入 <b>${inpM.toFixed(0)} M</b> token，输出 <b>${outM.toFixed(0)} M</b> token（峰值 ${peakQps.toFixed(1)} QPS）。<br>`
+        + `• <b>外部按量 API</b>：<b>${fmt(apiCost)}/月</b>${apiCost === best ? '（当前最省）' : ''}<br>`
+        + `• <b>自建常驻 H100</b>（${nH100Peak} 卡）：<b>${fmt(costH100Static)}/月</b>${costH100Static === best ? '（当前最省）' : ''}<br>`
+        + `• <b>自建常驻 H20</b>（${nH20Peak} 卡）：<b>${fmt(costH20Static)}/月</b>${costH20Static === best ? '（当前最省）' : ''}<br>`
+        + `• <b>包月基座 + 白天弹性 Spot</b>（${nH100Base} 常驻 + ${nH100Burst} 弹性）：<b>${fmt(costHybrid)}/月</b>${costHybrid === best ? '（当前最省）' : ''}`;
+    }
+
+    fig.addEventListener('input', draw);
+    fig.addEventListener('change', draw);
+    draw();
+  }
+  document.querySelectorAll<HTMLElement>('[data-deploycost]').forEach(init);
+</script>

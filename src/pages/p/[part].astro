@@ -2,7 +2,7 @@
 // 篇页：居中两栏，左侧本章目录，右侧本篇讲列表。
 import Base from '../../layouts/Base.astro';
 import SideNav from '../../components/SideNav.astro';
-import { CH, PN, partLs, chOf, chName, pad, fastCount } from '../../data/course';
+import { CH, PN, partLs, chOf, chName, pad, fastCount, prevNextPart } from '../../data/course';
 
 export function getStaticPaths() {
   return Object.keys(PN).map((p) => ({ params: { part: p } }));
@@ -14,6 +14,7 @@ const c = CH[chOf(p) - 1];
 const nk = ls.filter((l) => l.key).length;
 const no = ls.filter((l) => l.opt).length;
 const first = ls.find((l) => l.fast) || ls[0];
+const { prev: prevPart, next: nextPart } = prevNextPart(p);
 ---
 <Base title={`第 ${p} 篇 ${PN[p]}`} view="part">
   <main class="ai-scroll" id="main">
@@ -27,7 +28,7 @@ const first = ls.find((l) => l.fast) || ls[0];
           <div class="ai-page-meta">
             <a class="ai-btn-primary" href={`/l/${ls[0].id}`}>从 {pad(ls[0].id)} 开始 →</a>
             <span>
-              {ls.length} 讲 · 重点 {nk} · {p === 6 ? '整篇轻量线' : `选读 ${no}`}
+              {ls.length} 讲 · 重点 {nk} · {p === 6 ? '整篇选学' : `选读 ${no}`}
               <span class="r-fast"> · 快速路线读 {fastCount(ls)}{first.id !== ls[0].id ? `（从 ${pad(first.id)} 起）` : ''}</span>
             </span>
           </div>
@@ -41,8 +42,8 @@ const first = ls.find((l) => l.fast) || ls[0];
             ))}
           </div>
           <div class="ai-pn">
-            {p > 1 ? <a href={`/p/${p - 1}`}><small>上一篇</small>← 第 {p - 1} 篇 {PN[p - 1]}</a> : <span></span>}
-            {p < 14 ? <a href={`/p/${p + 1}`}><small>下一篇</small>第 {p + 1} 篇 {PN[p + 1]} →</a> : <span></span>}
+            {prevPart ? <a href={`/p/${prevPart}`}><small>上一篇</small>← 第 {prevPart} 篇 {PN[prevPart]}</a> : <span></span>}
+            {nextPart ? <a href={`/p/${nextPart}`}><small>下一篇</small>第 {nextPart} 篇 {PN[nextPart]} →</a> : <span></span>}
           </div>
         </div>
       </div>
