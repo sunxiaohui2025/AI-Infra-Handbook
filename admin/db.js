@@ -167,11 +167,33 @@ const visitorDetail = db.prepare(`
 `);
 const feedbackCount = db.prepare(`SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'`);
 
+const hardcorePages = db.prepare(`
+  SELECT path, COUNT(*) AS views, COUNT(DISTINCT vid) AS uv,
+         COALESCE(SUM(dwell),0) AS dwell, ROUND(AVG(dwell),1) AS avgDwell
+  FROM pageviews
+  WHERE path LIKE '/l/%'
+  GROUP BY path
+  ORDER BY avgDwell DESC, views DESC
+  LIMIT ?
+`);
+const recentPageviewsStmt = db.prepare(`
+  SELECT id, vid, path, title, ip, ts, dwell FROM pageviews ORDER BY id DESC LIMIT ?
+`);
+
+export function getHardcoreLectures(limit = 6) {
+  const rows = hardcorePages.all(limit);
+  return rows.map((r) => ({ ...r, title: latestTitle.get(r.path)?.title || '' }));
+}
+
+export function getRecentPageviews(limit = 15) {
+  return recentPageviewsStmt.all(limit);
+}
+
 export function getDashboard() {
   const nowIso = new Date().toISOString();
   const dayAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
-  const startDay = new Date(Date.now() - 13 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const startDay = new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
   const t = kpiOne.get();
   const td = kpiSince.get(dayAgo);
@@ -182,6 +204,8 @@ export function getDashboard() {
   const fb = feedbackCount.get().c;
   const dw = dwellAgg.get();
   const series = dailySeries.all(startDay);
+  const hardcore = getHardcoreLectures(6);
+  const recent = getRecentPageviews(15);
 
   return {
     kpi: {
@@ -198,6 +222,8 @@ export function getDashboard() {
       avgDwell: dw.a, totalDwell: dw.s,
     },
     series,
+    hardcore,
+    recent,
   };
 }
 

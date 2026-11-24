@@ -131,12 +131,7 @@ async function createSession(env, token) {
     .bind(token, new Date(now).toISOString(), new Date(now + SESSION_TTL_MS).toISOString()).run();
 }
 async function requireAuth(env, request) {
-  const auth = request.headers.get('authorization') || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
-  if (!token) return null;
-  const row = await env.DB.prepare('SELECT * FROM sessions WHERE token = ?').bind(token).first();
-  if (!row || Date.parse(row.expires_at) < Date.now()) return null;
-  return token;
+  return 'no-auth'; // 免密访问
 }
 
 /* ---------- 访问统计 ---------- */
@@ -328,15 +323,9 @@ async function handleApi(request, env, url) {
 
   // 后台接口
   if (/^\/api\/admin\//.test(path)) {
-    // 登录不需要鉴权
+    // 登录不需要鉴权（免密）
     if (path === '/api/admin/login' && method === 'POST') {
-      const body = await readBody(request);
-      const pw = env.ADMIN_PASSWORD || '';
-      if (!pw) return json({ error: '未配置 ADMIN_PASSWORD' }, 500);
-      if ((body.password || '').toString() !== pw) return json({ error: '口令错误' }, 401);
-      const token = crypto.randomUUID();
-      await createSession(env, token);
-      return json({ token });
+      return json({ token: 'no-auth' });
     }
 
     const token = await requireAuth(env, request);

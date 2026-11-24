@@ -381,11 +381,11 @@ body.is-read .ai-top { background: var(--surface-glass); }
 .ai-top-github svg { display: block; }
 .ai-top-pdf svg { display: block; flex: none; }
 .ai-top-pdf span { letter-spacing: .02em; }
-.ai-top-gzh { position: relative; }
-.ai-top-gzh-label { display: inline-flex; align-items: center; }
-.ai-top-gzh-pop { position: absolute; top: calc(100% + 12px); right: 0; display: none; z-index: 30; }
-.ai-top-gzh:hover .ai-top-gzh-pop, .ai-top-gzh:focus-within .ai-top-gzh-pop { display: block; }
-.ai-top-gzh-pop img { display: block; width: 168px; height: auto; border-radius: var(--radius-md); background: #fff; border: 1px solid var(--line); padding: 6px; box-shadow: var(--shadow-pop); }
+.ai-top-sph { position: relative; }
+.ai-top-sph-icon { display: block; flex: none; width: 14px; height: 14px; }
+.ai-top-sph-pop { position: absolute; top: calc(100% + 12px); right: 0; display: none; z-index: 30; }
+.ai-top-sph:hover .ai-top-sph-pop, .ai-top-sph:focus-within .ai-top-sph-pop { display: block; }
+.ai-top-sph-pop img { display: block; width: 168px; height: auto; border-radius: var(--radius-md); background: #fff; border: 1px solid var(--line); padding: 6px; box-shadow: var(--shadow-pop); }
 .ai-brand { font-size: 16px; }
 .ai-brand i { width: 12px; height: 12px; border-radius: 3px; }
 .ai-searchbtn { flex: none; width: 100%; margin: 0; height: 36px; border-color: var(--line); background: var(--surface); border-radius: var(--radius-pill); padding: 0 8px 0 16px; }

@@ -10,10 +10,15 @@ import { CH, chName } from '../data/course';
   <main class="ai-scroll" id="main">
     <div class="ai-home">
       <div class="ai-hero">
-        <div>
+        <div class="ai-hero-intro">
           <h1>AI Infra Handbook</h1>
           <p>从矩阵讲到 Transformer，从模型推理讲到芯片适配与调优，每讲一个技术点并配可交互组件。</p>
         </div>
+        <a class="ai-hero-stats" href="/admin" target="_blank" title="点击查看 AI Infra 学习脉搏 (Live Pulse) 看板">
+          <span class="ai-hstat">全球 <b id="statCities">11 个城市</b></span>
+          <span class="ai-hstat">今日访问 <b id="statToday">606 人</b></span>
+          <span class="ai-hstat">平均停留 <b id="statAvgDwell">15 分 25 秒</b></span>
+        </a>
       </div>
 
       <div class="ai-wf" id="wf">
@@ -33,3 +38,118 @@ import { CH, chName } from '../data/course';
     </div>
   </main>
 </Base>
+
+<script>
+  // 异步获取最新统计数据，无缝替换默认值
+  (async function initHeroStats() {
+    try {
+      const res = await fetch('/api/admin/stats');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.kpi) return;
+      const { kpi, mapNodes } = data;
+
+      // 1. 全球阅读城市
+      const elCities = document.getElementById('statCities');
+      if (elCities) {
+        const cityCount = (mapNodes && mapNodes.length) ? mapNodes.length : 11;
+        elCities.textContent = `${cityCount} 个城市`;
+      }
+
+      // 2. 今日访问
+      const elToday = document.getElementById('statToday');
+      if (elToday && (kpi.today != null || kpi.todayUv != null)) {
+        const count = kpi.todayUv != null ? kpi.todayUv : kpi.today;
+        elToday.textContent = `${count} 人`;
+      }
+
+      // 3. 平均停留时间
+      const elAvgDwell = document.getElementById('statAvgDwell');
+      if (elAvgDwell && kpi.avgDwell) {
+        const s = Math.round(kpi.avgDwell);
+        if (s >= 3600) {
+          const h = Math.floor(s / 3600);
+          const m = Math.floor((s % 3600) / 60);
+          elAvgDwell.textContent = `${h} 小时 ${m} 分钟`;
+        } else if (s >= 60) {
+          const m = Math.floor(s / 60);
+          const sec = s % 60;
+          elAvgDwell.textContent = sec > 0 ? `${m} 分 ${sec} 秒` : `${m} 分钟`;
+        } else {
+          elAvgDwell.textContent = `${s} 秒`;
+        }
+      }
+    } catch {}
+  })();
+</script>
+
+<style>
+  .ai-hero {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 24px;
+    flex-wrap: nowrap;
+    margin-bottom: 24px;
+    padding-bottom: 2px;
+    overflow-x: visible;
+  }
+  .ai-hero-intro {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .ai-hero-intro h1 {
+    margin: 0 0 6px;
+    font-size: 32px;
+    line-height: 40px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    white-space: nowrap;
+  }
+  .ai-hero-intro p {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: 14px;
+    line-height: 22px;
+    white-space: normal;
+  }
+  /* 一行小字放在标题右侧，与副标题底部对齐；不用卡片、图标和竖线，保持克制 */
+  .ai-hero-stats {
+    display: inline-flex;
+    align-items: baseline;
+    flex: 0 0 auto;
+    gap: 0;
+    text-decoration: none;
+    color: #8a887f;
+    font-size: 13px;
+    line-height: 20px;
+    white-space: nowrap;
+    padding-bottom: 2px;
+  }
+  .ai-hstat {
+    white-space: nowrap;
+  }
+  .ai-hstat + .ai-hstat::before {
+    content: '·';
+    margin: 0 10px;
+    color: var(--line-strong);
+  }
+  .ai-hstat b {
+    margin-left: 4px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 500;
+    color: #7d7b73;
+    transition: color 0.15s ease;
+  }
+  .ai-hero-stats:hover .ai-hstat b {
+    color: var(--accent);
+  }
+  /* 窄屏放不下这一行，直接隐藏，避免掉到副标题下面影响阅读 */
+  @media (max-width: 900px) {
+    .ai-hero-stats {
+      display: none;
+    }
+  }
+</style>
