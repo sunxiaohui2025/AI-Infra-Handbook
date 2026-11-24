@@ -225,6 +225,23 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   assert('presence 城市数与 stats 一致', pres.mapNodes.length === gdata.mapNodes.length);
 }
 
+// 13. D1 异常兜底：读额度耗尽时应返回可读 JSON（而非裸 1101）
+{
+  const badEnv = {
+    DB: {
+      prepare() { throw new Error('D1_ERROR: Exceeded maximum allowed rows read'); },
+      batch() { throw new Error('D1_ERROR: Exceeded maximum allowed rows read'); },
+    },
+    ASSETS: { fetch: () => new Response('static', { status: 200 }) },
+    ADMIN_PASSWORD: 'x',
+  };
+  const res = await worker.fetch(new Request('https://example.com/api/admin/stats'), badEnv);
+  const data = await res.json().catch(() => ({}));
+  assert('D1 异常 → 429', res.status === 429, 'status=' + res.status);
+  assert('返回可读错误码', data.error === 'd1_read_quota_exceeded', JSON.stringify(data));
+  assert('错误信息含中文提示', /额度/.test(String(data.message || '')), JSON.stringify(data.message));
+}
+
 console.log('');
 console.log(fail === 0 ? '✅ 全部通过' : '❌ ' + fail + ' 项失败');
 process.exit(fail === 0 ? 0 : 1);

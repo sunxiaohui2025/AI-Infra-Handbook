@@ -12,7 +12,7 @@ async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (res.status === 401) throw new Error('unauthorized');
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+  if (!res.ok) throw new Error(data.message || data.error || ('HTTP ' + res.status));
   return data;
 }
 
@@ -33,22 +33,72 @@ function setActiveTab(tab) {
 /* ---------- 1. 实时脉搏总览 (真实在线人数 + 真实城市分布 + 走势) ---------- */
 let cachedMapNodes = [];
 
+// 数据读取失败：整块换成友好提示（而不是留空白或弹红条）。
+// 判定为“额度类”错误时给温和解释；其它错误显示对应提示。
+function showDataFallback(msg, quota) {
+  const box = $('#dataFallback');
+  const overview = $('#tab-overview');
+  if (!box || !overview) return;
+  const desc = box.querySelector('.fallback-desc');
+  const hint = box.querySelector('.fallback-hint');
+  const detail = $('#fallbackDetail');
+  if (quota) {
+    if (desc) desc.innerHTML = '多半是今天的数据库读取额度用完了，不是数据出了问题——<b>你的访问记录一条都没丢，都好好存着。</b>';
+    if (hint) hint.innerHTML = '额度每天 <b>北京时间 08:00</b> 自动恢复，届时刷新本页即可看到完整数据。';
+  } else {
+    if (desc) desc.innerHTML = '<b>数据服务暂时没有响应</b>，可能是网络波动或服务正在重启。';
+    if (hint) hint.innerHTML = '稍等片刻再点下面的按钮重试即可。';
+  }
+  if (detail) {
+    // 额度类错误的 message 和友好文案重复，不再重复展示；其它错误才给技术细节
+    if (msg && !quota) { detail.textContent = '技术细节：' + msg; detail.hidden = false; }
+    else detail.hidden = true;
+  }
+  overview.classList.add('data-error');
+  box.hidden = false;
+  // 顶栏在线数未知时显示「—」，避免误导为「真的没人」
+  const cnt = $('#onlineCount');
+  if (cnt) cnt.textContent = '—';
+}
+
+function clearDataFallback() {
+  const box = $('#dataFallback');
+  const overview = $('#tab-overview');
+  if (box) box.hidden = true;
+  if (overview) overview.classList.remove('data-error');
+}
+
 // 完整统计：只在首屏加载一次。含大量全表聚合，不能高频调用（会烧光 D1 的 rows_read 配额）。
 async function loadOverview() {
-  const d = await api('/api/admin/stats');
-  updateOnlineCount(d.onlineCount || 0);
-  updateLocatedCount(d.locatedCount || 0, (d.mapNodes || []).length);
-  renderKpis(d.kpi);
-  renderMap(d.mapNodes || []);
-  renderChart(d.series);
+  try {
+    const d = await api('/api/admin/stats');
+    clearDataFallback();
+    updateOnlineCount(d.onlineCount || 0);
+    updateLocatedCount(d.locatedCount || 0, (d.mapNodes || []).length);
+    renderKpis(d.kpi);
+    renderMap(d.mapNodes || []);
+    renderChart(d.series);
+  } catch (e) {
+    const raw = e.message && e.message !== 'unauthorized' ? e.message : '';
+    const quota = /额度|rows_read|quota|429/i.test(raw);
+    showDataFallback(raw, quota);
+    throw e;
+  }
 }
 
 // 轻量在线状态：只查最近 30 分钟的 active 访客（走索引）， polls 只调这个，读数极低。
 async function loadPresence() {
-  const p = await api('/api/admin/presence');
-  updateOnlineCount(p.onlineCount || 0);
-  updateLocatedCount(p.locatedCount || 0, (p.mapNodes || []).length);
-  renderMap(p.mapNodes || []);
+  try {
+    const p = await api('/api/admin/presence');
+    // 仅当当前没处于“数据不可用”状态时才清提示，避免把首屏错误刚清掉又填回空数据
+    if (!$('#tab-overview')?.classList.contains('data-error')) {
+      updateOnlineCount(p.onlineCount || 0);
+      updateLocatedCount(p.locatedCount || 0, (p.mapNodes || []).length);
+      renderMap(p.mapNodes || []);
+    }
+  } catch (e) {
+    // 轮询失败：若首屏已成功过，说明只是临时抖动，不整块替换成提示，保持原有数据
+  }
 }
 
 function updateOnlineCount(cnt) {
@@ -313,6 +363,23 @@ function statusCn(s) { return ({ new: '待处理', done: '已处理', ignored: '
 
 /* ---------- 初始化 ---------- */
 $$('.tab').forEach((t) => t.addEventListener('click', () => setActiveTab(t.dataset.tab)));
+
+// 「重新加载」按钮：重试完整统计
+const retryBtn = $('#fallbackRetry');
+if (retryBtn) {
+  retryBtn.addEventListener('click', async () => {
+    retryBtn.disabled = true;
+    retryBtn.textContent = '正在重试…';
+    try {
+      await loadOverview();
+    } catch {
+      /* 失败时已由 loadOverview 显示提示 */
+    } finally {
+      retryBtn.disabled = false;
+      retryBtn.textContent = '重新加载';
+    }
+  });
+}
 
 // 刷新策略（为控制 Cloudflare D1 的 rows_read 用量）：
 //  - 完整 stats（含大量全表聚合）只在首屏加载一次，绝不轮询；

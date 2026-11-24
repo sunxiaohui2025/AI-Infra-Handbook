@@ -189,6 +189,72 @@ body {
   inset: 0;
   pointer-events: none;
 }
+/* 数据读取失败：整块友好提示，替代 KPI/地图/走势 */
+#tab-overview.data-error > .kpis,
+#tab-overview.data-error > .panel,
+#tab-overview.data-error > .dual-grid { display: none; }
+.data-fallback {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 44px 28px 40px;
+  text-align: center;
+  margin-bottom: 16px;
+}
+.fallback-icon {
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 18px;
+  border-radius: 50%;
+  background: var(--panel-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.fallback-title {
+  margin: 0 0 12px;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text);
+}
+.fallback-desc {
+  margin: 0 auto 8px;
+  max-width: 460px;
+  font-size: 13px;
+  line-height: 1.75;
+  color: var(--muted);
+}
+.fallback-desc b { color: var(--text); font-weight: 600; }
+.fallback-hint {
+  margin: 0 auto 22px;
+  max-width: 460px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--muted);
+}
+.fallback-hint b { color: var(--text); font-weight: 600; }
+.fallback-btn {
+  padding: 8px 22px;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.fallback-btn:hover:not(:disabled) { opacity: 0.88; }
+.fallback-btn:disabled { opacity: 0.6; cursor: default; }
+.fallback-detail {
+  margin: 18px auto 0;
+  max-width: 520px;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.6;
+  color: #94a3b8;
+  word-break: break-all;
+}
 .map-empty {
   position: absolute;
   top: 50%;

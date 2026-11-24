@@ -55,7 +55,8 @@ function getClientIp(request) {
 }
 
 /* ---------- 自动建表（与 admin/schema.sql 一致，首次请求时若表不存在则创建） ---------- */
-const SCHEMA = [
+// 建表与索引分开：表必须建成功；索引失败不能拖垮请求（CREATE INDEX 需读全表）
+const CREATE_TABLES = [
   `CREATE TABLE IF NOT EXISTS visitors (
     vid         TEXT PRIMARY KEY,
     first_seen  TEXT NOT NULL,
@@ -99,6 +100,9 @@ const SCHEMA = [
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
   )`,
+];
+
+const CREATE_INDEXES = [
   `CREATE INDEX IF NOT EXISTS idx_pv_vid    ON pageviews(vid)`,
   `CREATE INDEX IF NOT EXISTS idx_pv_path   ON pageviews(path)`,
   `CREATE INDEX IF NOT EXISTS idx_pv_ts     ON pageviews(ts)`,
@@ -112,7 +116,12 @@ let schemaPromise = null;
 function ensureTables(env) {
   if (!schemaPromise) {
     schemaPromise = (async () => {
-      await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
+      // 1) 建表：必须成功，失败则整个服务不可用（会抛错）
+      await env.DB.batch(CREATE_TABLES.map((s) => env.DB.prepare(s)));
+      // 2) 索引：CREATE INDEX 会读全表，且额度耗尽时会失败；
+      //    失败不应阻断请求（缺索引只是变慢），单独容错，避免拖垮写入。
+      await env.DB.batch(CREATE_INDEXES.map((s) => env.DB.prepare(s))).catch(() => {});
+      // 3) 补列迁移：同样是幂等的 ALTER，失败也忽略
       await migrateColumns(env);
     })().catch((err) => {
       schemaPromise = null; // 失败后可重试
@@ -210,14 +219,23 @@ async function getDashboard(env) {
   const weekAgo = new Date(Date.now() - 7 * 3600 * 1000 * 24).toISOString();
   const startDay = new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
-  const total = await env.DB.prepare('SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u FROM pageviews').first();
+  // 合并同表聚合，减少全表扫描次数（每次扫描都计入 D1 rows_read）
+  const total = await env.DB.prepare(
+    `SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u,
+            COALESCE(SUM(dwell),0) AS s, COALESCE(AVG(dwell),0) AS a
+     FROM pageviews`
+  ).first();
   const today = await env.DB.prepare('SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u FROM pageviews WHERE ts >= ?').bind(dayAgo).first();
   const week = await env.DB.prepare('SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u FROM pageviews WHERE ts >= ?').bind(weekAgo).first();
   const nv = await env.DB.prepare('SELECT COUNT(DISTINCT vid) AS u FROM visitors WHERE first_seen >= ?').bind(weekAgo).first();
-  const ret = await env.DB.prepare('SELECT COUNT(*) AS c FROM visitors WHERE visit_count > 1').first();
-  const totalVis = await env.DB.prepare('SELECT COUNT(*) AS c FROM visitors').first();
+  // 一次扫 visitors 同时得到「总访客数」与「回访访客数」
+  const visAgg = await env.DB.prepare(
+    `SELECT COUNT(*) AS c, COALESCE(SUM(CASE WHEN visit_count > 1 THEN 1 ELSE 0 END), 0) AS ret FROM visitors`
+  ).first();
   const fb = await env.DB.prepare("SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'").first();
-  const dwell = await env.DB.prepare('SELECT COALESCE(SUM(dwell),0) AS s, COALESCE(AVG(dwell),0) AS a FROM pageviews').first();
+  const dwell = { s: total.s, a: total.a };
+  const ret = { c: visAgg.ret };
+  const totalVis = { c: visAgg.c };
 
   // 每讲热度：总览只需前 20 条，缩小 limit 以减少全表聚合读取量
   const lectures = await getLectureRanking(env, 20);
@@ -426,7 +444,23 @@ export default {
       });
     }
 
-    if (url.pathname.startsWith('/api/')) return handleApi(request, env, url);
+    if (url.pathname.startsWith('/api/')) {
+      // 统一兜底：把 D1 异常转成可读 JSON，而不是裸的 1101。
+      // 常见原因：D1 免费版每日 rows_read 额度耗尽（此时读库全失败、纯写入仍可成功）。
+      try {
+        return await handleApi(request, env, url);
+      } catch (err) {
+        const msg = String((err && err.message) || err);
+        const quota = /exceeded|limit|quota|too many rows|rows_read/i.test(msg);
+        return json({
+          error: quota ? 'd1_read_quota_exceeded' : 'd1_error',
+          message: quota
+            ? 'D1 每日读取额度已用尽，数据暂不可用。免费版额度于每日 UTC 00:00（北京时间 08:00）重置。'
+            : '数据库查询失败：' + msg,
+          detail: msg.slice(0, 300),
+        }, quota ? 429 : 500);
+      }
+    }
 
     // /admin 无斜杠 -> 跳到 /admin/；/admin* 交给静态资源（admin SPA）
     if (url.pathname === '/admin') {
