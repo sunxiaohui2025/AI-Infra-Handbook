@@ -44,26 +44,6 @@ const MAX_BODY = 64 * 1024;               // 请求体上限 64KB
 /* ---------- 实时多人连接 & 学习脉搏广播 (SSE) ---------- */
 const sseClients = new Map();
 const COLOR_PALETTE = ['#3b82f6', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4', '#f43f5e', '#6366f1'];
-const CITIES = [
-  { name: '北京', x: 82.3, y: 27.8, country: 'CN' },
-  { name: '上海', x: 83.7, y: 32.6, country: 'CN' },
-  { name: '深圳', x: 81.7, y: 37.5, country: 'CN' },
-  { name: '杭州', x: 83.4, y: 33.1, country: 'CN' },
-  { name: '新加坡', x: 78.8, y: 49.3, country: 'SG' },
-  { name: '东京', x: 88.8, y: 30.1, country: 'JP' },
-  { name: '硅谷', x: 16.0, y: 29.0, country: 'US' },
-  { name: '西雅图', x: 16.0, y: 23.5, country: 'US' },
-  { name: '纽约', x: 29.4, y: 27.4, country: 'US' },
-  { name: '伦敦', x: 50.0, y: 21.4, country: 'UK' },
-  { name: '柏林', x: 53.7, y: 20.8, country: 'DE' },
-];
-
-function getCityForVisitor(vid, ip = '') {
-  let hash = 0;
-  const str = (vid || '') + (ip || '');
-  for (let i = 0; i < str.length; i++) hash = (hash * 31 + str.charCodeAt(i)) >>> 0;
-  return CITIES[hash % CITIES.length];
-}
 
 function broadcastSSE(event, data, excludeId = null) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -123,6 +103,22 @@ function getClientIp(req) {
   const first = (xff.split(',')[0] || '').trim();
   const ip = first || req.socket.remoteAddress || '';
   return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
+}
+// 从网关/CDN 注入的请求头解析地理位置（Cloudflare、Vercel、nginx GeoIP 等）。
+// CDN 通常只给国家码，城市/经纬度视服务而定；取不到就留空，宁可少显示也不造假。
+function getGeo(req) {
+  const h = req.headers;
+  const pick = (...keys) => { for (const k of keys) { const v = h[k]; if (v) return Array.isArray(v) ? v[0] : v; } return ''; };
+  const country = String(pick('cf-ipcountry', 'x-vercel-ip-country', 'x-country-code', 'cf-ipcountry') || '').toUpperCase();
+  const city = String(pick('cf-ipcity', 'x-vercel-ip-city', 'x-city') || '');
+  const lat = Number(pick('x-vercel-ip-latitude', 'cf-iplatitude'));
+  const lng = Number(pick('x-vercel-ip-longitude', 'cf-iplongitude'));
+  return {
+    country: country === 'XX' || country === 'T1' ? '' : country,
+    city,
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+  };
 }
 
 /* ---------- 静态文件（后台页面） ---------- */
@@ -223,6 +219,7 @@ const server = createServer(async (req, res) => {
       const vid = (body.vid || '').toString();
       if (!vid) return send(res, 400, { error: 'missing vid' });
       const clientIp = getClientIp(req);
+      const geo = getGeo(req);
       const id = recordVisit({
         vid,
         path: (body.path || '').toString().slice(0, 500),
@@ -230,19 +227,7 @@ const server = createServer(async (req, res) => {
         ua: (req.headers['user-agent'] || '').slice(0, 300),
         ref: (req.headers.referer || '').slice(0, 500),
         ip: clientIp,
-      });
-
-      // 广播实时研读动态
-      const city = getCityForVisitor(vid, clientIp);
-      broadcastSSE('activity', {
-        type: 'visit',
-        vid: vid.slice(0, 8),
-        city: city.name,
-        x: city.x,
-        y: city.y,
-        path: body.path || '',
-        title: body.title || 'AI Infra 课程',
-        ts: new Date().toISOString(),
+        ...geo,
       });
 
       return send(res, 200, { ok: true, id });
@@ -255,21 +240,6 @@ const server = createServer(async (req, res) => {
       const vid = (body.vid || '').toString();
       if (!id || !(dt > 0)) return send(res, 400, { error: 'bad payload' });
       addDwell({ vid, id, dt });
-
-      // 当单次研读产生有效心跳时，广播微活动
-      if (dt >= 20) {
-        const city = getCityForVisitor(vid, getClientIp(req));
-        broadcastSSE('activity', {
-          type: 'dwell',
-          vid: vid.slice(0, 8),
-          city: city.name,
-          x: city.x,
-          y: city.y,
-          dt,
-          ts: new Date().toISOString(),
-        });
-      }
-
       return send(res, 200, { ok: true });
     }
 
@@ -305,21 +275,8 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
     if (url.pathname === '/api/admin/stats' && req.method === 'GET') {
-      const dash = getDashboard();
-      // 组装全球学习地图节点
-      const mapNodes = CITIES.map((c, i) => {
-        const topLec = (dash.hardcore && dash.hardcore[i % dash.hardcore.length]) || (dash.lectures && dash.lectures[i % dash.lectures.length]);
-        const baseLearners = [16, 21, 18, 11, 7, 9, 15, 6, 12, 10, 8][i % 11];
-        return {
-          name: c.name,
-          country: c.country,
-          x: c.x,
-          y: c.y,
-          learners: baseLearners + (i === 0 ? sseClients.size : 0),
-          latestLecture: topLec ? (topLec.title || `第 ${topLec.path?.replace('/l/', '')} 讲`) : '第 67 讲 PagedAttention',
-        };
-      });
-      return send(res, 200, { ...dash, mapNodes, onlineCount: Math.max(sseClients.size, 1) });
+      // getDashboard 内已包含真实的在线人数、定位数与按城市聚合的地图节点（见 db.js getLivePresence）
+      return send(res, 200, getDashboard());
     }
     if (url.pathname === '/api/admin/lectures' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('limit') || 25), 50);

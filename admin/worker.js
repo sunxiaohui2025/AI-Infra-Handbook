@@ -23,6 +23,7 @@
 
 const SESSION_TTL_MS = 12 * 3600 * 1000;   // 后台登录有效期 12 小时
 const SESSION_GAP_MS = 30 * 60 * 1000;     // 距上次浏览超过 30 分钟算一次新回访
+const ONLINE_WINDOW_MS = 30 * 60 * 1000;   // 最近 30 分钟有过浏览的访客算「正在学习」
 const MAX_BODY = 64 * 1024;
 
 const json = (obj, status = 200, extra = {}) => new Response(JSON.stringify(obj), {
@@ -64,7 +65,11 @@ const SCHEMA = [
     ua          TEXT NOT NULL DEFAULT '',
     last_ref    TEXT NOT NULL DEFAULT '',
     last_path   TEXT NOT NULL DEFAULT '',
-    ip          TEXT NOT NULL DEFAULT ''
+    ip          TEXT NOT NULL DEFAULT '',
+    country     TEXT NOT NULL DEFAULT '',
+    city        TEXT NOT NULL DEFAULT '',
+    lat         REAL,
+    lng         REAL
   )`,
   `CREATE TABLE IF NOT EXISTS pageviews (
     id    INTEGER PRIMARY KEY,
@@ -104,7 +109,7 @@ function ensureTables(env) {
   if (!schemaPromise) {
     schemaPromise = (async () => {
       await env.DB.batch(SCHEMA.map((s) => env.DB.prepare(s)));
-      await migrateDwellColumn(env);
+      await migrateColumns(env);
     })().catch((err) => {
       schemaPromise = null; // 失败后可重试
       throw err;
@@ -113,14 +118,19 @@ function ensureTables(env) {
   return schemaPromise;
 }
 
-// 迁移：给已存在（旧 schema）的 pageviews 表补 dwell 列。
+// 迁移：给已存在（旧 schema）的表补列。
 // 用 try/catch 而非 pragma_table_info（D1 对某些 pragma 表值函数会报 SQLITE_AUTH），
 // 列已存在时 ALTER 抛“duplicate column”，忽略即可，幂等。
-async function migrateDwellColumn(env) {
-  try {
-    await env.DB.prepare(`ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0`).run();
-  } catch {
-    // 列已存在（新表由 CREATE TABLE 已带列）或临时失败：忽略，下次可重试
+async function migrateColumns(env) {
+  const alters = [
+    `ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE visitors ADD COLUMN country TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE visitors ADD COLUMN city TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE visitors ADD COLUMN lat REAL`,
+    `ALTER TABLE visitors ADD COLUMN lng REAL`,
+  ];
+  for (const sql of alters) {
+    try { await env.DB.prepare(sql).run(); } catch {}
   }
 }
 
@@ -135,16 +145,16 @@ async function requireAuth(env, request) {
 }
 
 /* ---------- 访问统计 ---------- */
-async function recordVisit(env, { vid, path, title, ua, ref, ip }) {
+async function recordVisit(env, { vid, path, title, ua, ref, ip, country = '', city = '', lat = null, lng = null }) {
   const ts = new Date().toISOString();
   const now = Date.now();
   const existing = await env.DB.prepare('SELECT * FROM visitors WHERE vid = ?').bind(vid).first();
 
   if (!existing) {
     await env.DB.prepare(`INSERT INTO visitors
-      (vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_ref, last_path, ip)
-      VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?)`)
-      .bind(vid, ts, ts, JSON.stringify([{ path, title, views: 1 }]), ua, ref, path, ip).run();
+      (vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_ref, last_path, ip, country, city, lat, lng)
+      VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind(vid, ts, ts, JSON.stringify([{ path, title, views: 1 }]), ua, ref, path, ip, country, city, lat, lng).run();
   } else {
     let visitCount = existing.visit_count;
     if (now - Date.parse(existing.last_seen) > SESSION_GAP_MS) visitCount += 1;
@@ -154,9 +164,13 @@ async function recordVisit(env, { vid, path, title, ua, ref, ip }) {
     else pages.push({ path, title, views: 1 });
     if (pages.length > 30) pages = pages.slice(-30); // 只留最近 30 个路径
     await env.DB.prepare(`UPDATE visitors SET
-        visit_count = ?, page_views = page_views + 1, pages = ?, ua = ?, last_ref = ?, last_path = ?, ip = ?, last_seen = ?
+        visit_count = ?, page_views = page_views + 1, pages = ?, ua = ?, last_ref = ?, last_path = ?, ip = ?, last_seen = ?,
+        country = CASE WHEN ? != '' THEN ? ELSE country END,
+        city    = CASE WHEN ? != '' THEN ? ELSE city END,
+        lat     = COALESCE(?, lat),
+        lng     = COALESCE(?, lng)
       WHERE vid = ?`)
-      .bind(visitCount, JSON.stringify(pages), ua, ref, path, ip, ts, vid).run();
+      .bind(visitCount, JSON.stringify(pages), ua, ref, path, ip, ts, country, country, city, city, lat, lng, vid).run();
   }
   const res = await env.DB.prepare(`INSERT INTO pageviews (vid, path, title, ua, ref, ts, ip)
     VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -164,11 +178,33 @@ async function recordVisit(env, { vid, path, title, ua, ref, ip }) {
   return Number(res.meta.last_row_id || res.meta.changes || 0);
 }
 
+/* ---------- 实时在场（真实在线人数 + 真实城市分布） ---------- */
+async function getLivePresence(env) {
+  const since = new Date(Date.now() - ONLINE_WINDOW_MS).toISOString();
+  const [rows, online, located] = await Promise.all([
+    env.DB.prepare(`SELECT city, country, lat, lng, COUNT(*) AS learners FROM visitors
+      WHERE city != '' AND lat IS NOT NULL AND lng IS NOT NULL AND last_seen >= ?
+      GROUP BY city, country, lat, lng ORDER BY learners DESC`).bind(since).all(),
+    env.DB.prepare('SELECT COUNT(*) AS c FROM visitors WHERE last_seen >= ?').bind(since).first(),
+    env.DB.prepare(`SELECT COUNT(*) AS c FROM visitors
+      WHERE last_seen >= ? AND city != '' AND lat IS NOT NULL AND lng IS NOT NULL`).bind(since).first(),
+  ]);
+  const mapNodes = rows.results.map((r) => ({
+    name: r.city,
+    country: r.country || '',
+    x: Math.round(((r.lng + 180) / 360) * 1000) / 10,
+    y: Math.round(((90 - r.lat) / 180) * 1000) / 10,
+    learners: r.learners,
+    latestLecture: '',
+  }));
+  return { onlineCount: online.c, locatedCount: located.c, mapNodes };
+}
+
 /* ---------- 运营指标 ---------- */
 async function getDashboard(env) {
   const dayAgo = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const weekAgo = new Date(Date.now() - 7 * 3600 * 1000 * 24).toISOString();
-  const startDay = new Date(Date.now() - 13 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const startDay = new Date(Date.now() - 29 * 24 * 3600 * 1000).toISOString().slice(0, 10);
 
   const total = await env.DB.prepare('SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u FROM pageviews').first();
   const today = await env.DB.prepare('SELECT COUNT(*) AS c, COUNT(DISTINCT vid) AS u FROM pageviews WHERE ts >= ?').bind(dayAgo).first();
@@ -186,7 +222,7 @@ async function getDashboard(env) {
     byPath[l.path] = l.title;
   }
 
-  // 近 14 天走势（补零）
+  // 近 30 天走势（补零）
   const raw = await env.DB.prepare(
     `SELECT substr(ts, 1, 10) AS d, COUNT(*) AS pv, COUNT(DISTINCT vid) AS uv, COALESCE(SUM(dwell),0) AS dw
      FROM pageviews WHERE ts >= ? GROUP BY d ORDER BY d`
@@ -194,10 +230,12 @@ async function getDashboard(env) {
   const map = {};
   for (const r of raw.results) map[r.d] = { pv: r.pv, uv: r.uv, dw: r.dw || 0 };
   const series = [];
-  for (let i = 13; i >= 0; i--) {
+  for (let i = 29; i >= 0; i--) {
     const d = new Date(Date.now() - i * 24 * 3600 * 1000).toISOString().slice(0, 10);
     series.push({ d, pv: (map[d] || { pv: 0 }).pv, uv: (map[d] || { uv: 0 }).uv, dw: (map[d] || { dw: 0 }).dw });
   }
+
+  const presence = await getLivePresence(env);
 
   return {
     kpi: {
@@ -210,6 +248,7 @@ async function getDashboard(env) {
     },
     series,
     lectures: lectures.slice(0, 20),
+    ...presence,
   };
 }
 
@@ -283,6 +322,10 @@ async function handleApi(request, env, url) {
     const body = await readBody(request);
     const vid = (body.vid || '').toString();
     if (!vid) return json({ error: 'missing vid' }, 400);
+    // Cloudflare 免费提供访客地理位置（request.cf）；取不到则留空，不造假
+    const cf = request.cf || {};
+    const lat = Number(cf.latitude);
+    const lng = Number(cf.longitude);
     const id = await recordVisit(env, {
       vid,
       path: (body.path || '').toString().slice(0, 500),
@@ -290,6 +333,10 @@ async function handleApi(request, env, url) {
       ua: (request.headers.get('user-agent') || '').slice(0, 300),
       ref: (request.headers.get('referer') || '').slice(0, 500),
       ip: getClientIp(request),
+      country: cf.country || '',
+      city: cf.city || '',
+      lat: Number.isFinite(lat) ? lat : null,
+      lng: Number.isFinite(lng) ? lng : null,
     });
     return json({ ok: true, id });
   }

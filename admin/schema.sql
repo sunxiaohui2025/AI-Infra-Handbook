@@ -12,7 +12,11 @@ CREATE TABLE IF NOT EXISTS visitors (
   ua          TEXT NOT NULL DEFAULT '',
   last_ref    TEXT NOT NULL DEFAULT '',
   last_path   TEXT NOT NULL DEFAULT '',
-  ip          TEXT NOT NULL DEFAULT ''
+  ip          TEXT NOT NULL DEFAULT '',
+  country     TEXT NOT NULL DEFAULT '',
+  city        TEXT NOT NULL DEFAULT '',
+  lat         REAL,
+  lng         REAL
 );
 
 CREATE TABLE IF NOT EXISTS pageviews (

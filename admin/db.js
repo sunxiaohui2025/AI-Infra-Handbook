@@ -29,7 +29,11 @@ export function initSchema() {
       ua          TEXT NOT NULL DEFAULT '',
       last_ref    TEXT NOT NULL DEFAULT '',
       last_path   TEXT NOT NULL DEFAULT '',
-      ip          TEXT NOT NULL DEFAULT ''
+      ip          TEXT NOT NULL DEFAULT '',
+      country     TEXT NOT NULL DEFAULT '',
+      city        TEXT NOT NULL DEFAULT '',
+      lat         REAL,
+      lng         REAL
     );
     CREATE TABLE IF NOT EXISTS pageviews (
       id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,31 +72,40 @@ export function initSchema() {
   try { db.exec(`ALTER TABLE visitors ADD COLUMN ip TEXT NOT NULL DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE pageviews ADD COLUMN ip TEXT NOT NULL DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0`); } catch {}
+  // 迁移：v2 真实地理位置字段
+  try { db.exec(`ALTER TABLE visitors ADD COLUMN country TEXT NOT NULL DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE visitors ADD COLUMN city TEXT NOT NULL DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE visitors ADD COLUMN lat REAL`); } catch {}
+  try { db.exec(`ALTER TABLE visitors ADD COLUMN lng REAL`); } catch {}
 }
 
 /* ---------- 访问统计 ---------- */
 
 const upsertVisitor = db.prepare(`
-  INSERT INTO visitors (vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_ref, last_path, ip)
-  VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?)
+  INSERT INTO visitors (vid, first_seen, last_seen, visit_count, page_views, pages, ua, last_ref, last_path, ip, country, city, lat, lng)
+  VALUES (?, ?, ?, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 const getVisitor = db.prepare(`SELECT * FROM visitors WHERE vid = ?`);
 const bumpVisitor = db.prepare(`
   UPDATE visitors
-  SET visit_count = ?, page_views = page_views + 1, pages = ?, ua = ?, last_ref = ?, last_path = ?, ip = ?, last_seen = ?
+  SET visit_count = ?, page_views = page_views + 1, pages = ?, ua = ?, last_ref = ?, last_path = ?, ip = ?, last_seen = ?,
+      country = CASE WHEN ? != '' THEN ? ELSE country END,
+      city    = CASE WHEN ? != '' THEN ? ELSE city END,
+      lat     = COALESCE(?, lat),
+      lng     = COALESCE(?, lng)
   WHERE vid = ?
 `);
 const insertPageview = db.prepare(`
   INSERT INTO pageviews (vid, path, title, ua, ref, ts, ip) VALUES (?, ?, ?, ?, ?, ?, ?)
 `);
 
-export function recordVisit({ vid, path, title, ua, ref, ip = '' }) {
+export function recordVisit({ vid, path, title, ua, ref, ip = '', country = '', city = '', lat = null, lng = null }) {
   const ts = new Date().toISOString();
   const now = Date.now();
   const existing = getVisitor.get(vid);
 
   if (!existing) {
-    upsertVisitor.run(vid, ts, ts, JSON.stringify([{ path, title, views: 1 }]), ua, ref, path, ip);
+    upsertVisitor.run(vid, ts, ts, JSON.stringify([{ path, title, views: 1 }]), ua, ref, path, ip, country, city, lat, lng);
   } else {
     // 距上次访问超过会话窗口 => 记为新一次回访
     let visitCount = existing.visit_count;
@@ -104,7 +117,7 @@ export function recordVisit({ vid, path, title, ua, ref, ip = '' }) {
     else pages.push({ path, title, views: 1 });
     if (pages.length > 30) pages = pages.slice(-30); // 只保留最近 30 个路径，避免单个访客行无限膨胀
 
-    bumpVisitor.run(visitCount, JSON.stringify(pages), ua, ref, path, ip, ts, vid);
+    bumpVisitor.run(visitCount, JSON.stringify(pages), ua, ref, path, ip, ts, country, country, city, city, lat, lng, vid);
   }
   const res = insertPageview.run(vid, path, title, ua, ref, ts, ip);
   return Number(res.lastInsertRowid);
@@ -180,6 +193,52 @@ const recentPageviewsStmt = db.prepare(`
   SELECT id, vid, path, title, ip, ts, dwell FROM pageviews ORDER BY id DESC LIMIT ?
 `);
 
+// 在线窗口：最近 30 分钟内有过浏览(track 会刷新 last_seen)的访客算「正在学习」
+export const ONLINE_WINDOW_MS = 30 * 60 * 1000;
+
+// 真实地图节点：按城市聚合在线访客，并给出该城市最近浏览的讲
+const onlineCitiesStmt = db.prepare(`
+  SELECT city, country, lat, lng,
+         COUNT(*) AS learners,
+         (SELECT title FROM pageviews p WHERE p.vid IN (
+            SELECT vid FROM visitors WHERE city = v.city AND city != ''
+          ) ORDER BY p.ts DESC LIMIT 1) AS latestLecture
+  FROM visitors v
+  WHERE city != '' AND lat IS NOT NULL AND lng IS NOT NULL
+        AND last_seen >= ?
+  GROUP BY city, country, lat, lng
+  ORDER BY learners DESC
+`);
+// 在线人数：窗口内独立访客
+const onlineCountStmt = db.prepare(`
+  SELECT COUNT(*) AS c FROM visitors WHERE last_seen >= ?
+`);
+// 窗口内有地理信息的独立访客数（用于「已定位」提示）
+const onlineLocatedStmt = db.prepare(`
+  SELECT COUNT(*) AS c FROM visitors
+  WHERE last_seen >= ? AND city != '' AND lat IS NOT NULL AND lng IS NOT NULL
+`);
+
+/** 返回在线人数与按城市聚合的真实地图节点。 */
+export function getLivePresence() {
+  const since = new Date(Date.now() - ONLINE_WINDOW_MS).toISOString();
+  const rows = onlineCitiesStmt.all(since);
+  // 等距柱状投影：经纬度 -> 地图百分比坐标（与 index.html 的浅色世界地图一致）
+  const nodes = rows.map((r) => ({
+    name: r.city,
+    country: r.country || '',
+    x: Math.round(((r.lng + 180) / 360) * 1000) / 10,
+    y: Math.round(((90 - r.lat) / 180) * 1000) / 10,
+    learners: r.learners,
+    latestLecture: r.latestLecture || '',
+  }));
+  return {
+    onlineCount: onlineCountStmt.get(since).c,
+    locatedCount: onlineLocatedStmt.get(since).c,
+    mapNodes: nodes,
+  };
+}
+
 export function getHardcoreLectures(limit = 6) {
   const rows = hardcorePages.all(limit);
   return rows.map((r) => ({ ...r, title: latestTitle.get(r.path)?.title || '' }));
@@ -224,6 +283,7 @@ export function getDashboard() {
     series,
     hardcore,
     recent,
+    ...getLivePresence(),
   };
 }
 

@@ -7,9 +7,6 @@
   <link rel="stylesheet" href="/admin/style.css" />
 </head>
 <body>
-  <!-- 多人实时光标图层 -->
-  <div id="cursorLayer" class="cursor-layer"></div>
-
   <!-- 主体 -->
   <div id="app">
     <div class="topbar">
@@ -20,7 +17,7 @@
       <div class="spacer"></div>
       <div class="live-pill">
         <span class="live-indicator"></span>
-        <span id="onlineCount">1</span> 位工程师正在同频查看
+        <span id="onlineCount">0</span> 位读者正在学习
       </div>
     </div>
 
@@ -39,10 +36,10 @@
       <!-- 2. 全球学习地图（浅色精细地图，位于统计卡片下方独立层） -->
       <div class="panel map-panel">
         <div class="panel-header">
-          <h2>全球实时学习地图 <small>各节点信标实时同步 · 鼠标悬停信标查看节点研读动向</small></h2>
+          <h2>全球实时学习地图 <small>按访客 IP 归属地聚合最近 30 分钟活跃读者 · 每 15 秒刷新 · 悬停信标查看详情</small></h2>
           <div class="map-stats-tag">
             <span class="pulse-beacon-demo"></span>
-            <span id="mapActiveCount">11 个全球节点在线</span>
+            <span id="mapActiveCount">正在加载...</span>
           </div>
         </div>
         <div class="map-wrapper" id="mapWrapper">

@@ -78,14 +78,14 @@ assert('dwell 累加 ok', r.status === 200 && r.data.ok, JSON.stringify(r.data))
 assert('dwell 缺 id → 400', (await call('POST', '/api/dwell', { vid: 'v1', dt: 5 })).status === 400);
 assert('异 vid 不能改他人 dwell(仍 ok)', (await call('POST', '/api/dwell', { vid: 'zz', id: pv1l3, dt: 10 })).status === 200);
 
-// 2. 后台未登录 → 401
-assert('未登录 stats → 401', (await call('GET', '/api/admin/stats')).status === 401);
+// 2. 后台免密访问：未登录也能读 stats
+assert('未登录 stats → 200(免密)', (await call('GET', '/api/admin/stats')).status === 200);
 
-// 3. 登录
+// 3. 登录（免密模式：任意口令都返回 token）
 r = await call('POST', '/api/admin/login', { password: 'fuyao' });
-assert('正确口令登录返回 token', r.status === 200 && r.data && r.data.token, JSON.stringify(r.data));
+assert('登录返回 token', r.status === 200 && r.data && r.data.token, JSON.stringify(r.data));
 const token = r.data.token;
-assert('错误口令 → 401', (await call('POST', '/api/admin/login', { password: 'wrong' })).status === 401);
+assert('任意口令也返回 token(免密)', (await call('POST', '/api/admin/login', { password: 'wrong' })).status === 200);
 
 // 4. 统计
 r = await call('GET', '/api/admin/stats', null, token);
@@ -95,7 +95,9 @@ assert('总UV=2', r.data.kpi.totalUv === 2, 'totalUv=' + r.data.kpi.totalUv);
 assert('累计停留=45', r.data.kpi.totalDwell === 45, 'totalDwell=' + r.data.kpi.totalDwell);
 assert('平均停留=15', r.data.kpi.avgDwell === 15, 'avgDwell=' + r.data.kpi.avgDwell);
 assert('回访=0(同窗口内不算回访)', r.data.kpi.returnRate === 0, 'returnRate=' + r.data.kpi.returnRate);
-assert('走势14天', r.data.series.length === 14, 'len=' + r.data.series.length);
+assert('走势30天', r.data.series.length === 30, 'len=' + r.data.series.length);
+assert('stats 含在线人数', typeof r.data.onlineCount === 'number', 'onlineCount=' + r.data.onlineCount);
+assert('stats 含真实地图节点数组', Array.isArray(r.data.mapNodes), JSON.stringify(r.data.mapNodes));
 
 // 5. 每讲热度
 r = await call('GET', '/api/admin/lectures', null, token);
@@ -131,7 +133,7 @@ assert('done 列表 1 条', r.data.list.length === 1, JSON.stringify(r.data.list
 // 9. me / logout
 assert('me ok', (await call('GET', '/api/admin/me', null, token)).status === 200);
 assert('logout ok', (await call('POST', '/api/admin/logout', null, token)).status === 200);
-assert('登出后 stats → 401', (await call('GET', '/api/admin/stats', null, token)).status === 401);
+assert('登出后 stats 仍可读(免密)', (await call('GET', '/api/admin/stats', null, token)).status === 200);
 
 // 10. 路由
 const admin = await call('GET', '/admin');
@@ -180,6 +182,37 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   assert('迁移后 pageviews 有 dwell 列', cols.includes('dwell'), cols.join(','));
   const row = old.prepare(`SELECT dwell FROM pageviews WHERE vid = 'm1'`).get();
   assert('迁移后 dwell 默认 0', row && row.dwell === 0, JSON.stringify(row));
+}
+
+// 12. 真实地理位置：模拟 Cloudflare request.cf，验证按城市聚合到地图节点
+{
+  const geoEnv = {
+    DB: makeMockD1(db),
+    ASSETS: { fetch: () => new Response('static', { status: 200 }) },
+    ADMIN_PASSWORD: 'fuyao',
+  };
+  const trackWithCf = (vid, cf) => {
+    const req = new Request('https://example.com/api/track', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ vid, path: '/', title: '首页' }),
+    });
+    // Node 原生 Request 没有 cf，模拟 Cloudflare 注入的 request.cf
+    Object.defineProperty(req, 'cf', { value: cf });
+    return worker.fetch(req, geoEnv);
+  };
+  await trackWithCf('geo-bj', { country: 'CN', city: 'Beijing', latitude: '39.9042', longitude: '116.4074' });
+  await trackWithCf('geo-bj2', { country: 'CN', city: 'Beijing', latitude: '39.9042', longitude: '116.4074' });
+  await trackWithCf('geo-ny', { country: 'US', city: 'New York', latitude: '40.7128', longitude: '-74.0060' });
+  const statsRes = await worker.fetch(new Request('https://example.com/api/admin/stats'), geoEnv);
+  const gdata = await statsRes.json();
+  const bj = gdata.mapNodes.find((n) => n.name === 'Beijing');
+  const ny = gdata.mapNodes.find((n) => n.name === 'New York');
+  assert('真实城市聚合：Beijing 2 人', bj && bj.learners === 2, JSON.stringify(bj));
+  assert('经纬度→地图坐标：Beijing x≈82.3', bj && Math.abs(bj.x - 82.3) < 0.5, 'x=' + (bj && bj.x));
+  assert('真实城市聚合：New York 1 人', ny && ny.learners === 1, JSON.stringify(ny));
+  assert('经纬度→地图坐标：New York x≈29.4', ny && Math.abs(ny.x - 29.4) < 0.5, 'x=' + (ny && ny.x));
+  assert('在线人数≥3', gdata.onlineCount >= 3, 'onlineCount=' + gdata.onlineCount);
 }
 
 console.log('');
