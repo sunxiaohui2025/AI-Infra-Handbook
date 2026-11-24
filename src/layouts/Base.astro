@@ -142,21 +142,21 @@ const { title, view } = Astro.props;
     <style>
       /* 与「全文PDF」等顶栏按钮共用 ai-top-contact 的尺寸与外观；这里只管内部排布，保留呼吸点与 LIVE */
       .ai-top-live {
-        gap: 5px;
+        gap: 6px;
         margin-right: 2px;
       }
       .ai-live-pulse-dot {
-        width: 4px;
-        height: 4px;
+        width: 8px;
+        height: 8px;
         background: #16a34a;
         border-radius: 50%;
         flex: none;
-        box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.55);
-        animation: top-live-wave 2s infinite;
+        box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7);
+        animation: top-live-wave 1.8s infinite;
       }
       @keyframes top-live-wave {
-        0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.55); }
-        70% { transform: scale(1); box-shadow: 0 0 0 4px rgba(22, 163, 74, 0); }
+        0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.7); }
+        70% { transform: scale(1); box-shadow: 0 0 0 7px rgba(22, 163, 74, 0); }
         100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(22, 163, 74, 0); }
       }
       .ai-live-pulse-txt {
