@@ -213,6 +213,16 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   assert('真实城市聚合：New York 1 人', ny && ny.learners === 1, JSON.stringify(ny));
   assert('经纬度→地图坐标：New York x≈29.4', ny && Math.abs(ny.x - 29.4) < 0.5, 'x=' + (ny && ny.x));
   assert('在线人数≥3', gdata.onlineCount >= 3, 'onlineCount=' + gdata.onlineCount);
+
+  // 轻量 presence 接口：返回字段齐全，且与 stats 的在线数据一致（供前端高频轮询、不再触发重聚合）
+  const presRes = await worker.fetch(new Request('https://example.com/api/admin/presence'), geoEnv);
+  const pres = await presRes.json();
+  assert('presence 接口 200', presRes.status === 200, 'status=' + presRes.status);
+  assert('presence 含 onlineCount', typeof pres.onlineCount === 'number', JSON.stringify(pres));
+  assert('presence 含 mapNodes', Array.isArray(pres.mapNodes), JSON.stringify(pres.mapNodes));
+  assert('presence 与 stats 在线人数一致', pres.onlineCount === gdata.onlineCount,
+    'presence=' + pres.onlineCount + ' stats=' + gdata.onlineCount);
+  assert('presence 城市数与 stats 一致', pres.mapNodes.length === gdata.mapNodes.length);
 }
 
 console.log('');

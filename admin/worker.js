@@ -14,7 +14,8 @@
 //   POST  /api/admin/login            登录（body: { password } -> { token }）
 //   GET   /api/admin/me               校验 token
 //   POST  /api/admin/logout           退出
-//   GET   /api/admin/stats            总览 + 14 天走势
+//   GET   /api/admin/stats            总览 + 30 天走势（重查询，仅首屏调用）
+//   GET   /api/admin/presence         在线人数 + 真实城市分布（轻量，供定时轮询）
 //   GET   /api/admin/lectures         讲热度
 //   GET   /api/admin/visitors?limit=&vid=  访客列表 / 单个访客轨迹
 //   GET   /api/admin/feedback?status=      反馈列表
@@ -102,6 +103,9 @@ const SCHEMA = [
   `CREATE INDEX IF NOT EXISTS idx_pv_path   ON pageviews(path)`,
   `CREATE INDEX IF NOT EXISTS idx_pv_ts     ON pageviews(ts)`,
   `CREATE INDEX IF NOT EXISTS idx_fb_status ON feedback(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_v_last_seen   ON visitors(last_seen)`,
+  `CREATE INDEX IF NOT EXISTS idx_v_first_seen  ON visitors(first_seen)`,
+  `CREATE INDEX IF NOT EXISTS idx_v_visit_count ON visitors(visit_count)`,
 ];
 
 let schemaPromise = null;
@@ -215,12 +219,8 @@ async function getDashboard(env) {
   const fb = await env.DB.prepare("SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'").first();
   const dwell = await env.DB.prepare('SELECT COALESCE(SUM(dwell),0) AS s, COALESCE(AVG(dwell),0) AS a FROM pageviews').first();
 
-  // 每讲热度，附最近一次标题
-  const lectures = await getLectureRanking(env, 100);
-  const byPath = {};
-  for (const l of lectures) {
-    byPath[l.path] = l.title;
-  }
+  // 每讲热度：总览只需前 20 条，缩小 limit 以减少全表聚合读取量
+  const lectures = await getLectureRanking(env, 20);
 
   // 近 30 天走势（补零）
   const raw = await env.DB.prepare(
@@ -384,6 +384,8 @@ async function handleApi(request, env, url) {
       return json({ ok: true });
     }
     if (path === '/api/admin/stats') return json(await getDashboard(env));
+    // 轻量：只查在线人数与城市分布，走 last_seen 索引，读数极低，供前端每 60 秒轮询
+    if (path === '/api/admin/presence') return json(await getLivePresence(env));
     if (path === '/api/admin/lectures') return json({ list: await getLectureRanking(env, 100) });
     if (path === '/api/admin/visitors') {
       const vid = url.searchParams.get('vid');

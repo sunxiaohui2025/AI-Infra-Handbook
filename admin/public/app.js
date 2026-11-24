@@ -24,7 +24,7 @@ function setActiveTab(tab) {
     const el = $('#tab-' + t);
     if (el) el.hidden = t !== tab;
   });
-  if (tab === 'overview') loadOverview();
+  if (tab === 'overview') loadPresence();
   if (tab === 'lectures') loadLectures();
   if (tab === 'visitors') loadVisitors();
   if (tab === 'feedback') loadFeedback();
@@ -33,6 +33,7 @@ function setActiveTab(tab) {
 /* ---------- 1. 实时脉搏总览 (真实在线人数 + 真实城市分布 + 走势) ---------- */
 let cachedMapNodes = [];
 
+// 完整统计：只在首屏加载一次。含大量全表聚合，不能高频调用（会烧光 D1 的 rows_read 配额）。
 async function loadOverview() {
   const d = await api('/api/admin/stats');
   updateOnlineCount(d.onlineCount || 0);
@@ -40,6 +41,14 @@ async function loadOverview() {
   renderKpis(d.kpi);
   renderMap(d.mapNodes || []);
   renderChart(d.series);
+}
+
+// 轻量在线状态：只查最近 30 分钟的 active 访客（走索引）， polls 只调这个，读数极低。
+async function loadPresence() {
+  const p = await api('/api/admin/presence');
+  updateOnlineCount(p.onlineCount || 0);
+  updateLocatedCount(p.locatedCount || 0, (p.mapNodes || []).length);
+  renderMap(p.mapNodes || []);
 }
 
 function updateOnlineCount(cnt) {
@@ -305,23 +314,25 @@ function statusCn(s) { return ({ new: '待处理', done: '已处理', ignored: '
 /* ---------- 初始化 ---------- */
 $$('.tab').forEach((t) => t.addEventListener('click', () => setActiveTab(t.dataset.tab)));
 
-// 轮询刷新：只有停留在「实时脉搏」标签页时才拉数据，每 15 秒一次。
-// 相比 SSE，轮询在 Cloudflare Worker / 任意静态托管上都能稳定工作，无需长连接与 Durable Objects。
-const REFRESH_MS = 15000;
+// 刷新策略（为控制 Cloudflare D1 的 rows_read 用量）：
+//  - 完整 stats（含大量全表聚合）只在首屏加载一次，绝不轮询；
+//  - 定时只拉轻量的 presence（在线人数 + 城市分布，走索引，读数极低），每 60 秒一次；
+//  - 页面从后台切回时也只拉 presence。
+const REFRESH_MS = 60000;
 let overviewTimer = null;
 function startPolling() {
   if (overviewTimer) return;
   overviewTimer = setInterval(() => {
     if (currentTab === 'overview' && !document.hidden) {
-      loadOverview().catch(() => {});
+      loadPresence().catch(() => {});
     }
   }, REFRESH_MS);
 }
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && currentTab === 'overview') loadOverview().catch(() => {});
+  if (!document.hidden && currentTab === 'overview') loadPresence().catch(() => {});
 });
 
 (async function init() {
-  setActiveTab('overview');
+  await loadOverview().catch(() => {}); // 首屏完整加载一次
   startPolling();
 })();

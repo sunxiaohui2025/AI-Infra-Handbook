@@ -7,7 +7,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { dirname, join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
-  db, recordVisit, addDwell, getDashboard, getLectureRanking,
+  db, recordVisit, addDwell, getDashboard, getLectureRanking, getLivePresence,
   getVisitorList, getVisitorDetail,
   addFeedback, listFeedback, setFeedbackStatus,
   createSession, validSession, deleteSession,
@@ -277,6 +277,10 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/admin/stats' && req.method === 'GET') {
       // getDashboard 内已包含真实的在线人数、定位数与按城市聚合的地图节点（见 db.js getLivePresence）
       return send(res, 200, getDashboard());
+    }
+    if (url.pathname === '/api/admin/presence' && req.method === 'GET') {
+      // 轻量：只查在线人数与城市分布，供前端每 60 秒轮询，避免反复触发重聚合
+      return send(res, 200, getLivePresence());
     }
     if (url.pathname === '/api/admin/lectures' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('limit') || 25), 50);

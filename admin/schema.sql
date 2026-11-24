@@ -53,3 +53,7 @@ CREATE INDEX IF NOT EXISTS idx_pv_vid   ON pageviews(vid);
 CREATE INDEX IF NOT EXISTS idx_pv_path  ON pageviews(path);
 CREATE INDEX IF NOT EXISTS idx_pv_ts    ON pageviews(ts);
 CREATE INDEX IF NOT EXISTS idx_fb_status ON feedback(status);
+-- 在线状态/城市聚合与 KPI 高频过滤字段：走索引，避免全表扫描抬高 D1 rows_read
+CREATE INDEX IF NOT EXISTS idx_v_last_seen  ON visitors(last_seen);
+CREATE INDEX IF NOT EXISTS idx_v_first_seen ON visitors(first_seen);
+CREATE INDEX IF NOT EXISTS idx_v_visit_count ON visitors(visit_count);

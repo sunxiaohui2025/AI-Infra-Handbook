@@ -38,7 +38,9 @@ ADMIN_PASSWORD=你的口令 PORT=8787 node server.js
 | 板块 | 内容 |
 |---|---|
 | 总览 | 总 PV/UV、今日、近 7 天、回访率、待处理反馈；近 30 天 PV 走势图（柱顶显示数值） |
-| 全球学习地图 | 按访客 IP 归属地聚合「最近 30 分钟在线」读者，信标落在真实经纬度上；每 15 秒轮询刷新。Cloudflare 用 `request.cf`，Node 版读取网关注入的 `CF-IPCountry` / `X-Vercel-Ip-*` 等请求头；取不到地理位置的访客不计入地图（不造假） |
+| 全球学习地图 | 按访客 IP 归属地聚合「最近 30 分钟在线」读者，信标落在真实经纬度上；每 60 秒轮询刷新。Cloudflare 用 `request.cf`，Node 版读取网关注入的 `CF-IPCountry` / `X-Vercel-Ip-*` 等请求头；取不到地理位置的访客不计入地图（不造假） |
+
+> **D1 用量优化**：完整统计 `GET /api/admin/stats` 含多次全表聚合，**只在首屏加载一次**；定时（60 秒）只调轻量的 `GET /api/admin/presence`（在线人数 + 城市分布，走 `visitors.last_seen` 索引）。这样免费版 D1 的 `rows_read` 不会被高频轮询耗尽。`visitors.last_seen/first_seen/visit_count` 均已建索引。
 | 每讲热度 | 按 `/l/讲号` 的浏览量排行 + 平均停留时长，可看哪些讲最受欢迎、哪几讲大家停留最久 |
 | 访客明细 | 匿名 ID 列表（IP/首访/最近/回访次数/浏览量/停留），点一行展开浏览轨迹（含每页停留） |
 | 反馈意见 | 用户通过 `/feedback` 提交的反馈，可标记 处理/忽略/重置 |

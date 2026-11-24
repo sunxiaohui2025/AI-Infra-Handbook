@@ -66,6 +66,9 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_pv_path ON pageviews(path);
     CREATE INDEX IF NOT EXISTS idx_pv_ts   ON pageviews(ts);
     CREATE INDEX IF NOT EXISTS idx_fb_status ON feedback(status);
+    CREATE INDEX IF NOT EXISTS idx_v_last_seen   ON visitors(last_seen);
+    CREATE INDEX IF NOT EXISTS idx_v_first_seen  ON visitors(first_seen);
+    CREATE INDEX IF NOT EXISTS idx_v_visit_count ON visitors(visit_count);
   `);
 
   // 迁移：给已有的库补 ip 列（新库 CREATE TABLE 已含该列，ALTER 已有列会抛错，忽略即可）
