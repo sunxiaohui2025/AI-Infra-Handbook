@@ -64,7 +64,11 @@ import Note from '../../components/Note.astro';
 
 Llama-3-8B 是 2 × (80.3 亿 − 5.25 亿) ≈ 150 亿 FLOPs，即 15.01 GFLOPs。
 
-还有一部分不在参数里：注意力的打分 *QK*<sup>T</sup> 和加权求和 *AV*（第 26 讲）。一个 token 前面有 s 个 token 时，它的 q 要和 s 个 k 做点积，再给 s 个 v 加权，每层大约 2·s·d + 2·s·d = 4·s·d 次运算：
+还有一部分不在参数里：注意力的打分 *QK*<sup>T</sup> 和加权求和 *AV*（第 26 讲）。当新 token 前面有 s 个历史 token 时，在每一层里：
+- 算打分是 `[1, d] @ [d, s]`，套用 2mnk 公式是 2·s·d 次运算（注意虽然用了 GQA，查询头仍有 32 个、总宽还是 d，对应把每个 KV 头广播对齐）。
+- 用权重对 V 加权求和是 `[1, s] @ [s, d]`，同样是 2·s·d 次运算。
+
+两项合起来每层 4·s·d，乘以 L 层就是 4·L·s·d：
 
 <div class="ai-formula">每 token 前向 ≈ 2 × (N − V·d) + 4·L·s·d</div>
 
