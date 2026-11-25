@@ -287,9 +287,13 @@ async function toggleVisitor(tr) {
 }
 
 /* ---------- 5. 保留的管理功能：用户反馈意见与操作 ---------- */
+let replyTargetId = null;
+let fbCache = [];
+
 async function loadFeedback() {
   const d = await api('/api/admin/feedback?status=' + fbFilter);
   const list = d.list || [];
+  fbCache = list;
   const rows = $('#feedbackRows');
   const empty = $('#feedbackEmpty');
   const count = $('#fbCount');
@@ -302,24 +306,80 @@ async function loadFeedback() {
   count.textContent = `${list.length} 条`;
   if (!list.length) { rows.innerHTML = ''; empty.hidden = false; return; }
   empty.hidden = true;
-  rows.innerHTML = list.map((f) => `
+  rows.innerHTML = list.map((f) => {
+    const reply = (f.reply || '').trim();
+    return `
     <tr>
       <td class="num" style="white-space:nowrap">${fmt(f.ts)}</td>
       <td><span class="chip k">${kindCn(f.kind)}</span></td>
-      <td class="fb-content">${esc(f.content)}</td>
+      <td class="fb-content">
+        <div class="fb-msg">${esc(f.content)}</div>
+        ${reply
+          ? `<div class="fb-reply"><span class="fb-reply-tag">回复 · ${fmt(f.reply_at)}</span>${esc(reply)}</div>`
+          : `<div class="fb-noreply">未回复</div>`}
+      </td>
       <td class="mono">${f.page || ''}</td>
       <td class="mono">${f.contact || ''}</td>
       <td><span class="chip ${f.status}">${statusCn(f.status)}</span></td>
       <td style="white-space:nowrap">
-        ${f.status !== 'done' ? `<button class="mini" data-act="done" data-id="${f.id}">处理</button>` : ''}
-        ${f.status !== 'ignored' ? `<button class="mini" data-act="ignored" data-id="${f.id}">忽略</button>` : ''}
+        <button class="mini" data-reply="${f.id}">${reply ? '改回复' : '回复'}</button>
+        ${f.status !== 'done' ? `<button class="mini ghost" data-act="done" data-id="${f.id}">处理</button>` : ''}
+        ${f.status !== 'ignored' ? `<button class="mini ghost" data-act="ignored" data-id="${f.id}">忽略</button>` : ''}
         ${f.status !== 'new' ? `<button class="mini ghost" data-act="new" data-id="${f.id}">重置</button>` : ''}
       </td>
     </tr>
-  `).join('');
+  `;
+  }).join('');
   $$('#feedbackRows [data-act]').forEach((b) =>
     b.addEventListener('click', () => setFb(b.dataset.act, b.dataset.id))
   );
+  $$('#feedbackRows [data-reply]').forEach((b) =>
+    b.addEventListener('click', () => openReply(Number(b.dataset.reply)))
+  );
+}
+
+// 打开回复面板
+function openReply(id) {
+  const item = fbCache.find((f) => f.id === id);
+  replyTargetId = id;
+  const panel = $('#replyPanel');
+  if (!panel) return;
+  $('#replyQuote').textContent = item ? item.content : '';
+  $('#replyText').value = item ? (item.reply || '') : '';
+  $('#replyPassword').value = sessionStorage.getItem('admin_pw') || '';
+  $('#replyStatus').textContent = '';
+  panel.hidden = false;
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  $('#replyText').focus();
+}
+
+async function saveReply() {
+  if (!replyTargetId) return;
+  const pw = $('#replyPassword').value;
+  const reply = $('#replyText').value;
+  const st = $('#replyStatus');
+  const btn = $('#replySave');
+  if (!pw) { st.textContent = '请先输入管理密码'; st.className = 'reply-status err'; return; }
+  btn.disabled = true;
+  st.textContent = '保存中…'; st.className = 'reply-status';
+  try {
+    const res = await fetch('/api/admin/feedback/' + replyTargetId + '/reply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw, reply }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || data.error || ('HTTP ' + res.status));
+    sessionStorage.setItem('admin_pw', pw);
+    st.textContent = '✅ 已保存'; st.className = 'reply-status ok';
+    await loadFeedback();
+    setTimeout(() => { const p = $('#replyPanel'); if (p) p.hidden = true; }, 700);
+  } catch (e) {
+    st.textContent = e.message || '保存失败';
+    st.className = 'reply-status err';
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 async function setFb(status, id) {
@@ -331,6 +391,12 @@ async function setFb(status, id) {
 $$('[data-fstatus]').forEach((b) =>
   b.addEventListener('click', () => { fbFilter = b.dataset.fstatus; loadFeedback(); })
 );
+
+// 回复面板按钮
+const replySaveBtn = $('#replySave');
+if (replySaveBtn) replySaveBtn.addEventListener('click', saveReply);
+const replyCloseBtn = $('#replyClose');
+if (replyCloseBtn) replyCloseBtn.addEventListener('click', () => { const p = $('#replyPanel'); if (p) p.hidden = true; });
 
 /* ---------- 格式化工具 ---------- */
 function fmt(iso) {

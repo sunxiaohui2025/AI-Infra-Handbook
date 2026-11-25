@@ -185,10 +185,26 @@
           </div>
         </div>
         <table>
-          <thead><tr><th>时间</th><th>类型</th><th>内容</th><th>来源页</th><th>联系方式</th><th>状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>时间</th><th>类型</th><th>内容 / 回复</th><th>来源页</th><th>联系方式</th><th>状态</th><th>操作</th></tr></thead>
           <tbody id="feedbackRows"></tbody>
         </table>
         <div class="empty" id="feedbackEmpty" hidden>暂无数据</div>
+
+        <!-- 回复编辑面板（仅管理员，需管理密码） -->
+        <div class="reply-panel" id="replyPanel" hidden>
+          <div class="reply-head">
+            <b>回复留言</b>
+            <button class="mini ghost" id="replyClose" type="button">关闭</button>
+          </div>
+          <div class="reply-quote" id="replyQuote"></div>
+          <textarea id="replyText" rows="4" placeholder="写下你的回复，会公开显示在留言板上"></textarea>
+          <div class="reply-row">
+            <input type="password" id="replyPassword" placeholder="管理密码" autocomplete="current-password" />
+            <button class="mini primary" id="replySave" type="button">保存回复</button>
+            <span class="reply-status" id="replyStatus"></span>
+          </div>
+          <p class="reply-tip">回复会公开显示；清空内容后保存即撤下回复。密码仅本会话记住。</p>
+        </div>
       </div>
     </section>
   </div>

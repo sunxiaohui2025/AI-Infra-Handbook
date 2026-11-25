@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import {
   db, recordVisit, addDwell, getDashboard, getLectureRanking, getLivePresence,
   getVisitorList, getVisitorDetail,
-  addFeedback, listFeedback, setFeedbackStatus,
+  addFeedback, listFeedback, setFeedbackStatus, setFeedbackReply, listPublicBoard,
   createSession, validSession, deleteSession,
 } from './db.js';
 
@@ -258,6 +258,12 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { ok: true, id });
     }
 
+    // 公开留言板：任何人可读，仅返回可公开字段（不含联系方式 / IP / UA / vid）
+    if (url.pathname === '/api/board' && req.method === 'GET') {
+      const limit = Number(url.searchParams.get('limit') || 100);
+      return send(res, 200, { list: listPublicBoard(limit) });
+    }
+
     if (url.pathname === '/api/admin/login' && req.method === 'POST') {
       const token = 'no-auth';
       return send(res, 200, { ok: true, token, expires: SESSION_TTL_MS });
@@ -295,6 +301,18 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/admin/feedback' && req.method === 'GET') {
       const status = url.searchParams.get('status') || 'all';
       return send(res, 200, { list: listFeedback(status) });
+    }
+    // 管理员回复（先于状态变更匹配，路径更具体）；需管理密码
+    const replyM = url.pathname.match(/^\/api\/admin\/feedback\/(\d+)\/reply$/);
+    if (replyM && req.method === 'POST') {
+      const expected = config.adminPassword || '';
+      if (!expected) return send(res, 500, { error: 'no_admin_password', message: '服务端未配置管理密码' });
+      const body = await readBody(req);
+      if (String(body.password || '') !== expected) {
+        return send(res, 401, { error: 'bad_password', message: '管理密码错误' });
+      }
+      setFeedbackReply(Number(replyM[1]), body.reply);
+      return send(res, 200, { ok: true });
     }
     if (url.pathname.startsWith('/api/admin/feedback/') && req.method === 'POST') {
       const id = Number(url.pathname.split('/').pop());

@@ -93,7 +93,9 @@ const CREATE_TABLES = [
     contact TEXT NOT NULL DEFAULT '',
     ua      TEXT NOT NULL DEFAULT '',
     ts      TEXT NOT NULL,
-    status  TEXT NOT NULL DEFAULT 'new'
+    status  TEXT NOT NULL DEFAULT 'new',
+    reply    TEXT NOT NULL DEFAULT '',
+    reply_at TEXT NOT NULL DEFAULT ''
   )`,
   `CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
@@ -141,6 +143,8 @@ async function migrateColumns(env) {
     `ALTER TABLE visitors ADD COLUMN city TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE visitors ADD COLUMN lat REAL`,
     `ALTER TABLE visitors ADD COLUMN lng REAL`,
+    `ALTER TABLE feedback ADD COLUMN reply TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE feedback ADD COLUMN reply_at TEXT NOT NULL DEFAULT ''`,
   ];
   for (const sql of alters) {
     try { await env.DB.prepare(sql).run(); } catch {}
@@ -312,15 +316,34 @@ async function addFeedback(env, { vid, kind, content, page, contact, ua }) {
   return Number(res.meta.last_row_id || res.meta.changes || 0);
 }
 async function listFeedback(env, status, limit = 200) {
-  const sql = status
+  // 'all' / '' / 缺省 都表示不过滤（修复：此前 status='all' 被当成真实状态，导致列表永远为空）
+  const useFilter = status && status !== 'all';
+  const sql = useFilter
     ? 'SELECT * FROM feedback WHERE status = ? ORDER BY ts DESC LIMIT ?'
     : 'SELECT * FROM feedback ORDER BY ts DESC LIMIT ?';
-  const stmt = status ? env.DB.prepare(sql).bind(status, limit) : env.DB.prepare(sql).bind(limit);
+  const stmt = useFilter ? env.DB.prepare(sql).bind(status, limit) : env.DB.prepare(sql).bind(limit);
   const rows = await stmt.all();
   return rows.results;
 }
 async function setFeedbackStatus(env, id, status) {
   await env.DB.prepare('UPDATE feedback SET status = ? WHERE id = ?').bind(status, id).run();
+}
+/** 保存管理员回复；有回复时自动标记为已处理，清空回复则回到待处理。 */
+async function setFeedbackReply(env, id, reply) {
+  const text = String(reply || '').slice(0, 4000);
+  const at = text ? new Date().toISOString() : '';
+  await env.DB.prepare('UPDATE feedback SET reply = ?, reply_at = ?, status = ? WHERE id = ?')
+    .bind(text, at, text ? 'done' : 'new', id).run();
+  return { ok: true };
+}
+/** 公开留言板：仅暴露可公开字段（不含 vid / contact / ua / ip）。被忽略的留言不展示。 */
+async function listPublicBoard(env, limit = 100) {
+  const n = Math.min(Number(limit) || 100, 200);
+  const rows = await env.DB.prepare(
+    `SELECT id, kind, content, ts, reply, reply_at FROM feedback
+     WHERE status != 'ignored' ORDER BY ts DESC LIMIT ?`
+  ).bind(n).all();
+  return rows.results;
 }
 
 /* ---------- 接口路由 ---------- */
@@ -386,6 +409,12 @@ async function handleApi(request, env, url) {
     return json({ ok: true, id });
   }
 
+  // 公开留言板：任何人可读，仅返回可公开字段（不含联系方式 / IP / UA / vid）
+  if (path === '/api/board' && method === 'GET') {
+    const limit = Number(url.searchParams.get('limit') || 100);
+    return json({ list: await listPublicBoard(env, limit) });
+  }
+
   // 后台接口
   if (/^\/api\/admin\//.test(path)) {
     // 登录不需要鉴权（免密）
@@ -420,6 +449,18 @@ async function handleApi(request, env, url) {
       const body = await readBody(request);
       const status = ['done', 'ignored', 'new'].includes(body.status) ? body.status : 'new';
       await setFeedbackStatus(env, Number(fbMatch[1]), status);
+      return json({ ok: true });
+    }
+    // 管理员回复：需要管理密码（env.ADMIN_PASSWORD），保证仅管理员可回复
+    const replyMatch = path.match(/^\/api\/admin\/feedback\/(\d+)\/reply$/);
+    if (replyMatch && method === 'POST') {
+      const expected = env.ADMIN_PASSWORD || '';
+      if (!expected) return json({ error: 'no_admin_password', message: '服务端未配置管理密码' }, 500);
+      const body = await readBody(request);
+      if (String(body.password || '') !== expected) {
+        return json({ error: 'bad_password', message: '管理密码错误' }, 401);
+      }
+      await setFeedbackReply(env, Number(replyMatch[1]), body.reply);
       return json({ ok: true });
     }
     return json({ error: 'not found' }, 404);

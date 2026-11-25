@@ -1,14 +1,14 @@
 ---
-// 反馈页面：匿名提交意见，入库到运营后台的「反馈意见」板块。
+// 留言板页面：公开提交与浏览，留言和管理员回复对所有人可见。
 import Base from '../layouts/Base.astro';
 import Feedback from '../components/Feedback.astro';
 ---
-<Base title="反馈意见" view="home">
+<Base title="留言板 · 反馈意见" view="home">
   <main class="ai-scroll" id="main">
     <div class="ai-fb-wrap">
       <div class="ai-fb-head">
-        <h1>反馈意见</h1>
-        <p>遇到讲不清楚、图错了、链接打不开，或想提改进建议，都可以在这里告诉我。无需注册。</p>
+        <h1>留言板</h1>
+        <p>课程相关的疑问、纠错和建议都可以留下，我会逐条回复，所有留言公开可见。</p>
       </div>
       <Feedback />
     </div>

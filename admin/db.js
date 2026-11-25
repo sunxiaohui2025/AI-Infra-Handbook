@@ -55,7 +55,9 @@ export function initSchema() {
       contact TEXT NOT NULL DEFAULT '',
       ua      TEXT NOT NULL DEFAULT '',
       ts      TEXT NOT NULL,
-      status  TEXT NOT NULL DEFAULT 'new'
+      status  TEXT NOT NULL DEFAULT 'new',
+      reply    TEXT NOT NULL DEFAULT '',
+      reply_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS sessions (
       token      TEXT PRIMARY KEY,
@@ -80,6 +82,9 @@ export function initSchema() {
   try { db.exec(`ALTER TABLE visitors ADD COLUMN city TEXT NOT NULL DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE visitors ADD COLUMN lat REAL`); } catch {}
   try { db.exec(`ALTER TABLE visitors ADD COLUMN lng REAL`); } catch {}
+  // 迁移：留言板回复字段
+  try { db.exec(`ALTER TABLE feedback ADD COLUMN reply TEXT NOT NULL DEFAULT ''`); } catch {}
+  try { db.exec(`ALTER TABLE feedback ADD COLUMN reply_at TEXT NOT NULL DEFAULT ''`); } catch {}
 }
 
 /* ---------- 访问统计 ---------- */
@@ -315,18 +320,39 @@ export function addFeedback({ vid, kind, content, page, contact, ua }) {
 export function listFeedback(status) {
   if (status && status !== 'all') {
     return db.prepare(`
-      SELECT id, vid, kind, content, page, contact, ua, ts, status
+      SELECT id, vid, kind, content, page, contact, ua, ts, status, reply, reply_at
       FROM feedback WHERE status = ? ORDER BY ts DESC LIMIT 500
     `).all(status);
   }
   return db.prepare(`
-    SELECT id, vid, kind, content, page, contact, ua, ts, status
+    SELECT id, vid, kind, content, page, contact, ua, ts, status, reply, reply_at
     FROM feedback ORDER BY ts DESC LIMIT 500
   `).all();
 }
 
 export function setFeedbackStatus(id, status) {
   db.prepare(`UPDATE feedback SET status = ? WHERE id = ?`).run(status, id);
+}
+
+/** 保存管理员回复；回复后自动标记为已处理。 */
+export function setFeedbackReply(id, reply) {
+  const text = (reply || '').toString().slice(0, 4000);
+  const at = text ? new Date().toISOString() : '';
+  db.prepare(`
+    UPDATE feedback SET reply = ?, reply_at = ?, status = ? WHERE id = ?
+  `).run(text, at, text ? 'done' : 'new', id);
+  return { ok: true };
+}
+
+/** 公开留言板：只返回可公开展示的字段（不含 vid / contact / ua / ip 等隐私）。 */
+export function listPublicBoard(limit = 100) {
+  return db.prepare(`
+    SELECT id, kind, content, ts, reply, reply_at
+    FROM feedback
+    WHERE status != 'ignored'
+    ORDER BY ts DESC
+    LIMIT ?
+  `).all(Math.min(Number(limit) || 100, 200));
 }
 
 /* ---------- 会话（后台登录） ---------- */

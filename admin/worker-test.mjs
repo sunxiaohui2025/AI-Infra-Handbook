@@ -130,6 +130,29 @@ assert('标记 done', (await call('POST', `/api/admin/feedback/${fid}`, { status
 r = await call('GET', '/api/admin/feedback?status=done', null, token);
 assert('done 列表 1 条', r.data.list.length === 1, JSON.stringify(r.data.list));
 
+// 8.1 status=all 必须返回全部（回归 bug：曾把 'all' 当真实状态过滤，导致列表为空）
+r = await call('GET', '/api/admin/feedback?status=all', null, token);
+assert('status=all 返回全部 1 条', r.data.list.length === 1, JSON.stringify(r.data.list));
+
+// 8.2 公开留言板：可读、含内容与回复字段、不含隐私字段
+r = await call('GET', '/api/board');
+assert('留言板可公开读取', r.status === 200 && Array.isArray(r.data.list), JSON.stringify(r.data));
+const b0 = r.data.list.find((x) => x.id === fid);
+assert('留言板含该留言内容', b0 && b0.content === '测试反馈', JSON.stringify(b0));
+assert('留言板不含 contact/vid/ua/ip', b0 && !('contact' in b0) && !('vid' in b0) && !('ua' in b0) && !('ip' in b0), Object.keys(b0 || {}).join(','));
+
+// 8.3 管理员回复：密码错误拒绝，正确密码成功，且回复公开可见
+assert('回复-密码错误 → 401', (await call('POST', `/api/admin/feedback/${fid}/reply`, { password: 'wrong', reply: 'x' })).status === 401);
+r = await call('POST', `/api/admin/feedback/${fid}/reply`, { password: 'fuyao', reply: '已收到，会尽快修复。' });
+assert('回复-正确密码 → 200', r.status === 200 && r.data.ok, JSON.stringify(r.data));
+r = await call('GET', '/api/board');
+const b1 = r.data.list.find((x) => x.id === fid);
+assert('回复已公开显示', b1 && b1.reply === '已收到，会尽快修复。', JSON.stringify(b1));
+assert('回复带 reply_at 时间', b1 && !!b1.reply_at, JSON.stringify(b1 && b1.reply_at));
+r = await call('GET', '/api/admin/feedback?status=all', null, token);
+const a1 = r.data.list.find((x) => x.id === fid);
+assert('回复后自动标记 done', a1 && a1.status === 'done', JSON.stringify(a1));
+
 // 9. me / logout
 assert('me ok', (await call('GET', '/api/admin/me', null, token)).status === 200);
 assert('logout ok', (await call('POST', '/api/admin/logout', null, token)).status === 200);

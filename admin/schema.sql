@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS feedback (
   contact TEXT NOT NULL DEFAULT '',
   ua      TEXT NOT NULL DEFAULT '',
   ts      TEXT NOT NULL,
-  status  TEXT NOT NULL DEFAULT 'new'
+  status  TEXT NOT NULL DEFAULT 'new',
+  reply    TEXT NOT NULL DEFAULT '',
+  reply_at TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
