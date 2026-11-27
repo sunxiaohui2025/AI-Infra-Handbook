@@ -130,7 +130,6 @@ function renderKpis(k) {
     { k: '近 7 天訪問', v: k.weekPv, h: `新增访客 ${k.newVisitors}` },
     { k: '平均停留', v: fmtDur(k.avgDwell), h: `累计停留 ${fmtDur(k.totalDwell)}` },
     { k: 'PDF电子书下载', v: pdfStats.total, h: `今日下载 ${pdfStats.today}`, cls: pdfStats.total > 0 ? '' : 'small', id: 'kpiPdf' },
-    { k: '待处理反馈', v: k.newFeedback, h: '需要你查看', cls: k.newFeedback > 0 ? '' : 'small' },
   ];
   $('#kpis').innerHTML = cards.map((c) =>
     `<div class="kpi"${c.id ? ` id="${c.id}"` : ''}><div class="k">${c.k}</div><div class="v ${c.cls || ''}">${c.v}</div><div class="hint">${c.h}</div></div>`
