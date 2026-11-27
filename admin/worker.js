@@ -10,12 +10,14 @@
 // 路由：
 //   POST  /api/track                  埋点（body: { vid, path, title } -> { ok, id }）
 //   POST  /api/dwell                  停留心跳（body: { vid, id, dt }，累加 pageviews.dwell）
+//   POST  /api/pdfdl                  全文PDF下载上报（body: { vid }）
 //   POST  /api/feedback               反馈（body: { vid, kind, content, page, contact }）
 //   POST  /api/admin/login            登录（body: { password } -> { token }）
 //   GET   /api/admin/me               校验 token
 //   POST  /api/admin/logout           退出
 //   GET   /api/admin/stats            总览 + 30 天走势（重查询，仅首屏调用）
 //   GET   /api/admin/presence         在线人数 + 真实城市分布（轻量，供定时轮询）
+//   GET   /api/admin/pdfstats         PDF 下载总数 / 今日下载（轻量，3 分钟缓存）
 //   GET   /api/admin/lectures         讲热度
 //   GET   /api/admin/visitors?limit=&vid=  访客列表 / 单个访客轨迹
 //   GET   /api/admin/feedback?status=      反馈列表
@@ -111,6 +113,13 @@ const CREATE_TABLES = [
     k TEXT PRIMARY KEY,
     v INTEGER NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS pdf_downloads (
+    id  INTEGER PRIMARY KEY,
+    vid TEXT NOT NULL DEFAULT '',
+    ts  TEXT NOT NULL,
+    ua  TEXT NOT NULL DEFAULT '',
+    ref TEXT NOT NULL DEFAULT ''
+  )`,
 ];
 
 const CREATE_INDEXES = [
@@ -123,8 +132,10 @@ const CREATE_INDEXES = [
   `CREATE INDEX IF NOT EXISTS idx_v_visit_count ON visitors(visit_count)`,
   // 覆盖索引：让按天序列 / WHERE ts>=? 直接走索引取 vid、dwell，不必回表
   `CREATE INDEX IF NOT EXISTS idx_pv_ts_vid_dwell ON pageviews(ts, vid, dwell)`,
+  // PDF 下载事件按天统计，走 ts 索引
+  `CREATE INDEX IF NOT EXISTS idx_pdf_ts ON pdf_downloads(ts)`,
 ];
-const SCHEMA_VERSION = 2; // 结构变更时递增，触发一次性 DDL
+const SCHEMA_VERSION = 3; // 结构变更时递增，触发一次性 DDL
 
 // 索引必须逐条建并逐条容错：
 //  1) idx_pv_ts_vid_dwell 依赖 dwell 列，旧库要先经过 migrateColumns 补列才有该列；
@@ -389,6 +400,25 @@ async function listPublicBoard(env, limit = 100) {
   return rows.results;
 }
 
+/* ---------- PDF 电子书下载统计 ----------
+ * 每次点击「全文PDF」上报一行到 pdf_downloads（小表，COUNT 极便宜），
+ * 后台走独立的 /api/admin/pdfstats（3 分钟缓存）展示，不混入 pageviews 的 PV/UV。
+ */
+async function addPdfDownload(env, { vid, ua, ref }) {
+  const ts = new Date().toISOString();
+  await env.DB.prepare(`INSERT INTO pdf_downloads (vid, ts, ua, ref) VALUES (?, ?, ?, ?)`)
+    .bind(vid || '', ts, ua || '', ref || '').run();
+  return { ok: true };
+}
+async function getPdfStats(env) {
+  const today = new Date().toISOString().slice(0, 10);
+  const total = await env.DB.prepare('SELECT COUNT(*) AS c FROM pdf_downloads').first();
+  const tod = await env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM pdf_downloads WHERE substr(ts, 1, 10) = ?`
+  ).bind(today).first();
+  return { total: total.c, today: tod.c };
+}
+
 /* ---------- 读接口结果缓存（跨 isolate 持久） ----------
  * D1 免费版每天 500 万 rows_read。看板全是全表聚合：一次 stats ≈ 4 万行，
  * 每天 127 次就撞线（Cloudflare 官方用量分析实测）。
@@ -507,6 +537,18 @@ async function handleApi(request, env, url) {
     return json({ ok: true });
   }
 
+  // PDF 电子书下载：每次点击「全文PDF」上报一次（小表写入，读到后台 3 分钟内可见）
+  if (path === '/api/pdfdl' && method === 'POST') {
+    const body = await readBody(request);
+    await addPdfDownload(env, {
+      vid: (body.vid || '').toString(),
+      ua: (request.headers.get('user-agent') || '').slice(0, 300),
+      ref: (request.headers.get('referer') || '').slice(0, 500),
+    });
+    await invalidateCache(env, 'pdfstats'); // 让数字尽快刷新
+    return json({ ok: true });
+  }
+
   if (path === '/api/feedback' && method === 'POST') {
     const body = await readBody(request);
     const content = (body.content || '').toString().trim();
@@ -555,6 +597,10 @@ async function handleApi(request, env, url) {
     // 在线状态：轻量查询，只在内存缓存，不写 D1（避免额外写入）
     if (path === '/api/admin/presence') {
       return json(await withCache(env, 'presence', PRESENCE_TTL_MS, () => getLivePresence(env), false));
+    }
+    // PDF 下载统计：小表计数，3 分钟持久缓存，成本可忽略
+    if (path === '/api/admin/pdfstats') {
+      return json(await withCache(env, 'pdfstats', PRESENCE_TTL_MS, () => getPdfStats(env)));
     }
     if (path === '/api/admin/lectures') {
       return json({ list: await withCache(env, 'lectures', STATS_TTL_MS, () => getLectureRanking(env, 100)) });

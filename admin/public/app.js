@@ -76,6 +76,7 @@ async function loadOverview() {
     updateOnlineCount(d.onlineCount || 0);
     updateLocatedCount(d.locatedCount || 0, (d.mapNodes || []).length);
     renderKpis(d.kpi);
+    loadPdfStats().catch(() => {}); // 独立接口，并行拉取，不影响 stats 渲染
     renderMap(d.mapNodes || []);
     renderChart(d.series);
   } catch (e) {
@@ -95,6 +96,7 @@ async function loadPresence() {
       updateOnlineCount(p.onlineCount || 0);
       updateLocatedCount(p.locatedCount || 0, (p.mapNodes || []).length);
       renderMap(p.mapNodes || []);
+      loadPdfStats().catch(() => {}); // 下载数 3 分钟同步刷新
     }
   } catch (e) {
     // 轮询失败：若首屏已成功过，说明只是临时抖动，不整块替换成提示，保持原有数据
@@ -118,6 +120,7 @@ function updateLocatedCount(located, cities) {
 }
 
 /* 核心 KPI 卡片（恢复最初清晰统计维度） */
+let pdfStats = { total: 0, today: 0 };
 function renderKpis(k) {
   if (!k) return;
   const cards = [
@@ -126,11 +129,27 @@ function renderKpis(k) {
     { k: '今日访问', v: k.today, h: `今日独立访客 ${k.todayUv}` },
     { k: '近 7 天訪問', v: k.weekPv, h: `新增访客 ${k.newVisitors}` },
     { k: '平均停留', v: fmtDur(k.avgDwell), h: `累计停留 ${fmtDur(k.totalDwell)}` },
+    { k: 'PDF电子书下载', v: pdfStats.total, h: `今日下载 ${pdfStats.today}`, cls: pdfStats.total > 0 ? '' : 'small', id: 'kpiPdf' },
     { k: '待处理反馈', v: k.newFeedback, h: '需要你查看', cls: k.newFeedback > 0 ? '' : 'small' },
   ];
   $('#kpis').innerHTML = cards.map((c) =>
-    `<div class="kpi"><div class="k">${c.k}</div><div class="v ${c.cls || ''}">${c.v}</div><div class="hint">${c.h}</div></div>`
+    `<div class="kpi"${c.id ? ` id="${c.id}"` : ''}><div class="k">${c.k}</div><div class="v ${c.cls || ''}">${c.v}</div><div class="hint">${c.h}</div></div>`
   ).join('');
+}
+
+// PDF 下载统计：独立轻量接口，3 分钟刷新，不占用 1 小时缓存的重聚合
+async function loadPdfStats() {
+  const p = await api('/api/admin/pdfstats');
+  pdfStats = { total: p.total || 0, today: p.today || 0 };
+  updatePdfCard(pdfStats);
+}
+function updatePdfCard(p) {
+  const card = $('#kpiPdf');
+  if (!card) return;
+  const v = card.querySelector('.v');
+  const h = card.querySelector('.hint');
+  if (v) v.textContent = String(p.total);
+  if (h) h.textContent = '今日下载 ' + p.today;
 }
 
 /* 全球学习地图渲染：节点来自真实访客 IP 地理位置（最近 30 分钟活跃） */

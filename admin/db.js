@@ -71,6 +71,11 @@ export function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_v_last_seen   ON visitors(last_seen);
     CREATE INDEX IF NOT EXISTS idx_v_first_seen  ON visitors(first_seen);
     CREATE INDEX IF NOT EXISTS idx_v_visit_count ON visitors(visit_count);
+    CREATE TABLE IF NOT EXISTS pdf_downloads (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      vid TEXT NOT NULL DEFAULT '', ts TEXT NOT NULL,
+      ua TEXT NOT NULL DEFAULT '', ref TEXT NOT NULL DEFAULT ''
+    );
   `);
 
   // 迁移：给已有的库补 ip 列（新库 CREATE TABLE 已含该列，ALTER 已有列会抛错，忽略即可）
@@ -99,6 +104,7 @@ export function initSchema() {
       k TEXT PRIMARY KEY, v INTEGER NOT NULL
     )`);
   } catch {}
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_pdf_ts ON pdf_downloads(ts)`); } catch {}
 }
 
 /* ---------- 访问统计 ---------- */
@@ -366,6 +372,19 @@ export function listPublicBoard(limit = 100) {
     ORDER BY ts DESC
     LIMIT ?
   `).all(Math.min(Number(limit) || 100, 200));
+}
+
+/* ---------- PDF 电子书下载统计 ---------- */
+export function addPdfDownload({ vid, ua = '', ref = '' }) {
+  const ts = new Date().toISOString();
+  db.prepare(`INSERT INTO pdf_downloads (vid, ts, ua, ref) VALUES (?, ?, ?, ?)`).run(vid || '', ts, ua, ref);
+  return { ok: true };
+}
+export function getPdfStats() {
+  const today = new Date().toISOString().slice(0, 10);
+  const total = db.prepare('SELECT COUNT(*) AS c FROM pdf_downloads').get().c;
+  const tod = db.prepare(`SELECT COUNT(*) AS c FROM pdf_downloads WHERE substr(ts, 1, 10) = ?`).get(today).c;
+  return { total, today: tod };
 }
 
 /* ---------- 会话（后台登录） ---------- */

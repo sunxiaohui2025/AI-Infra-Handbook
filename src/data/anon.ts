@@ -115,6 +115,20 @@ export function track(path?: string, title?: string) {
   }
 }
 
+/** 上报一次「全文PDF」下载。静默失败，不影响下载本身（点击外链会离开当前页）。 */
+export function trackPdfDownload() {
+  try {
+    fetch(backendUrl('/api/pdfdl'), {
+      method: 'POST',
+      keepalive: true, // 跳转到外部下载地址时也尽力送达
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vid: getAnonId() }),
+    }).catch(() => {});
+  } catch {
+    /* 忽略：埋点不能影响正常下载 */
+  }
+}
+
 /** 提交一条反馈意见。返回 Promise，可由调用方展示成功/失败。 */
 export function sendFeedback(p: { kind: string; content: string; page?: string; contact?: string }) {
   return fetch(backendUrl('/api/feedback'), {

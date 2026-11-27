@@ -70,8 +70,20 @@ CREATE TABLE IF NOT EXISTS schema_meta (
   v INTEGER NOT NULL
 );
 
+-- PDF 电子书下载事件：每次点击「全文PDF」写一行，小表，COUNT 极便宜
+CREATE TABLE IF NOT EXISTS pdf_downloads (
+  id  INTEGER PRIMARY KEY,
+  vid TEXT NOT NULL DEFAULT '',
+  ts  TEXT NOT NULL,
+  ua  TEXT NOT NULL DEFAULT '',
+  ref TEXT NOT NULL DEFAULT ''
+);
+
 -- 覆盖索引：按天序列 / WHERE ts>=? 可直接从索引取 vid、dwell，避免回表。
 -- 注意：它引用了 dwell 列。若是给「早期旧库」补跑本文件，需先单独执行
 --   ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0;
 -- 正常部署无需手动处理：Worker 的 ensureTables() 会先补列、再建索引。
 CREATE INDEX IF NOT EXISTS idx_pv_ts_vid_dwell ON pageviews(ts, vid, dwell);
+
+-- PDF 下载按天统计，走 ts 索引
+CREATE INDEX IF NOT EXISTS idx_pdf_ts ON pdf_downloads(ts);

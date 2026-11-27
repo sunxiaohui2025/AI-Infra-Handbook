@@ -10,6 +10,7 @@ import {
   db, recordVisit, addDwell, getDashboard, getLectureRanking, getLivePresence,
   getVisitorList, getVisitorDetail,
   addFeedback, listFeedback, setFeedbackStatus, setFeedbackReply, listPublicBoard,
+  addPdfDownload, getPdfStats,
   createSession, validSession, deleteSession,
 } from './db.js';
 
@@ -243,6 +244,16 @@ const server = createServer(async (req, res) => {
       return send(res, 200, { ok: true });
     }
 
+    if (url.pathname === '/api/pdfdl' && req.method === 'POST') {
+      const body = await readBody(req);
+      addPdfDownload({
+        vid: (body.vid || '').toString(),
+        ua: (req.headers['user-agent'] || '').slice(0, 300),
+        ref: (req.headers.referer || '').slice(0, 500),
+      });
+      return send(res, 200, { ok: true });
+    }
+
     if (url.pathname === '/api/feedback' && req.method === 'POST') {
       const body = await readBody(req);
       const content = (body.content || '').toString().trim();
@@ -287,6 +298,9 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/admin/presence' && req.method === 'GET') {
       // 轻量：只查在线人数与城市分布，供前端每 3 分钟轮询，避免反复触发重聚合
       return send(res, 200, getLivePresence());
+    }
+    if (url.pathname === '/api/admin/pdfstats' && req.method === 'GET') {
+      return send(res, 200, getPdfStats());
     }
     if (url.pathname === '/api/admin/lectures' && req.method === 'GET') {
       const limit = Math.min(Number(url.searchParams.get('limit') || 25), 50);

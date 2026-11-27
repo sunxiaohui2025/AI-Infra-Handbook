@@ -135,8 +135,10 @@ const { title, view } = Astro.props;
 
     <script>
       // 匿名访问埋点：在浏览器生成一个随机 ID，上报一次页面浏览。静默失败，不影响页面。
-      import { track } from '../data/anon';
+      import { track, trackPdfDownload } from '../data/anon';
       track();
+      // 顶栏「全文PDF」下载统计：每次点击上报一次（独立小表，不影响访问 PV/UV）
+      document.querySelector('.ai-top-pdf')?.addEventListener('click', () => trackPdfDownload());
     </script>
 
     <style>

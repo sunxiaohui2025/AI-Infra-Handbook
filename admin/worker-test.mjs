@@ -206,7 +206,7 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   const row = old.prepare(`SELECT dwell FROM pageviews WHERE vid = 'm1'`).get();
   assert('迁移后 dwell 默认 0', row && row.dwell === 0, JSON.stringify(row));
   const meta = old.prepare(`SELECT v FROM schema_meta WHERE k = 'schema'`).get();
-  assert('迁移后写入 schema_meta 版本 2', meta && meta.v === 2, JSON.stringify(meta));
+  assert('迁移后写入 schema_meta 版本 3', meta && meta.v === 3, JSON.stringify(meta));
   const idx = old.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_pv_ts_vid_dwell'`).get();
   assert('补列后才建成依赖 dwell 的覆盖索引', !!idx, JSON.stringify(idx));
   const cacheTbl = old.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'stats_cache'`).get();
@@ -358,6 +358,38 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   const item = (lec.data.list || []).find((x) => x.path === '/l/77');
   assert('排行榜 title 取最新一条(MAX(ts) bare column)', item && item.title === '新标题', JSON.stringify(item));
   assert('排行榜聚合正确(views=2, dwell=10)', item && item.views === 2 && item.dwell === 10, JSON.stringify(item));
+}
+
+// 15. PDF 电子书下载统计
+{
+  const pdfEnv = {
+    DB: makeMockD1(db),
+    ASSETS: { fetch: () => new Response('static', { status: 200 }) },
+    ADMIN_PASSWORD: 'fuyao',
+  };
+  const hitPdf = (m, path, body) => worker.fetch(new Request('https://example.com' + path, {
+    method: m,
+    headers: { 'content-type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  }), pdfEnv);
+
+  const before = await hitPdf('GET', '/api/admin/pdfstats');
+  const b0 = await before.json().catch(() => ({}));
+  assert('pdfstats 接口 200', before.status === 200, 'status=' + before.status);
+  assert('pdfstats 返回 total/today', typeof b0.total === 'number' && typeof b0.today === 'number', JSON.stringify(b0));
+  const n0 = b0.total;
+
+  assert('pdfdl 上报成功', (await hitPdf('POST', '/api/pdfdl', { vid: 'pd1' })).status === 200);
+  assert('pdfdl 缺 vid 也成功(可空)', (await hitPdf('POST', '/api/pdfdl', {})).status === 200);
+  const after = await hitPdf('GET', '/api/admin/pdfstats');
+  const a1 = await after.json().catch(() => ({}));
+  assert('上报后总数 +2', a1.total === n0 + 2, 'total=' + a1.total + ' n0=' + n0);
+  assert('今日下载 >= 1', a1.today >= 1, 'today=' + a1.today);
+
+  // 下载事件不应混入 pageviews 的 PV/UV
+  const st = await worker.fetch(new Request('https://example.com/api/admin/stats'), pdfEnv);
+  const sd = await st.json().catch(() => ({}));
+  assert('下载不进 pageviews 的 KPI', sd.kpi && sd.kpi.totalPv === 3, 'totalPv=' + (sd.kpi && sd.kpi.totalPv));
 }
 
 console.log('');
