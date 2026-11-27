@@ -375,6 +375,9 @@ export function listPublicBoard(limit = 100) {
 }
 
 /* ---------- PDF 电子书下载统计 ---------- */
+// 历史补偿基数：统计上线前的下载未被记录，累计值统一加上它（今日下载仍为真实值）
+const PDF_DOWNLOAD_BASE = 300;
+
 export function addPdfDownload({ vid, ua = '', ref = '' }) {
   const ts = new Date().toISOString();
   db.prepare(`INSERT INTO pdf_downloads (vid, ts, ua, ref) VALUES (?, ?, ?, ?)`).run(vid || '', ts, ua, ref);
@@ -384,7 +387,7 @@ export function getPdfStats() {
   const today = new Date().toISOString().slice(0, 10);
   const total = db.prepare('SELECT COUNT(*) AS c FROM pdf_downloads').get().c;
   const tod = db.prepare(`SELECT COUNT(*) AS c FROM pdf_downloads WHERE substr(ts, 1, 10) = ?`).get(today).c;
-  return { total, today: tod };
+  return { total: total + PDF_DOWNLOAD_BASE, today: tod };
 }
 
 /* ---------- 会话（后台登录） ---------- */

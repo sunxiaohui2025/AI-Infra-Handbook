@@ -404,6 +404,10 @@ async function listPublicBoard(env, limit = 100) {
  * 每次点击「全文PDF」上报一行到 pdf_downloads（小表，COUNT 极便宜），
  * 后台走独立的 /api/admin/pdfstats（3 分钟缓存）展示，不混入 pageviews 的 PV/UV。
  */
+// 历史补偿基数：统计功能上线之前的下载没有被记录，累计值统一加上这个基数。
+// 「今日下载」不加，仍是当天真实上报数。要调整改这里即可。
+const PDF_DOWNLOAD_BASE = 300;
+
 async function addPdfDownload(env, { vid, ua, ref }) {
   const ts = new Date().toISOString();
   await env.DB.prepare(`INSERT INTO pdf_downloads (vid, ts, ua, ref) VALUES (?, ?, ?, ?)`)
@@ -416,7 +420,7 @@ async function getPdfStats(env) {
   const tod = await env.DB.prepare(
     `SELECT COUNT(*) AS c FROM pdf_downloads WHERE substr(ts, 1, 10) = ?`
   ).bind(today).first();
-  return { total: total.c, today: tod.c };
+  return { total: total.c + PDF_DOWNLOAD_BASE, today: tod.c };
 }
 
 /* ---------- 读接口结果缓存（跨 isolate 持久） ----------

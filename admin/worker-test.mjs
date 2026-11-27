@@ -377,6 +377,7 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   const b0 = await before.json().catch(() => ({}));
   assert('pdfstats 接口 200', before.status === 200, 'status=' + before.status);
   assert('pdfstats 返回 total/today', typeof b0.total === 'number' && typeof b0.today === 'number', JSON.stringify(b0));
+  assert('累计含 300 历史基数(空库=0+300)', b0.total === 300, 'total=' + b0.total);
   const n0 = b0.total;
 
   assert('pdfdl 上报成功', (await hitPdf('POST', '/api/pdfdl', { vid: 'pd1' })).status === 200);
