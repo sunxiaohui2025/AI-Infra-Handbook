@@ -5,7 +5,9 @@ import { backendUrl } from './site';
 
 const KEY = 'ai_vid';
 
-const DWELL_INTERVAL_MS = 20000; // 每 20 秒心跳一次，累加停留时长
+// 心跳从 20 秒放宽到 60 秒：每次上报的是「距上次心跳的真实秒数」，累计停留时长不变，
+// 但 D1 的 UPDATE 次数（rows_written / 请求量）降到原来的 1/3。
+const DWELL_INTERVAL_MS = 60000;
 const DWELL_MIN_S = 5;           // 大于 5 秒才计入，避免噪音
 
 // 本次浏览对应的 pageview id + 上次心跳时间，用于累加停留时长
@@ -52,7 +54,7 @@ function stopDwell() {
   }
 }
 
-/** 页面加载后启动停留统计：每 20 秒心跳一次；离开/切后台时补发剩余时长。只计“页面可见”的时间。 */
+/** 页面加载后启动停留统计：每 60 秒心跳一次；离开/切后台时补发剩余时长。只计“页面可见”的时间。 */
 function startDwell(vid: string) {
   stopDwell();
   lastPing = Date.now();

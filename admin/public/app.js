@@ -448,10 +448,11 @@ if (retryBtn) {
 }
 
 // 刷新策略（为控制 Cloudflare D1 的 rows_read 用量）：
-//  - 完整 stats（含大量全表聚合）只在首屏加载一次，绝不轮询；
-//  - 定时只拉轻量的 presence（在线人数 + 城市分布，走索引，读数极低），每 60 秒一次；
+//  - 完整 stats（含大量全表聚合）只在首屏加载一次，绝不轮询；服务端另有 1 小时持久缓存；
+//  - 定时只拉轻量的 presence（在线人数 + 城市分布，走索引），每 3 分钟一次；
 //  - 页面从后台切回时也只拉 presence。
-const REFRESH_MS = 60000;
+// 在线人数属于分钟级指标，3 分钟粒度足够；60 秒轮询会让 visitors 全表扫描翻 3 倍。
+const REFRESH_MS = 180000;
 let overviewTimer = null;
 function startPolling() {
   if (overviewTimer) return;

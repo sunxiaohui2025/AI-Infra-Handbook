@@ -285,7 +285,7 @@ const server = createServer(async (req, res) => {
       return send(res, 200, getDashboard());
     }
     if (url.pathname === '/api/admin/presence' && req.method === 'GET') {
-      // 轻量：只查在线人数与城市分布，供前端每 60 秒轮询，避免反复触发重聚合
+      // 轻量：只查在线人数与城市分布，供前端每 3 分钟轮询，避免反复触发重聚合
       return send(res, 200, getLivePresence());
     }
     if (url.pathname === '/api/admin/lectures' && req.method === 'GET') {

@@ -85,6 +85,20 @@ export function initSchema() {
   // 迁移：留言板回复字段
   try { db.exec(`ALTER TABLE feedback ADD COLUMN reply TEXT NOT NULL DEFAULT ''`); } catch {}
   try { db.exec(`ALTER TABLE feedback ADD COLUMN reply_at TEXT NOT NULL DEFAULT ''`); } catch {}
+
+  // 依赖 dwell 列的覆盖索引必须放在补列之后，否则旧库启动时会报 no such column: dwell。
+  // 逐条 try/catch：单个 DDL 失败不能拖垮整个 initSchema（db.exec 是整体执行的）。
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_pv_ts_vid_dwell ON pageviews(ts, vid, dwell)`); } catch {}
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS stats_cache (
+      key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`);
+  } catch {}
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS schema_meta (
+      k TEXT PRIMARY KEY, v INTEGER NOT NULL
+    )`);
+  } catch {}
 }
 
 /* ---------- 访问统计 ---------- */
@@ -164,17 +178,17 @@ const dailySeries = db.prepare(`
   WHERE ts >= ?
   GROUP BY d ORDER BY d
 `);
+// 用 MAX(ts) + bare column 一次扫描取最新标题，避免每个 path 再查一次（N+1）。
+// SQLite 语义：查询含唯一 MAX() 时，未聚合列取自 MAX 所在行。
 const topPages = db.prepare(`
-  SELECT path, COUNT(*) AS views, COUNT(DISTINCT vid) AS uv,
+  SELECT path, title, MAX(ts) AS latest_ts,
+         COUNT(*) AS views, COUNT(DISTINCT vid) AS uv,
          COALESCE(SUM(dwell),0) AS dwell, ROUND(AVG(dwell),1) AS avgDwell
   FROM pageviews
   WHERE path LIKE ?
   GROUP BY path
   ORDER BY views DESC
   LIMIT ?
-`);
-const latestTitle = db.prepare(`
-  SELECT title FROM pageviews WHERE path = ? ORDER BY ts DESC LIMIT 1
 `);
 const visitorList = db.prepare(`
   SELECT v.vid, v.ip, v.first_seen, v.last_seen, v.visit_count, v.page_views, v.pages, v.ua, v.last_path,
@@ -189,7 +203,8 @@ const visitorDetail = db.prepare(`
 const feedbackCount = db.prepare(`SELECT COUNT(*) AS c FROM feedback WHERE status = 'new'`);
 
 const hardcorePages = db.prepare(`
-  SELECT path, COUNT(*) AS views, COUNT(DISTINCT vid) AS uv,
+  SELECT path, title, MAX(ts) AS latest_ts,
+         COUNT(*) AS views, COUNT(DISTINCT vid) AS uv,
          COALESCE(SUM(dwell),0) AS dwell, ROUND(AVG(dwell),1) AS avgDwell
   FROM pageviews
   WHERE path LIKE '/l/%'
@@ -248,8 +263,7 @@ export function getLivePresence() {
 }
 
 export function getHardcoreLectures(limit = 6) {
-  const rows = hardcorePages.all(limit);
-  return rows.map((r) => ({ ...r, title: latestTitle.get(r.path)?.title || '' }));
+  return hardcorePages.all(limit);
 }
 
 export function getRecentPageviews(limit = 15) {
@@ -296,8 +310,7 @@ export function getDashboard() {
 }
 
 export function getLectureRanking(limit = 25) {
-  const rows = topPages.all('/l/%', limit);
-  return rows.map((r) => ({ ...r, title: latestTitle.get(r.path)?.title || '' }));
+  return topPages.all('/l/%', limit);
 }
 
 export function getVisitorList(limit = 100) {

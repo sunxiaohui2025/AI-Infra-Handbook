@@ -102,6 +102,15 @@ const CREATE_TABLES = [
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS stats_cache (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS schema_meta (
+    k TEXT PRIMARY KEY,
+    v INTEGER NOT NULL
+  )`,
 ];
 
 const CREATE_INDEXES = [
@@ -112,25 +121,53 @@ const CREATE_INDEXES = [
   `CREATE INDEX IF NOT EXISTS idx_v_last_seen   ON visitors(last_seen)`,
   `CREATE INDEX IF NOT EXISTS idx_v_first_seen  ON visitors(first_seen)`,
   `CREATE INDEX IF NOT EXISTS idx_v_visit_count ON visitors(visit_count)`,
+  // 覆盖索引：让按天序列 / WHERE ts>=? 直接走索引取 vid、dwell，不必回表
+  `CREATE INDEX IF NOT EXISTS idx_pv_ts_vid_dwell ON pageviews(ts, vid, dwell)`,
 ];
+const SCHEMA_VERSION = 2; // 结构变更时递增，触发一次性 DDL
 
-let schemaPromise = null;
-function ensureTables(env) {
-  if (!schemaPromise) {
-    schemaPromise = (async () => {
-      // 1) 建表：必须成功，失败则整个服务不可用（会抛错）
-      await env.DB.batch(CREATE_TABLES.map((s) => env.DB.prepare(s)));
-      // 2) 索引：CREATE INDEX 会读全表，且额度耗尽时会失败；
-      //    失败不应阻断请求（缺索引只是变慢），单独容错，避免拖垮写入。
-      await env.DB.batch(CREATE_INDEXES.map((s) => env.DB.prepare(s))).catch(() => {});
-      // 3) 补列迁移：同样是幂等的 ALTER，失败也忽略
-      await migrateColumns(env);
-    })().catch((err) => {
-      schemaPromise = null; // 失败后可重试
-      throw err;
-    });
+// 索引必须逐条建并逐条容错：
+//  1) idx_pv_ts_vid_dwell 依赖 dwell 列，旧库要先经过 migrateColumns 补列才有该列；
+//  2) batch() 是原子的，一条失败会整批回滚；且 prepare() 阶段就抛错时连 catch 都进不去，
+//     会把整个初始化打断（旧库迁移失败的真正原因）。
+// DDL 只在版本升级时执行一次，逐条往返的成本可以忽略。
+async function createIndexes(env) {
+  for (const sql of CREATE_INDEXES) {
+    try { await env.DB.prepare(sql).run(); } catch { /* 索引失败不影响服务 */ }
   }
-  return schemaPromise;
+}
+
+// 按 D1 绑定缓存，避免同一进程里多个数据库（或测试环境）互相串用初始化状态
+const schemaPromises = new WeakMap();
+function ensureTables(env) {
+  const cached = schemaPromises.get(env.DB);
+  if (cached) return cached;
+  const p = (async () => {
+    // 常规路径：读 1 行版本号即可，不再每次请求都跑建表/建索引/ALTER。
+    // 旧 bug：ALTER 在 24h 内被静默执行了 600+ 次（Cloudflare 实测）。
+    let ver = 0;
+    try {
+      const row = await env.DB.prepare("SELECT v FROM schema_meta WHERE k = 'schema'").first();
+      ver = row ? Number(row.v) || 0 : 0;
+    } catch { /* 表还不存在，视为需要初始化 */ }
+    if (ver >= SCHEMA_VERSION) return;
+
+    await env.DB.batch(CREATE_TABLES.map((s) => env.DB.prepare(s)));
+    await migrateColumns(env);  // 先给旧表补列，索引才能引用 dwell 等新列
+    await createIndexes(env);   // 再建索引
+    // 不吞异常：写版本失败说明 D1 此刻不可用（常见于额度耗尽）。
+    // 抛出去后 ensureTables 会把缓存的 promise 删掉，额度恢复后下一次请求会重新初始化，
+    // 否则会一直误以为 schema 已就绪，stats_cache 可能永远建不上。
+    await env.DB.prepare(
+      `INSERT INTO schema_meta (k, v) VALUES ('schema', ?)
+       ON CONFLICT(k) DO UPDATE SET v = excluded.v`
+    ).bind(SCHEMA_VERSION).run();
+  })().catch((err) => {
+    schemaPromises.delete(env.DB); // 失败后下次请求可重试
+    throw err;
+  });
+  schemaPromises.set(env.DB, p);
+  return p;
 }
 
 // 迁移：给已存在（旧 schema）的表补列。
@@ -274,16 +311,22 @@ async function getDashboard(env) {
   };
 }
 
+// 单次聚合完成：SQLite 中当查询含唯一 MAX() 时，未聚合的 bare column（title）
+// 取自 MAX(ts) 所在的那一行的值 —— 一次全表扫描即可拿到每个 path 的最新标题。
+// 旧写法用 CORRELATED SCALAR SUBQUERY（每个 path 再查一次）：Cloudflare 查询排行里
+// 该语句 7 天窗口累计 463 次调用、读了 722 万行（rows_read/returned=370，注意是 7 天不是 1 天）；
+// 而 24 小时用量分析里它单独占 2,073,693 行 / 41%，是额度超限的头号来源。
 async function getLectureRanking(env, limit = 100) {
   const rows = await env.DB.prepare(
-    `SELECT p.path,
-        COALESCE((SELECT title FROM pageviews WHERE path = p.path ORDER BY ts DESC LIMIT 1), '') AS title,
+    `SELECT path,
+        title,
         COUNT(*) AS views,
-        COUNT(DISTINCT p.vid) AS uv,
-        COALESCE(SUM(p.dwell), 0) AS dwell,
-        ROUND(AVG(p.dwell), 1) AS avgDwell
-     FROM pageviews p
-     GROUP BY p.path
+        COUNT(DISTINCT vid) AS uv,
+        COALESCE(SUM(dwell), 0) AS dwell,
+        ROUND(AVG(dwell), 1) AS avgDwell,
+        MAX(ts) AS latest_ts
+     FROM pageviews
+     GROUP BY path
      ORDER BY views DESC
      LIMIT ?`
   ).bind(limit).all();
@@ -346,6 +389,76 @@ async function listPublicBoard(env, limit = 100) {
   return rows.results;
 }
 
+/* ---------- 读接口结果缓存（跨 isolate 持久） ----------
+ * D1 免费版每天 500 万 rows_read。看板全是全表聚合：一次 stats ≈ 4 万行，
+ * 每天 127 次就撞线（Cloudflare 官方用量分析实测）。
+ * 仅用 isolate 内存缓存无效（冷启动即失效、命中率极低），所以做两级：
+ *   L1 内存        —— 命中时 0 次 D1 读
+ *   L2 stats_cache —— 存在 D1 里，跨 isolate 共享；命中时只读 1 行
+ * 只有两级都 miss 才执行重聚合。TTL 内无论来多少次请求只算一次。
+ */
+const STATS_TTL_MS = 60 * 60 * 1000;     // 完整统计 1 小时 → 每天最多 24 次重算
+const PRESENCE_TTL_MS = 3 * 60 * 1000;   // 在线状态 3 分钟
+const L1_MAX_TTL_MS = 60 * 1000;         // 内存缓存最多持有 1 分钟
+// 按 D1 绑定隔离，避免同一进程里多个数据库（或测试环境）串缓存
+const l1Caches = new WeakMap();           // env.DB -> Map(name -> { until, value })
+function l1For(env) {
+  let m = l1Caches.get(env.DB);
+  if (!m) { m = new Map(); l1Caches.set(env.DB, m); }
+  return m;
+}
+
+async function withCache(env, name, ttlMs, producer, persist = true) {
+  const now = Date.now();
+  // L1 只短暂持有：过期后会去读 L2（仅 1 行），从而感知其他 isolate 做的缓存失效。
+  // 若 L1 也持有 1 小时，别的 isolate 删掉 L2 后本机仍会返回旧数据直到 TTL 结束。
+  // persist=false（presence）没有 L2，L1 只能自己撑满整个 TTL。
+  const l1TtlMs = persist ? Math.min(ttlMs, L1_MAX_TTL_MS) : ttlMs;
+  const l1Cache = l1For(env);
+  const l1 = l1Cache.get(name);
+  if (l1 && l1.until > now) return l1.value;
+
+  // L2：跨 isolate 持久缓存，命中只花 1 行读取
+  if (persist) {
+    try {
+      const row = await env.DB.prepare(
+        'SELECT value, updated_at FROM stats_cache WHERE key = ?'
+      ).bind(name).first();
+      if (row) {
+        const age = now - Date.parse(row.updated_at);
+        if (Number.isFinite(age) && age < ttlMs) {
+          const value = JSON.parse(row.value);
+          l1Cache.set(name, { until: now + l1TtlMs, value });
+          return value;
+        }
+      }
+    } catch { /* 表未就绪时静默降级到重算 */ }
+  }
+
+  const value = await producer();
+  l1Cache.set(name, { until: now + l1TtlMs, value });
+  if (persist) {
+    try {
+      await env.DB.prepare(
+        `INSERT INTO stats_cache (key, value, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      ).bind(name, JSON.stringify(value), new Date(now).toISOString()).run();
+    } catch { /* 缓存写失败不影响主流程 */ }
+  }
+  return value;
+}
+
+async function invalidateCache(env, prefix) {
+  const l1Cache = l1For(env);
+  for (const k of l1Cache.keys()) {
+    if (!prefix || k.startsWith(prefix)) l1Cache.delete(k);
+  }
+  try {
+    if (prefix) await env.DB.prepare('DELETE FROM stats_cache WHERE key LIKE ?').bind(prefix + '%').run();
+    else await env.DB.prepare('DELETE FROM stats_cache').run();
+  } catch { /* ignore */ }
+}
+
 /* ---------- 接口路由 ---------- */
 async function handleApi(request, env, url) {
   const path = url.pathname;
@@ -406,13 +519,18 @@ async function handleApi(request, env, url) {
       contact: (body.contact || '').toString().slice(0, 300),
       ua: (request.headers.get('user-agent') || '').slice(0, 300),
     });
+    await invalidateCache(env, 'board');   // 新留言要立即可见
+    await invalidateCache(env, 'stats');   // KPI 里的待处理反馈数
     return json({ ok: true, id });
   }
 
   // 公开留言板：任何人可读，仅返回可公开字段（不含联系方式 / IP / UA / vid）
   if (path === '/api/board' && method === 'GET') {
     const limit = Number(url.searchParams.get('limit') || 100);
-    return json({ list: await listPublicBoard(env, limit) });
+    // limit 进 key：否则 ?limit=1 与 ?limit=100 会互相串缓存。
+    // 前缀仍为 board，invalidateCache(env, 'board') 的 LIKE 'board%' 能一并清掉。
+    const n = Math.min(Math.max(Number(limit) || 100, 1), 200);
+    return json({ list: await withCache(env, 'board:' + n, PRESENCE_TTL_MS, () => listPublicBoard(env, n)) });
   }
 
   // 后台接口
@@ -430,10 +548,17 @@ async function handleApi(request, env, url) {
       await env.DB.prepare('DELETE FROM sessions WHERE token = ?').bind(token).run();
       return json({ ok: true });
     }
-    if (path === '/api/admin/stats') return json(await getDashboard(env));
-    // 轻量：只查在线人数与城市分布，走 last_seen 索引，读数极低，供前端每 60 秒轮询
-    if (path === '/api/admin/presence') return json(await getLivePresence(env));
-    if (path === '/api/admin/lectures') return json({ list: await getLectureRanking(env, 100) });
+    // 重查询走持久缓存：TTL 内不论被调用多少次，只真正查库一次
+    if (path === '/api/admin/stats') {
+      return json(await withCache(env, 'stats', STATS_TTL_MS, () => getDashboard(env)));
+    }
+    // 在线状态：轻量查询，只在内存缓存，不写 D1（避免额外写入）
+    if (path === '/api/admin/presence') {
+      return json(await withCache(env, 'presence', PRESENCE_TTL_MS, () => getLivePresence(env), false));
+    }
+    if (path === '/api/admin/lectures') {
+      return json({ list: await withCache(env, 'lectures', STATS_TTL_MS, () => getLectureRanking(env, 100)) });
+    }
     if (path === '/api/admin/visitors') {
       const vid = url.searchParams.get('vid');
       const limit = Number(url.searchParams.get('limit') || 100);
@@ -449,6 +574,7 @@ async function handleApi(request, env, url) {
       const body = await readBody(request);
       const status = ['done', 'ignored', 'new'].includes(body.status) ? body.status : 'new';
       await setFeedbackStatus(env, Number(fbMatch[1]), status);
+      await invalidateCache(env, 'board'); await invalidateCache(env, 'stats');
       return json({ ok: true });
     }
     // 管理员回复：需要管理密码（env.ADMIN_PASSWORD），保证仅管理员可回复
@@ -461,6 +587,7 @@ async function handleApi(request, env, url) {
         return json({ error: 'bad_password', message: '管理密码错误' }, 401);
       }
       await setFeedbackReply(env, Number(replyMatch[1]), body.reply);
+      await invalidateCache(env, 'board'); await invalidateCache(env, 'stats');
       return json({ ok: true });
     }
     return json({ error: 'not found' }, 404);

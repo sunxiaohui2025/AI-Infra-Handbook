@@ -78,7 +78,12 @@ fs.writeFileSync(p,t);
 echo "    ✓ 已写入 wrangler.jsonc"
 
 echo "==> 应用 D1 表结构"
-$WRANGLER d1 execute "$D1_NAME" --remote --file="$SITE_DIR/admin/schema.sql"
+# Worker 的 ensureTables() 会在首次请求自动建表/补列/建索引，所以这一步失败不阻断部署。
+# 典型场景：D1 当日 rows_read 额度耗尽时，CREATE INDEX 读全表会失败并让 wrangler 返回非零。
+# set -e 下若不加容错，会把整个部署卡在建表这一步。
+if ! $WRANGLER d1 execute "$D1_NAME" --remote --file="$SITE_DIR/admin/schema.sql"; then
+  echo "    ⚠️ 表结构应用失败（Worker 会在首次请求自动补齐），继续部署" >&2
+fi
 
 echo "==> 设置后台口令（ADMIN_PASSWORD）"
 if [ -z "$ADMIN_PASSWORD" ]; then

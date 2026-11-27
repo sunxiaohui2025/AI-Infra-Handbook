@@ -205,12 +205,36 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   assert('迁移后 pageviews 有 dwell 列', cols.includes('dwell'), cols.join(','));
   const row = old.prepare(`SELECT dwell FROM pageviews WHERE vid = 'm1'`).get();
   assert('迁移后 dwell 默认 0', row && row.dwell === 0, JSON.stringify(row));
+  const meta = old.prepare(`SELECT v FROM schema_meta WHERE k = 'schema'`).get();
+  assert('迁移后写入 schema_meta 版本 2', meta && meta.v === 2, JSON.stringify(meta));
+  const idx = old.prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_pv_ts_vid_dwell'`).get();
+  assert('补列后才建成依赖 dwell 的覆盖索引', !!idx, JSON.stringify(idx));
+  const cacheTbl = old.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'stats_cache'`).get();
+  assert('迁移后补建 stats_cache 表', !!cacheTbl, JSON.stringify(cacheTbl));
+
+  // 版本已是最新时，新的 isolate 必须直接跳过全部 DDL（旧 bug：每次请求都跑 ALTER）。
+  // 把版本改成 999：若仍在跑初始化，末尾会把版本写回 2。
+  old.prepare(`UPDATE schema_meta SET v = 999 WHERE k = 'schema'`).run();
+  const oldEnv2 = {
+    DB: makeMockD1(old),
+    ASSETS: { fetch: () => new Response('static', { status: 200 }) },
+    ADMIN_PASSWORD: 'fuyao',
+  };
+  // 注意用 /api/board 而非 /api/health：health 在 ensureTables 之前就返回了
+  const rr2 = await workerFresh.fetch(new Request('https://example.com/api/board'), oldEnv2);
+  assert('版本已最新时请求正常', rr2.status === 200, 'status=' + rr2.status);
+  const meta2 = old.prepare(`SELECT v FROM schema_meta WHERE k = 'schema'`).get();
+  assert('新 isolate 跳过重复 DDL', meta2 && meta2.v === 999, 'v=' + (meta2 && meta2.v));
 }
 
 // 12. 真实地理位置：模拟 Cloudflare request.cf，验证按城市聚合到地图节点
+//     用独立内存库：stats 结果会持久化到 D1 的 stats_cache（跨 isolate 共享），
+//     复用主库会命中前面的旧快照，这里要验证的是全新隔离环境下的真实聚合。
 {
+  const geoDb = new DatabaseSync(':memory:');
+  geoDb.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
   const geoEnv = {
-    DB: makeMockD1(db),
+    DB: makeMockD1(geoDb),
     ASSETS: { fetch: () => new Response('static', { status: 200 }) },
     ADMIN_PASSWORD: 'fuyao',
   };
@@ -263,6 +287,77 @@ assert('站点路径走 ASSETS → 200', (await call('GET', '/')).status === 200
   assert('D1 异常 → 429', res.status === 429, 'status=' + res.status);
   assert('返回可读错误码', data.error === 'd1_read_quota_exceeded', JSON.stringify(data));
   assert('错误信息含中文提示', /额度/.test(String(data.message || '')), JSON.stringify(data.message));
+}
+
+// 14. 两级缓存：TTL 内不重算、跨 isolate 命中 L2、写操作失效、limit 不串缓存
+{
+  const cacheDb = new DatabaseSync(':memory:');
+  cacheDb.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  // 标记为最新 schema，让每个新 env 跳过 DDL，专注观察全表聚合次数
+  cacheDb.exec(`INSERT INTO schema_meta (k, v) VALUES ('schema', 2)`);
+  const base = makeMockD1(cacheDb);
+  let heavy = 0; // 含 COUNT() 且扫 pageviews 的全表聚合执行次数
+  // 每个 env 都是新对象 → 模拟不同 isolate（各自独立的 L1 内存缓存）
+  const mkEnv = () => ({
+    DB: {
+      prepare(sql) {
+        if (/FROM pageviews/i.test(sql) && /COUNT\(/i.test(sql)) heavy++;
+        return base.prepare(sql);
+      },
+      batch: (stmts) => base.batch(stmts),
+    },
+    ASSETS: { fetch: () => new Response('static', { status: 200 }) },
+    ADMIN_PASSWORD: 'x',
+  });
+  const hit = async (e, path, method = 'GET', body) => {
+    const res = await worker.fetch(new Request('https://example.com' + path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: body ? JSON.stringify(body) : undefined,
+    }), e);
+    return { status: res.status, data: await res.json().catch(() => null) };
+  };
+
+  const eA = mkEnv();
+  const first = await hit(eA, '/api/admin/stats');
+  assert('缓存用例 stats 返回 200', first.status === 200, 'status=' + first.status);
+  const afterFirst = heavy;
+  assert('首次 stats 触发全表聚合', afterFirst > 0, 'heavy=' + afterFirst);
+  const sameIso = await hit(eA, '/api/admin/stats');
+  assert('同 isolate 二次请求命中内存缓存(0 次重算)', heavy === afterFirst, 'heavy=' + heavy);
+  assert('缓存返回一致结果', sameIso.data.kpi.totalPv === first.data.kpi.totalPv);
+
+  const eB = mkEnv();
+  const across = await hit(eB, '/api/admin/stats');
+  assert('跨 isolate 命中 D1 持久缓存(0 次重算)', heavy === afterFirst, 'heavy=' + heavy);
+  assert('跨 isolate 结果一致', across.data.kpi.totalPv === first.data.kpi.totalPv);
+  const cachedRow = cacheDb.prepare(`SELECT value, updated_at FROM stats_cache WHERE key = 'stats'`).get();
+  assert('stats 结果已持久化到 stats_cache', !!cachedRow && !!JSON.parse(cachedRow.value).kpi,
+    JSON.stringify(cachedRow && cachedRow.updated_at));
+
+  const w = await hit(eB, '/api/feedback', 'POST', { vid: 'c1', content: '缓存失效测试' });
+  assert('写反馈成功', w.status === 200, 'status=' + w.status);
+  const eC = mkEnv();
+  const afterWrite = await hit(eC, '/api/admin/stats');
+  assert('写操作后缓存失效并重新聚合', heavy > afterFirst, 'heavy=' + heavy);
+  assert('新反馈计入 KPI', afterWrite.data.kpi.newFeedback >= 1,
+    'newFeedback=' + afterWrite.data.kpi.newFeedback);
+
+  await hit(eC, '/api/feedback', 'POST', { vid: 'c2', content: '第二条' });
+  await hit(eC, '/api/feedback', 'POST', { vid: 'c3', content: '第三条' });
+  const one = await hit(eC, '/api/board?limit=1');
+  const many = await hit(eC, '/api/board?limit=100');
+  assert('board?limit=1 只返回 1 条', one.data.list.length === 1, 'len=' + one.data.list.length);
+  assert('board?limit=100 返回全部(缓存未串)', many.data.list.length === 3, 'len=' + many.data.list.length);
+
+  // 排行榜用 MAX(ts) + bare column 一次扫描取最新标题，替代原来的相关子查询（N+1）
+  cacheDb.exec(`INSERT INTO pageviews (vid, path, title, ua, ref, ts, ip, dwell) VALUES
+    ('x1', '/l/77', '旧标题', '', '', '2026-01-01T00:00:00.000Z', '', 0),
+    ('x1', '/l/77', '新标题', '', '', '2026-01-02T00:00:00.000Z', '', 10)`);
+  const lec = await hit(mkEnv(), '/api/admin/lectures');
+  const item = (lec.data.list || []).find((x) => x.path === '/l/77');
+  assert('排行榜 title 取最新一条(MAX(ts) bare column)', item && item.title === '新标题', JSON.stringify(item));
+  assert('排行榜聚合正确(views=2, dwell=10)', item && item.views === 2 && item.dwell === 10, JSON.stringify(item));
 }
 
 console.log('');

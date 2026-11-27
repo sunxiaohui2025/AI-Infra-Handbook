@@ -38,14 +38,20 @@ ADMIN_PASSWORD=你的口令 PORT=8787 node server.js
 | 板块 | 内容 |
 |---|---|
 | 总览 | 总 PV/UV、今日、近 7 天、回访率、待处理反馈；近 30 天 PV 走势图（柱顶显示数值） |
-| 全球学习地图 | 按访客 IP 归属地聚合「最近 30 分钟在线」读者，信标落在真实经纬度上；每 60 秒轮询刷新。Cloudflare 用 `request.cf`，Node 版读取网关注入的 `CF-IPCountry` / `X-Vercel-Ip-*` 等请求头；取不到地理位置的访客不计入地图（不造假） |
+| 全球学习地图 | 按访客 IP 归属地聚合「最近 30 分钟在线」读者，信标落在真实经纬度上；每 3 分钟轮询刷新。Cloudflare 用 `request.cf`，Node 版读取网关注入的 `CF-IPCountry` / `X-Vercel-Ip-*` 等请求头；取不到地理位置的访客不计入地图（不造假） |
 
-> **D1 用量优化**：完整统计 `GET /api/admin/stats` 含多次全表聚合，**只在首屏加载一次**；定时（60 秒）只调轻量的 `GET /api/admin/presence`（在线人数 + 城市分布，走 `visitors.last_seen` 索引）。这样免费版 D1 的 `rows_read` 不会被高频轮询耗尽。`visitors.last_seen/first_seen/visit_count` 均已建索引。
+> **D1 用量优化（免费版每天 500 万 `rows_read`）**：
+> - 排行榜改用 `MAX(ts)` + bare column 一次扫描取最新标题，去掉了原来每个分组都再查一次的相关子查询（官方用量分析里单次读 16,328 行、占 41% 的头号消耗）。
+> - 重查询走两级缓存：L1 内存（最多 1 分钟，命中 0 次读）+ L2 `stats_cache` 表（`stats`/`lectures` 1 小时、留言板 3 分钟，跨 isolate 共享，命中只读 1 行）。刷新再频繁，TTL 内也只重算一次。
+> - `schema_meta` 记录结构版本，建表/补列/建索引只在版本升级时执行一次（此前每次请求都跑 `ALTER`，24 小时静默失败 600+ 次）。
+> - 完整统计 `GET /api/admin/stats` 只在首屏加载一次；定时（3 分钟）只调轻量的 `GET /api/admin/presence`；前端停留心跳放宽到 60 秒。
+> - 写留言、管理员回复、改状态会立即清掉相关缓存，留言板和待处理数不会滞后。`visitors.last_seen/first_seen/visit_count` 与 `pageviews(ts, vid, dwell)` 均已建索引。
+
 | 每讲热度 | 按 `/l/讲号` 的浏览量排行 + 平均停留时长，可看哪些讲最受欢迎、哪几讲大家停留最久 |
 | 访客明细 | 匿名 ID 列表（IP/首访/最近/回访次数/浏览量/停留），点一行展开浏览轨迹（含每页停留） |
-| 反馈意见 | 用户通过 `/feedback` 提交的反馈，可标记 处理/忽略/重置 |
+| 反馈意见（公开留言板） | 用户通过 `/feedback` 提交的留言，所有人可见内容和管理员逐条回复；回复需校验 `ADMIN_PASSWORD`，可标记 处理/忽略/重置。公开的 `/api/board` 不返回联系方式、IP、UA、`vid` |
 
-> **停留时长**：前端页面加载后每 20 秒心跳上报一次 `/api/dwell`（离开/切后台时补发），只计“页面可见”的时间。后端在 `pageviews.dwell` 列累加秒数，热度/总览/访客明细都带 `dwell`（总秒）与 `avgDwell`（平均秒）。
+> **停留时长**：前端页面加载后每 60 秒心跳上报一次 `/api/dwell`（离开/切后台时补发剩余时长），只计“页面可见”的时间。上报的是距上次心跳的真实秒数，放宽间隔不影响累计值，但 D1 写入次数降到原来的 1/3。后端在 `pageviews.dwell` 列累加秒数，热度/总览/访客明细都带 `dwell`（总秒）与 `avgDwell`（平均秒）。
 
 ## 接口
 
@@ -165,4 +171,4 @@ node admin/worker-test.mjs
 - 另记**最近一次客户端 IP**（服务端取，含反代转发链）；本地访问通常显示 `::1`/`127.0.0.1`，线上部署后显示真实公网 IP。若需更严格的匿名，可去掉 `server.js` 里的 `getClientIp`。
 
 - 回访判定：距上次浏览超过 30 分钟算一次新的回访。
-- 表：`visitors`（访客），`pageviews`（每次浏览），`feedback`（反馈），`sessions`（后台登录会话）。
+- 表：`visitors`（访客），`pageviews`（每次浏览），`feedback`（反馈），`sessions`（后台登录会话），`stats_cache`（看板结果缓存），`schema_meta`（表结构版本号）。缓存表只存派生结果，随时可清空，不影响原始访问数据；备份时整库导出即可，恢复后缓存过期会自动重算。

@@ -59,3 +59,19 @@ CREATE INDEX IF NOT EXISTS idx_fb_status ON feedback(status);
 CREATE INDEX IF NOT EXISTS idx_v_last_seen  ON visitors(last_seen);
 CREATE INDEX IF NOT EXISTS idx_v_first_seen ON visitors(first_seen);
 CREATE INDEX IF NOT EXISTS idx_v_visit_count ON visitors(visit_count);
+-- 跨 isolate 持久缓存表 + schema 版本表（Worker 端用于避免每次请求跑 DDL）
+CREATE TABLE IF NOT EXISTS stats_cache (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS schema_meta (
+  k TEXT PRIMARY KEY,
+  v INTEGER NOT NULL
+);
+
+-- 覆盖索引：按天序列 / WHERE ts>=? 可直接从索引取 vid、dwell，避免回表。
+-- 注意：它引用了 dwell 列。若是给「早期旧库」补跑本文件，需先单独执行
+--   ALTER TABLE pageviews ADD COLUMN dwell INTEGER NOT NULL DEFAULT 0;
+-- 正常部署无需手动处理：Worker 的 ensureTables() 会先补列、再建索引。
+CREATE INDEX IF NOT EXISTS idx_pv_ts_vid_dwell ON pageviews(ts, vid, dwell);
